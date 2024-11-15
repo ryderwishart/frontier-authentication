@@ -28,17 +28,51 @@ interface ViewChangeMessage {
     view: 'login' | 'register';
 }
 
-type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChangeMessage;
+interface StatusMessage {
+    type: 'status';
+    authStatus: 'authenticated' | 'unauthenticated';
+    connectionStatus: 'connected' | 'disconnected';
+}
+
+type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChangeMessage | StatusMessage;
 
 export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private currentView: 'login' | 'register' = 'login';
+    private connectionStatus: 'connected' | 'disconnected' = 'disconnected';
 
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly authProvider: AuthenticationProvider,
         private apiEndpoint: string
-    ) { }
+    ) {
+        this.authProvider.onDidChangeAuthentication(() => {
+            this.updateStatus();
+        });
+
+        this.checkConnection();
+        setInterval(() => this.checkConnection(), 30000);
+    }
+
+    private async checkConnection(): Promise<void> {
+        try {
+            const response = await fetch(`${this.apiEndpoint}/health`);
+            this.connectionStatus = response.ok ? 'connected' : 'disconnected';
+        } catch {
+            this.connectionStatus = 'disconnected';
+        }
+        this.updateStatus();
+    }
+
+    private updateStatus(): void {
+        if (this._view) {
+            this._view.webview.postMessage({
+                type: 'status',
+                authStatus: this.authProvider.isAuthenticated ? 'authenticated' : 'unauthenticated',
+                connectionStatus: this.connectionStatus
+            });
+        }
+    }
 
     resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -52,6 +86,8 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         };
 
         webviewView.webview.html = this.getHtmlContent(webviewView.webview);
+
+        this.updateStatus();
 
         webviewView.webview.onDidReceiveMessage(async (data: WebviewMessage) => {
             switch (data.type) {
@@ -174,6 +210,16 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                 <title>Authentication</title>
             </head>
             <body>
+                <div class="status-bar">
+                    <div class="status-item">
+                        <span id="authStatus" class="status-indicator"></span>
+                        <span class="status-text">Authentication</span>
+                    </div>
+                    <div class="status-item">
+                        <span id="connectionStatus" class="status-indicator"></span>
+                        <span class="status-text">Server Connection</span>
+                    </div>
+                </div>
                 <div class="container ${this.currentView}">
                     <!-- Login Form -->
                     <form id="loginForm" class="auth-form ${this.currentView === 'login' ? 'active' : ''}">
@@ -266,6 +312,15 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         if (message.type === 'error') {
                             errorDiv.textContent = message.message;
                         }
+                        if (message.type === 'status') {
+                            const authIndicator = document.getElementById('authStatus');
+                            const connectionIndicator = document.getElementById('connectionStatus');
+                            
+                            authIndicator.className = 'status-indicator ' + 
+                                (message.authStatus === 'authenticated' ? 'connected' : '');
+                            connectionIndicator.className = 'status-indicator ' + 
+                                (message.connectionStatus === 'connected' ? 'connected' : '');
+                        }
                     });
                 </script>
 
@@ -334,6 +389,32 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     .switch-view a:hover {
                         color: var(--vscode-textLink-activeForeground);
                         text-decoration: underline;
+                    }
+                    .status-bar {
+                        display: flex;
+                        justify-content: space-between;
+                        padding: 8px;
+                        background: var(--vscode-sideBar-background);
+                        border-bottom: 1px solid var(--vscode-panel-border);
+                        margin-bottom: 15px;
+                    }
+                    .status-item {
+                        display: flex;
+                        align-items: center;
+                        gap: 6px;
+                    }
+                    .status-indicator {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 50%;
+                        background: var(--vscode-errorForeground);
+                    }
+                    .status-indicator.connected {
+                        background: var(--vscode-testing-iconPassed);
+                    }
+                    .status-text {
+                        font-size: 11px;
+                        color: var(--vscode-descriptionForeground);
                     }
                 </style>
             </body>
