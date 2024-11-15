@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { FrontierAuthProvider } from './auth/AuthenticationProvider';
 import { registerCommands } from './commands';
 import { AuthWebviewProvider } from './webviews/authWebviewProvider';
+import { registerGitLabCommands } from './commands/gitlabCommands';
 
 let authenticationProvider: FrontierAuthProvider;
 
@@ -31,11 +32,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	// Register webview providers
 	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider('codex.auth', authViewProvider)
+		vscode.window.registerWebviewViewProvider('codex.auth', authViewProvider, {
+			webviewOptions: {
+				retainContextWhenHidden: true
+			}
+		})
 	);
 
 	// Register commands
-	registerCommands(context, authenticationProvider, API_ENDPOINT);
+	registerCommands(context, authenticationProvider);
+	registerGitLabCommands(context, authenticationProvider);
 
 	// Register status bar item
 	const statusBarItem = vscode.window.createStatusBarItem(

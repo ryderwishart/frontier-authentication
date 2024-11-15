@@ -1,15 +1,11 @@
 import * as vscode from 'vscode';
-import { AuthenticationProvider } from './auth/AuthenticationProvider';
-import { AuthWebviewProvider } from './webviews/authWebviewProvider';
+import { FrontierAuthProvider } from '../auth/AuthenticationProvider';
+import { AuthWebviewProvider } from '../webviews/authWebviewProvider';
 
 export function registerCommands(
     context: vscode.ExtensionContext,
-    authProvider: AuthenticationProvider,
-    api_endpoint: string
+    authProvider: FrontierAuthProvider,
 ) {
-    // Register webview provider
-    const authWebviewProvider = new AuthWebviewProvider(context.extensionUri, authProvider, api_endpoint);
-
     context.subscriptions.push(
 
         // Register commands

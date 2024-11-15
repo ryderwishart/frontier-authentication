@@ -4,6 +4,10 @@ import { getNonce } from '../utils';
 import fetch, { Response } from 'node-fetch';
 import { URLSearchParams } from 'url';
 
+const INITIAL_POLLING_INTERVAL = 100;
+const POLLING_INTERVAL_INCREMENT = 1000;
+const AUTHENTICATED_POLLING_INTERVAL = 30000;
+
 // Combined message types
 interface LoginMessage {
     type: 'login';
@@ -65,7 +69,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         });
 
         this.checkConnection();
-        setInterval(() => this.checkConnection(), 30000);
+        setInterval(() => this.checkConnection(), AUTHENTICATED_POLLING_INTERVAL);
     }
 
     private async checkConnection(): Promise<void> {
@@ -261,6 +265,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                 });
             }
         }
+        this.updateStatus();
     }
 
     private getHtmlContent(webview: vscode.Webview): string {

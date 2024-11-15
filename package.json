@@ -42,6 +42,11 @@
       {
         "command": "frontier.register",
         "title": "Register"
+      },
+      {
+        "command": "frontier.createGitLabProject",
+        "title": "Create GitLab Project",
+        "category": "Frontier"
       }
     ],
     "authentication": [
