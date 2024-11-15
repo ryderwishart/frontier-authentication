@@ -106,6 +106,8 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this.getHtmlContent(webviewView.webview);
 
+        this.checkConnection();
+        this.fetchGitLabInfo();
         this.updateStatus();
 
         webviewView.webview.onDidReceiveMessage(async (data: WebviewMessage) => {
@@ -222,34 +224,36 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
     private async fetchGitLabInfo(): Promise<void> {
         try {
-            // First get the user info to ensure we're authenticated
-            const meResponse = await fetch(`${this.apiEndpoint}/auth/me`, {
-                headers: {
-                    'Authorization': `Bearer ${await this.authProvider.getToken()}`,
-                    'Accept': 'application/json',
-                }
-            });
-            await this.handleResponse(meResponse);
+            const token = await this.authProvider.getToken();
+            if (!token) {
+                return;
+            }
 
-            // Then fetch GitLab info
             const gitlabResponse = await fetch(`${this.apiEndpoint}/auth/gitlab/info`, {
                 headers: {
-                    'Authorization': `Bearer ${await this.authProvider.getToken()}`,
+                    'Authorization': `Bearer ${token}`,
                     'Accept': 'application/json',
                 }
             });
 
             const result = await this.handleResponse(gitlabResponse);
+
+            const sanitizedInfo = process.env.NODE_ENV === 'development'
+                ? result  // Show everything in development
+                : {
+                    username: result.username,
+                    project_count: result.project_count,
+                    // Other safe fields
+                };
+
             if (this._view) {
                 this._view.webview.postMessage({
                     type: 'gitlabInfo',
-                    info: result
+                    info: sanitizedInfo
                 });
             }
         } catch (error) {
-            // Log the error but don't show to user as this is supplementary info
             console.log('GitLab info fetch failed (non-critical):', error);
-            // Clear any existing GitLab info from the view
             if (this._view) {
                 this._view.webview.postMessage({
                     type: 'gitlabInfo',
@@ -399,12 +403,20 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     body {
                         padding: 15px;
                         font-family: var(--vscode-font-family);
+                        max-width: 100%;
+                        box-sizing: border-box;
+                        margin: 0;
                     }
                     .container {
                         position: relative;
+                        width: 100%;
+                        max-width: 100%;
+                        box-sizing: border-box;
                     }
                     .auth-form {
                         display: none;
+                        width: 100%;
+                        max-width: 100%;
                     }
                     .auth-form.active {
                         display: block;
@@ -412,14 +424,17 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     h2 {
                         margin-bottom: 15px;
                         color: var(--vscode-foreground);
+                        word-wrap: break-word;
                     }
                     .info-text {
                         font-size: 12px;
                         color: var(--vscode-descriptionForeground);
                         margin-bottom: 15px;
+                        word-wrap: break-word;
                     }
                     .form-group {
                         margin-bottom: 15px;
+                        width: 100%;
                     }
                     input {
                         width: 100%;
@@ -427,11 +442,13 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         border: 1px solid var(--vscode-input-border);
                         background: var(--vscode-input-background);
                         color: var(--vscode-input-foreground);
+                        box-sizing: border-box;
                     }
                     .password-requirements {
                         font-size: 11px;
                         color: var(--vscode-descriptionForeground);
                         margin-top: 5px;
+                        word-wrap: break-word;
                     }
                     button {
                         width: 100%;
@@ -440,6 +457,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         color: var(--vscode-button-foreground);
                         border: none;
                         cursor: pointer;
+                        box-sizing: border-box;
                     }
                     button:hover {
                         background: var(--vscode-button-hoverBackground);
@@ -447,11 +465,13 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     .error {
                         color: var(--vscode-errorForeground);
                         margin-top: 10px;
+                        word-wrap: break-word;
                     }
                     .switch-view {
                         margin-top: 15px;
                         text-align: center;
                         font-size: 12px;
+                        width: 100%;
                     }
                     .switch-view a {
                         color: var(--vscode-textLink-foreground);
@@ -468,17 +488,21 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         background: var(--vscode-sideBar-background);
                         border-bottom: 1px solid var(--vscode-panel-border);
                         margin-bottom: 15px;
+                        width: 100%;
+                        box-sizing: border-box;
                     }
                     .status-item {
                         display: flex;
                         align-items: center;
                         gap: 6px;
+                        min-width: 0;
                     }
                     .status-indicator {
                         width: 8px;
                         height: 8px;
                         border-radius: 50%;
                         background: var(--vscode-errorForeground);
+                        flex-shrink: 0;
                     }
                     .status-indicator.connected {
                         background: var(--vscode-testing-iconPassed);
@@ -486,6 +510,9 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     .status-text {
                         font-size: 11px;
                         color: var(--vscode-descriptionForeground);
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
                     }
                     .gitlab-info {
                         display: none;
@@ -493,14 +520,18 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         padding: 10px;
                         background: var(--vscode-editor-background);
                         border: 1px solid var(--vscode-panel-border);
+                        width: 100%;
+                        box-sizing: border-box;
                     }
                     .info-section {
                         margin-bottom: 15px;
+                        width: 100%;
                     }
                     .info-section h3 {
                         margin: 0 0 10px 0;
                         font-size: 14px;
                         color: var(--vscode-foreground);
+                        word-wrap: break-word;
                     }
                     pre {
                         margin: 0;
@@ -511,6 +542,10 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         font-size: 12px;
                         overflow-x: auto;
                         color: var(--vscode-foreground);
+                        width: 100%;
+                        box-sizing: border-box;
+                        white-space: pre-wrap;
+                        word-wrap: break-word;
                     }
                 </style>
             </body>
