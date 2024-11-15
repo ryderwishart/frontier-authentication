@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AuthenticationProvider } from '../auth/AuthenticationProvider';
+import { FrontierAuthProvider } from '../auth/AuthenticationProvider';
 import { getNonce } from '../utils';
 import fetch, { Response } from 'node-fetch';
 import { URLSearchParams } from 'url';
@@ -57,7 +57,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
     constructor(
         private readonly extensionUri: vscode.Uri,
-        private readonly authProvider: AuthenticationProvider,
+        private readonly authProvider: FrontierAuthProvider,
         private apiEndpoint: string
     ) {
         this.authProvider.onDidChangeAuthentication(() => {
