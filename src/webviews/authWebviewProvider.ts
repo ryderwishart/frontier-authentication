@@ -34,7 +34,21 @@ interface StatusMessage {
     connectionStatus: 'connected' | 'disconnected';
 }
 
-type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChangeMessage | StatusMessage;
+// Add new interface for GitLab info
+interface GitLabInfo {
+    user_id: number;
+    username: string;
+    project_count: number;
+}
+
+// Add new message type for GitLab info
+interface GitLabInfoMessage {
+    type: 'gitlabInfo';
+    info: GitLabInfo;
+}
+
+// Update WebviewMessage type
+type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChangeMessage | StatusMessage | GitLabInfoMessage;
 
 export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
@@ -56,7 +70,12 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
     private async checkConnection(): Promise<void> {
         try {
-            const response = await fetch(`${this.apiEndpoint}/health`);
+            const response = await fetch(`${this.apiEndpoint}/auth/me`, {
+                headers: {
+                    'Authorization': `Bearer ${await this.authProvider.getToken()}`,
+                    'Accept': 'application/json'
+                }
+            });
             this.connectionStatus = response.ok ? 'connected' : 'disconnected';
         } catch {
             this.connectionStatus = 'disconnected';
@@ -126,6 +145,9 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             const result = await this.handleResponse(response);
             await this.authProvider.setToken((result as any).access_token);
             vscode.window.showInformationMessage('Successfully logged in!');
+
+            // Fetch GitLab info after successful login
+            await this.fetchGitLabInfo();
 
         } catch (error: unknown) {
             this.handleError(error, webviewView);
@@ -198,6 +220,45 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    private async fetchGitLabInfo(): Promise<void> {
+        try {
+            // First get the user info to ensure we're authenticated
+            const meResponse = await fetch(`${this.apiEndpoint}/auth/me`, {
+                headers: {
+                    'Authorization': `Bearer ${await this.authProvider.getToken()}`,
+                    'Accept': 'application/json',
+                }
+            });
+            await this.handleResponse(meResponse);
+
+            // Then fetch GitLab info
+            const gitlabResponse = await fetch(`${this.apiEndpoint}/auth/gitlab/info`, {
+                headers: {
+                    'Authorization': `Bearer ${await this.authProvider.getToken()}`,
+                    'Accept': 'application/json',
+                }
+            });
+
+            const result = await this.handleResponse(gitlabResponse);
+            if (this._view) {
+                this._view.webview.postMessage({
+                    type: 'gitlabInfo',
+                    info: result
+                });
+            }
+        } catch (error) {
+            // Log the error but don't show to user as this is supplementary info
+            console.log('GitLab info fetch failed (non-critical):', error);
+            // Clear any existing GitLab info from the view
+            if (this._view) {
+                this._view.webview.postMessage({
+                    type: 'gitlabInfo',
+                    info: null
+                });
+            }
+        }
+    }
+
     private getHtmlContent(webview: vscode.Webview): string {
         const nonce = getNonce();
 
@@ -221,6 +282,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     </div>
                 </div>
                 <div class="container ${this.currentView}">
+                    <div id="gitlabInfo" class="gitlab-info"></div>
                     <!-- Login Form -->
                     <form id="loginForm" class="auth-form ${this.currentView === 'login' ? 'active' : ''}">
                         <h2>Login</h2>
@@ -321,6 +383,15 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                             connectionIndicator.className = 'status-indicator ' + 
                                 (message.connectionStatus === 'connected' ? 'connected' : '');
                         }
+                        if (message.type === 'gitlabInfo') {
+                            const gitlabInfoDiv = document.getElementById('gitlabInfo');
+                            gitlabInfoDiv.innerHTML = 
+                                "<div class='info-section'>" +
+                                    "<h3>GitLab Account Info</h3>" +
+                                    "<pre>" + JSON.stringify(message.info, null, 2) + "</pre>" +
+                                "</div>";
+                            gitlabInfoDiv.style.display = 'block';
+                        }
                     });
                 </script>
 
@@ -415,6 +486,31 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     .status-text {
                         font-size: 11px;
                         color: var(--vscode-descriptionForeground);
+                    }
+                    .gitlab-info {
+                        display: none;
+                        margin-top: 20px;
+                        padding: 10px;
+                        background: var(--vscode-editor-background);
+                        border: 1px solid var(--vscode-panel-border);
+                    }
+                    .info-section {
+                        margin-bottom: 15px;
+                    }
+                    .info-section h3 {
+                        margin: 0 0 10px 0;
+                        font-size: 14px;
+                        color: var(--vscode-foreground);
+                    }
+                    pre {
+                        margin: 0;
+                        padding: 8px;
+                        background: var(--vscode-textBlockQuote-background);
+                        border-radius: 3px;
+                        font-family: var(--vscode-editor-font-family);
+                        font-size: 12px;
+                        overflow-x: auto;
+                        color: var(--vscode-foreground);
                     }
                 </style>
             </body>
