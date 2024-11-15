@@ -58,6 +58,8 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private currentView: 'login' | 'register' = 'login';
     private connectionStatus: 'connected' | 'disconnected' = 'disconnected';
+    private pollingInterval: number = INITIAL_POLLING_INTERVAL;
+    private pollingTimeout?: NodeJS.Timeout;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -66,10 +68,42 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     ) {
         this.authProvider.onDidChangeAuthentication(() => {
             this.updateStatus();
+            this.adjustPollingInterval();
         });
 
+        this.startPolling();
+    }
+
+    public refresh(): void {
+        this.updateStatus();
+    }
+
+    private startPolling(): void {
         this.checkConnection();
-        setInterval(() => this.checkConnection(), AUTHENTICATED_POLLING_INTERVAL);
+        this.scheduleNextPoll();
+    }
+
+    private scheduleNextPoll(): void {
+        if (this.pollingTimeout) {
+            clearTimeout(this.pollingTimeout);
+        }
+
+        this.pollingTimeout = setTimeout(() => {
+            this.checkConnection();
+            this.scheduleNextPoll();
+        }, this.pollingInterval);
+    }
+
+    private adjustPollingInterval(): void {
+        if (this.authProvider.isAuthenticated) {
+            this.pollingInterval = AUTHENTICATED_POLLING_INTERVAL;
+        } else {
+            // When not authenticated, start with initial interval and gradually increase
+            this.pollingInterval = Math.min(
+                this.pollingInterval + POLLING_INTERVAL_INCREMENT,
+                AUTHENTICATED_POLLING_INTERVAL
+            );
+        }
     }
 
     private async checkConnection(): Promise<void> {
@@ -80,11 +114,26 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     'Accept': 'application/json'
                 }
             });
-            this.connectionStatus = response.ok ? 'connected' : 'disconnected';
+
+            const newConnectionStatus = response.ok ? 'connected' : 'disconnected';
+            if (newConnectionStatus !== this.connectionStatus) {
+                this.connectionStatus = newConnectionStatus;
+                this.updateStatus();
+            }
+
+            // Reset polling interval on successful connection
+            if (response.ok) {
+                this.pollingInterval = AUTHENTICATED_POLLING_INTERVAL;
+            }
         } catch {
+            const wasConnected = this.connectionStatus === 'connected';
             this.connectionStatus = 'disconnected';
+            if (wasConnected) {
+                this.updateStatus();
+            }
+            // Reset to initial interval on connection failure
+            this.pollingInterval = INITIAL_POLLING_INTERVAL;
         }
-        this.updateStatus();
     }
 
     private updateStatus(): void {
@@ -110,9 +159,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this.getHtmlContent(webviewView.webview);
 
-        this.checkConnection();
-        this.fetchGitLabInfo();
-        this.updateStatus();
+        this.refresh();
 
         webviewView.webview.onDidReceiveMessage(async (data: WebviewMessage) => {
             switch (data.type) {
@@ -558,6 +605,9 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     public dispose() {
+        if (this.pollingTimeout) {
+            clearTimeout(this.pollingTimeout);
+        }
         if (this._view) {
             this._view = undefined;
         }
