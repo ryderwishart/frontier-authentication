@@ -43,6 +43,12 @@
         "command": "frontier.register",
         "title": "Register"
       }
+    ],
+    "authentication": [
+      {
+        "id": "frontier",
+        "label": "Frontier Authentication"
+      }
     ]
   },
   "scripts": {

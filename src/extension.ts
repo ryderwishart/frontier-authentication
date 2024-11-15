@@ -1,11 +1,11 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
-import { AuthenticationProvider } from './auth/AuthenticationProvider';
+import { FrontierAuthProvider } from './auth/AuthenticationProvider';
 import { registerCommands } from './commands';
 import { AuthWebviewProvider } from './webviews/authWebviewProvider';
 
-let authenticationProvider: AuthenticationProvider;
+let authenticationProvider: FrontierAuthProvider;
 
 // FIXME: let's gracefully handle offline (block login, for instance)
 // TODO: let's display status for the user - cloud sync available, AI online, etc.
@@ -16,7 +16,7 @@ let authenticationProvider: AuthenticationProvider;
 export async function activate(context: vscode.ExtensionContext) {
 	vscode.window.showInformationMessage('Activating Frontier Authentication extension');
 	// Initialize auth provider
-	authenticationProvider = new AuthenticationProvider(context);
+	authenticationProvider = new FrontierAuthProvider(context);
 
 	const API_ENDPOINT = 'https://api.frontierrnd.com/api/v1';
 	// const API_ENDPOINT = 'http://localhost:8000/api/v1';
@@ -56,7 +56,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 function updateStatusBar(
 	statusBarItem: vscode.StatusBarItem,
-	authProvider: AuthenticationProvider
+	authProvider: FrontierAuthProvider
 ) {
 	if (authProvider.isAuthenticated) {
 		statusBarItem.text = "$(check) Authenticated";
