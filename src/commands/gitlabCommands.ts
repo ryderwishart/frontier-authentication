@@ -42,33 +42,58 @@ export function registerGitLabCommands(
                 );
                 if (!visibility) { return; }
 
-                // Get organization (optional)
-                const orgs = await gitlabService.listOrganizations();
-                if (orgs.length > 0) {
-                    const orgItems = [
-                        { label: 'Personal Project', id: undefined },
-                        ...orgs.map(org => ({ label: org.name, id: org.id }))
-                    ];
-
-                    const selectedOrg = await vscode.window.showQuickPick(
-                        orgItems,
-                        { placeHolder: 'Select organization (optional)' }
-                    );
-
+                // Try to create as personal project first
+                try {
                     const project = await gitlabService.createProject({
                         name,
                         description,
                         visibility: visibility as 'private' | 'internal' | 'public',
-                        organizationId: selectedOrg?.id,
+                        // Don't specify organizationId for personal projects
                     });
 
                     vscode.window.showInformationMessage(
                         `Project created successfully! URL: ${project.url}`
                     );
+                    return;
+                } catch (error) {
+                    // If personal project creation fails, try with organization
+                    // Only if the error isn't about authentication
+                    if (error instanceof Error && !error.message.includes('authentication failed')) {
+                        const orgs = await gitlabService.listOrganizations();
+
+                        // Only proceed with organization selection if we have orgs
+                        if (orgs.length > 0) {
+                            const selectedOrg = await vscode.window.showQuickPick(
+                                orgs.map(org => ({ label: org.name, id: org.id })),
+                                {
+                                    placeHolder: 'Personal project creation failed. Select an organization to try there instead',
+                                    title: 'Select Organization'
+                                }
+                            );
+
+                            if (selectedOrg) {
+                                const project = await gitlabService.createProject({
+                                    name,
+                                    description,
+                                    visibility: visibility as 'private' | 'internal' | 'public',
+                                    organizationId: selectedOrg.id
+                                });
+
+                                vscode.window.showInformationMessage(
+                                    `Project created successfully! URL: ${project.url}`
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    // If we get here, both attempts failed or were cancelled
+                    throw error;
                 }
             } catch (error) {
                 if (error instanceof Error) {
-                    vscode.window.showErrorMessage(`Failed to create project: ${error.message}`);
+                    vscode.window.showErrorMessage(
+                        `Failed to create project: ${error.message}`
+                    );
                 }
             }
         })

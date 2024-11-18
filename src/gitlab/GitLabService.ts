@@ -8,6 +8,15 @@ export interface GitLabProjectOptions {
     organizationId?: string;
 }
 
+interface GitLabGroup {
+    id: number;
+    name: string;
+    path: string;
+    full_path: string;
+    parent_id: number | null;
+    visibility: 'private' | 'internal' | 'public';
+}
+
 export class GitLabService {
     private gitlabBaseUrl: string;
     private gitlabToken: string | undefined;
@@ -75,30 +84,43 @@ export class GitLabService {
         }
     }
 
-    async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
+    async listOrganizations(): Promise<Array<{ id: string; name: string; path: string }>> {
         if (!this.gitlabToken) {
             throw new Error('GitLab token not available');
         }
 
         try {
-            const response = await fetch(`${this.gitlabBaseUrl}/api/v4/groups`, {
+            const params = new URLSearchParams({
+                min_access_level: '20',
+                owned: 'true'
+            }).toString();
+            
+            const response = await fetch(`${this.gitlabBaseUrl}/api/v4/groups?${params}`, {
                 headers: {
                     'Authorization': `Bearer ${this.gitlabToken}`,
-                },
+                    'Content-Type': 'application/json',
+                }
             });
 
-            if (!response.ok) {
-                throw new Error('Failed to fetch organizations');
+            if (response.status === 403 || response.status === 401) {
+                console.log('User does not have permission to list groups, continuing without organizations');
+                return [];
             }
 
-            const groups = await response.json();
-            return groups.map((group: any) => ({
-                id: group.id,
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(`Failed to fetch organizations: ${error.message || response.statusText}`);
+            }
+
+            const groups: GitLabGroup[] = await response.json();
+            return groups.map(group => ({
+                id: group.id.toString(),
                 name: group.name,
+                path: group.path
             }));
         } catch (error) {
-            console.error('Failed to list organizations:', error);
-            throw error;
+            console.log('Failed to list organizations (non-critical):', error);
+            return [];
         }
     }
 } 
