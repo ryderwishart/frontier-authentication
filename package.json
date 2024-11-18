@@ -47,6 +47,10 @@
         "command": "frontier.createGitLabProject",
         "title": "Create GitLab Project",
         "category": "Frontier"
+      },
+      {
+        "command": "frontier.confirmLogout",
+        "title": "Logout from Frontier"
       }
     ],
     "authentication": [

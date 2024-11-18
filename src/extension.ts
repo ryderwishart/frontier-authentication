@@ -5,8 +5,13 @@ import { FrontierAuthProvider } from './auth/AuthenticationProvider';
 import { registerCommands } from './commands';
 import { AuthWebviewProvider } from './webviews/authWebviewProvider';
 import { registerGitLabCommands } from './commands/gitlabCommands';
+import { StateManager } from './state';
+import { AuthState } from './types/state';
 
 let authenticationProvider: FrontierAuthProvider;
+
+const API_ENDPOINT = 'https://api.frontierrnd.com/api/v1';
+// const API_ENDPOINT = 'http://localhost:8000/api/v1';
 
 // FIXME: let's gracefully handle offline (block login, for instance)
 // TODO: let's display status for the user - cloud sync available, AI online, etc.
@@ -15,12 +20,17 @@ let authenticationProvider: FrontierAuthProvider;
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export async function activate(context: vscode.ExtensionContext) {
-	vscode.window.showInformationMessage('Activating Frontier Authentication extension');
-	// Initialize auth provider
-	authenticationProvider = new FrontierAuthProvider(context);
+	// Initialize state manager first
+	const stateManager = StateManager.initialize(context);
 
-	const API_ENDPOINT = 'https://api.frontierrnd.com/api/v1';
-	// const API_ENDPOINT = 'http://localhost:8000/api/v1';
+	// Initialize auth provider with state manager
+	authenticationProvider = new FrontierAuthProvider(context, API_ENDPOINT);
+	await authenticationProvider.initialize();
+
+	// Only show activation message if not already authenticated
+	if (!authenticationProvider.isAuthenticated) {
+		vscode.window.showInformationMessage('Activating Frontier Authentication extension');
+	}
 
 	// Dispose existing providers if they exist
 	if (authenticationProvider) {
@@ -28,7 +38,11 @@ export async function activate(context: vscode.ExtensionContext) {
 	}
 
 	// Create new providers
-	const authViewProvider = new AuthWebviewProvider(context.extensionUri, authenticationProvider, API_ENDPOINT);
+	const authViewProvider = new AuthWebviewProvider(
+		context.extensionUri, 
+		authenticationProvider, 
+		API_ENDPOINT
+	);
 
 	// Register webview providers
 	context.subscriptions.push(
@@ -49,24 +63,39 @@ export async function activate(context: vscode.ExtensionContext) {
 	);
 	context.subscriptions.push(statusBarItem);
 
-	if (authenticationProvider !== undefined) {
-		// Update status bar based on auth state
-		authenticationProvider.onDidChangeAuthentication(() => {
-			updateStatusBar(statusBarItem, authenticationProvider);
-		});
-	}
+	// Update status bar when state changes
+	stateManager.onDidChangeState(() => {
+		updateStatusBar(statusBarItem, stateManager.getAuthState());
+	});
 
 	// Initial status bar update
-	updateStatusBar(statusBarItem, authenticationProvider);
+	updateStatusBar(statusBarItem, stateManager.getAuthState());
+
+	// Add new command for confirming logout
+	context.subscriptions.push(
+		vscode.commands.registerCommand('frontier.confirmLogout', async () => {
+			const choice = await vscode.window.showWarningMessage(
+				'Are you sure you want to log out?',
+				{ modal: true },
+				'Log Out',
+				'Cancel'
+			);
+
+			if (choice === 'Log Out') {
+				await authenticationProvider.logout();
+				vscode.window.showInformationMessage('Successfully logged out');
+			}
+		})
+	);
 }
 
 function updateStatusBar(
 	statusBarItem: vscode.StatusBarItem,
-	authProvider: FrontierAuthProvider
+	authState: AuthState
 ) {
-	if (authProvider.isAuthenticated) {
+	if (authState.isAuthenticated) {
 		statusBarItem.text = "$(check) Authenticated";
-		statusBarItem.command = 'frontier.logout';
+		statusBarItem.command = 'frontier.confirmLogout';
 	} else {
 		statusBarItem.text = "$(key) Login";
 		statusBarItem.command = 'frontier.login';

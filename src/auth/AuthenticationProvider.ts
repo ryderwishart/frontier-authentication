@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { StateManager } from '../state';
 
 // Add interface for token response
 interface TokenResponse {
@@ -32,11 +33,14 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
     private _sessions: ExtendedAuthSession[] = [];
     private _initialized = false;
+    private initializePromise: Promise<void> | null = null;
 
     private _onDidChangeAuthentication = new vscode.EventEmitter<void>();
     readonly onDidChangeAuthentication = this._onDidChangeAuthentication.event;
 
-    constructor(private readonly context: vscode.ExtensionContext) {
+    private readonly stateManager = StateManager.getInstance();
+
+    constructor(private readonly context: vscode.ExtensionContext, private readonly API_ENDPOINT: string) {
         // Register the auth provider
         context.subscriptions.push(
             vscode.authentication.registerAuthenticationProvider(
@@ -45,41 +49,73 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                 this
             )
         );
-        this.initialize();
     }
 
-    private async initialize() {
-        try {
-            const sessionDataStr = await this.context.secrets.get(FrontierAuthProvider.SESSION_SECRET_KEY);
-            if (sessionDataStr) {
-                const sessionData: FrontierSessionData = JSON.parse(sessionDataStr);
-                this._sessions = [{
-                    id: 'frontier-session',
-                    accessToken: sessionData.accessToken,
-                    account: {
-                        id: 'frontier-user',
-                        label: 'Frontier User'
-                    },
-                    scopes: ['token'],
-                    // Store additional data in session object
-                    gitlabToken: sessionData.gitlabToken,
-                    gitlabUrl: sessionData.gitlabUrl
-                }];
-                this._onDidChangeSessions.fire({ added: this._sessions, removed: [], changed: [] });
+    public async initialize(): Promise<void> {
+        // Ensure we only initialize once
+        if (this.initializePromise) {
+            return this.initializePromise;
+        }
+
+        this.initializePromise = (async () => {
+            try {
+                const sessionDataStr = await this.context.secrets.get(FrontierAuthProvider.SESSION_SECRET_KEY);
+                if (sessionDataStr) {
+                    const sessionData: FrontierSessionData = JSON.parse(sessionDataStr);
+
+                    // Validate the stored token by making a test API call
+                    const isValid = await this.validateStoredToken(sessionData.accessToken);
+
+                    if (isValid) {
+                        this._sessions = [{
+                            id: 'frontier-session',
+                            accessToken: sessionData.accessToken,
+                            account: {
+                                id: 'frontier-user',
+                                label: 'Frontier User'
+                            },
+                            scopes: ['token'],
+                            gitlabToken: sessionData.gitlabToken,
+                            gitlabUrl: sessionData.gitlabUrl
+                        }];
+                        this._onDidChangeSessions.fire({ added: this._sessions, removed: [], changed: [] });
+                        this._onDidChangeAuthentication.fire();
+                    } else {
+                        // If token is invalid, clean up stored data
+                        await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to restore authentication:', error);
+                // Don't show error message here - just log it
+            } finally {
+                this._initialized = true;
             }
-            this._initialized = true;
-        } catch (error) {
-            console.error('Failed to restore authentication:', error);
-            vscode.window.showErrorMessage('Failed to restore authentication state');
+        })();
+
+        return this.initializePromise;
+    }
+
+    private async validateStoredToken(token: string): Promise<boolean> {
+        try {
+            const response = await fetch(`${this.API_ENDPOINT}/auth/me`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/json'
+                }
+            });
+            return response.ok;
+        } catch {
+            return false;
         }
     }
 
-    async getSessions(
-        scopes: readonly string[] | undefined,
-        options: vscode.AuthenticationProviderSessionOptions
-    ): Promise<vscode.AuthenticationSession[]> {
-        // Convert readonly array to mutable array
-        return Promise.resolve([...this._sessions]);
+    // Update getSessions to ensure initialization is complete
+    async getSessions(): Promise<vscode.AuthenticationSession[]> {
+        if (!this._initialized) {
+            await this.initialize();
+        }
+        return [...this._sessions];
     }
 
     async createSession(scopes: readonly string[]): Promise<vscode.AuthenticationSession> {
@@ -132,6 +168,10 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
     async logout(): Promise<void> {
         await this.removeSession('frontier-session');
+        await this.stateManager.updateAuthState({
+            isAuthenticated: false,
+            gitlabInfo: undefined
+        });
     }
 
     dispose() {
@@ -178,6 +218,11 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
             this._sessions = [session];
             this._onDidChangeSessions.fire({ added: [session], removed: [], changed: [] });
             this._onDidChangeAuthentication.fire();
+
+            await this.stateManager.updateAuthState({
+                isAuthenticated: true,
+                gitlabInfo: undefined // Will be updated by GitLab info fetch
+            });
         } catch (error) {
             console.error('Failed to store authentication tokens:', error);
             throw new Error('Failed to save authentication state');

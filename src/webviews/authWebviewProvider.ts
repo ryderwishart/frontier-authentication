@@ -3,6 +3,7 @@ import { FrontierAuthProvider } from '../auth/AuthenticationProvider';
 import { getNonce } from '../utils';
 import fetch, { Response } from 'node-fetch';
 import { URLSearchParams } from 'url';
+import { StateManager } from '../state';
 
 const INITIAL_POLLING_INTERVAL = 100;
 const POLLING_INTERVAL_INCREMENT = 1000;
@@ -56,10 +57,10 @@ type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChange
 
 export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
-    private currentView: 'login' | 'register' = 'login';
-    private connectionStatus: 'connected' | 'disconnected' = 'disconnected';
+    private _initialized = false;
     private pollingInterval: number = INITIAL_POLLING_INTERVAL;
     private pollingTimeout?: NodeJS.Timeout;
+    private readonly stateManager = StateManager.getInstance();
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -72,6 +73,22 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         });
 
         this.startPolling();
+    }
+
+    private get currentView(): 'login' | 'register' {
+        return this.stateManager.getAuthState().currentView;
+    }
+
+    private async setCurrentView(value: 'login' | 'register') {
+        await this.stateManager.updateAuthState({ currentView: value });
+    }
+
+    private get connectionStatus(): 'connected' | 'disconnected' {
+        return this.stateManager.getAuthState().connectionStatus;
+    }
+
+    private async setConnectionStatus(value: 'connected' | 'disconnected') {
+        await this.stateManager.updateAuthState({ connectionStatus: value });
     }
 
     public refresh(): void {
@@ -113,13 +130,13 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     'Accept': 'application/json'
                 }
             });
-            
+
             const newConnectionStatus = response.ok ? 'connected' : 'disconnected';
             if (newConnectionStatus !== this.connectionStatus) {
-                this.connectionStatus = newConnectionStatus;
+                await this.setConnectionStatus(newConnectionStatus);
                 this.updateStatus();
             }
-            
+
             if (response.ok) {
                 this.pollingInterval = AUTHENTICATED_POLLING_INTERVAL;
             } else {
@@ -127,7 +144,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             }
         } catch {
             const wasConnected = this.connectionStatus === 'connected';
-            this.connectionStatus = 'disconnected';
+            await this.setConnectionStatus('disconnected');
             if (wasConnected) {
                 this.updateStatus();
             }
@@ -138,28 +155,38 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     private updateStatus(): void {
-        if (this._view) {
-            this._view.webview.postMessage({
-                type: 'status',
-                authStatus: this.authProvider.isAuthenticated ? 'authenticated' : 'unauthenticated',
-                connectionStatus: this.connectionStatus
-            });
+        if (!this._view || !this._initialized) {
+            return;
         }
+
+        const state = this.stateManager.getAuthState();
+        this._view.webview.postMessage({
+            type: 'status',
+            authStatus: state.isAuthenticated ? 'authenticated' : 'unauthenticated',
+            connectionStatus: state.connectionStatus
+        });
     }
 
-    resolveWebviewView(
+    async resolveWebviewView(
         webviewView: vscode.WebviewView,
         _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
-    ): void {
+    ): Promise<void> {
         this._view = webviewView;
         webviewView.webview.options = {
             enableScripts: true,
             localResourceRoots: [this.extensionUri]
         };
 
-        webviewView.webview.html = this.getHtmlContent(webviewView.webview);
+        // Show loading state first
+        webviewView.webview.html = this.getLoadingHtml();
 
+        // Wait for auth provider to be fully initialized
+        await this.authProvider.initialize();
+        this._initialized = true;
+
+        // Now show the actual content
+        webviewView.webview.html = this.getHtmlContent(webviewView.webview);
         this.refresh();
 
         webviewView.webview.onDidReceiveMessage(async (data: WebviewMessage) => {
@@ -171,7 +198,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     await this.handleRegister(data, webviewView);
                     break;
                 case 'viewChange':
-                    this.currentView = data.view;
+                    await this.setCurrentView(data.view);
                     webviewView.webview.html = this.getHtmlContent(webviewView.webview);
                     break;
             }
@@ -600,6 +627,51 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         word-wrap: break-word;
                     }
                 </style>
+            </body>
+            </html>`;
+    }
+
+    private getLoadingHtml(): string {
+        return `<!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body {
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        height: 100vh;
+                        margin: 0;
+                        font-family: var(--vscode-font-family);
+                        color: var(--vscode-foreground);
+                    }
+                    .loading {
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                    }
+                    .loading-spinner {
+                        width: 16px;
+                        height: 16px;
+                        border: 2px solid var(--vscode-foreground);
+                        border-radius: 50%;
+                        border-top-color: transparent;
+                        animation: spin 1s linear infinite;
+                    }
+                    @keyframes spin {
+                        to {
+                            transform: rotate(360deg);
+                        }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <span>Initializing...</span>
+                </div>
             </body>
             </html>`;
     }
