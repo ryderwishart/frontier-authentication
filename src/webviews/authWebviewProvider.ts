@@ -70,6 +70,11 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         this.authProvider.onDidChangeAuthentication(() => {
             this.updateStatus();
             this.adjustPollingInterval();
+            this.updateWebviewContent();
+        });
+
+        this.stateManager.onDidChangeState(() => {
+            this.updateWebviewContent();
         });
 
         this.startPolling();
@@ -468,11 +473,19 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         }
                         if (message.type === 'gitlabInfo') {
                             const gitlabInfoDiv = document.getElementById('gitlabInfo');
-                            gitlabInfoDiv.innerHTML = 
-                                "<div class='info-section'>" +
-                                    "<h3>GitLab Account Info</h3>" +
-                                    "<pre>" + JSON.stringify(message.info, null, 2) + "</pre>" +
-                                "</div>";
+                            if (message.info === null) {
+                                gitlabInfoDiv.innerHTML = 
+                                    "<div class='info-section'>" +
+                                        "<h3>Cloud Projects Info</h3>" +
+                                        "<p>Logged out</p>" +
+                                    "</div>";
+                            } else {
+                                gitlabInfoDiv.innerHTML = 
+                                    "<div class='info-section'>" +
+                                        "<h3>Cloud Projects Info</h3>" +
+                                        "<pre>" + JSON.stringify(message.info, null, 2) + "</pre>" +
+                                    "</div>";
+                            }
                             gitlabInfoDiv.style.display = 'block';
                         }
                     });
@@ -682,6 +695,34 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         }
         if (this._view) {
             this._view = undefined;
+        }
+    }
+
+    private updateWebviewContent(): void {
+        if (!this._view || !this._initialized) {
+            return;
+        }
+
+        const state = this.stateManager.getAuthState();
+
+        // Update the entire webview if needed
+        if (!state.isAuthenticated) {
+            this._view.webview.html = this.getHtmlContent(this._view.webview);
+        }
+
+        // Send status update
+        this._view.webview.postMessage({
+            type: 'status',
+            authStatus: state.isAuthenticated ? 'authenticated' : 'unauthenticated',
+            connectionStatus: state.connectionStatus
+        });
+
+        // Clear GitLab info if logged out
+        if (!state.isAuthenticated) {
+            this._view.webview.postMessage({
+                type: 'gitlabInfo',
+                info: null
+            });
         }
     }
 } 
