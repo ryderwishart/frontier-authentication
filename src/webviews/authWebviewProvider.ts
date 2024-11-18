@@ -95,13 +95,12 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     private adjustPollingInterval(): void {
-        if (this.authProvider.isAuthenticated) {
+        if (this.connectionStatus === 'connected') {
             this.pollingInterval = AUTHENTICATED_POLLING_INTERVAL;
         } else {
-            // When not authenticated, start with initial interval and gradually increase
             this.pollingInterval = Math.min(
                 this.pollingInterval + POLLING_INTERVAL_INCREMENT,
-                AUTHENTICATED_POLLING_INTERVAL
+                5000
             );
         }
     }
@@ -114,16 +113,17 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     'Accept': 'application/json'
                 }
             });
-
+            
             const newConnectionStatus = response.ok ? 'connected' : 'disconnected';
             if (newConnectionStatus !== this.connectionStatus) {
                 this.connectionStatus = newConnectionStatus;
                 this.updateStatus();
             }
-
-            // Reset polling interval on successful connection
+            
             if (response.ok) {
                 this.pollingInterval = AUTHENTICATED_POLLING_INTERVAL;
+            } else {
+                this.pollingInterval = INITIAL_POLLING_INTERVAL;
             }
         } catch {
             const wasConnected = this.connectionStatus === 'connected';
@@ -131,9 +131,10 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             if (wasConnected) {
                 this.updateStatus();
             }
-            // Reset to initial interval on connection failure
             this.pollingInterval = INITIAL_POLLING_INTERVAL;
         }
+
+        this.adjustPollingInterval();
     }
 
     private updateStatus(): void {
@@ -196,10 +197,9 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             });
 
             const result = await this.handleResponse(response);
-            await this.authProvider.setToken((result as any).access_token);
+            await this.authProvider.setTokens(result);
             vscode.window.showInformationMessage('Successfully logged in!');
 
-            // Fetch GitLab info after successful login
             await this.fetchGitLabInfo();
 
         } catch (error: unknown) {
@@ -225,7 +225,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             });
 
             const result = await this.handleResponse(response);
-            await this.authProvider.setToken(result.access_token);
+            await this.authProvider.setTokens(result);
             vscode.window.showInformationMessage('Successfully registered!');
 
         } catch (error: unknown) {

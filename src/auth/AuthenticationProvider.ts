@@ -1,13 +1,36 @@
 import * as vscode from 'vscode';
 
+// Add interface for token response
+interface TokenResponse {
+    access_token: string;
+    token_type: string;
+    gitlab_token: string;
+    gitlab_url: string;
+}
+
+// Add interface for stored session data
+interface FrontierSessionData {
+    accessToken: string;
+    gitlabToken: string;
+    gitlabUrl: string;
+}
+
+// Add at the top of the file with other interfaces
+interface ExtendedAuthSession extends vscode.AuthenticationSession {
+    gitlabToken?: string;
+    gitlabUrl?: string;
+}
+
 export class FrontierAuthProvider implements vscode.AuthenticationProvider, vscode.Disposable {
     private static readonly AUTH_TYPE = 'frontier';
     private static readonly AUTH_NAME = 'Frontier Authentication';
 
+    private static readonly SESSION_SECRET_KEY = 'frontier-session-data';
+
     private _onDidChangeSessions = new vscode.EventEmitter<vscode.AuthenticationProviderAuthenticationSessionsChangeEvent>();
     readonly onDidChangeSessions = this._onDidChangeSessions.event;
 
-    private _sessions: vscode.AuthenticationSession[] = [];
+    private _sessions: ExtendedAuthSession[] = [];
     private _initialized = false;
 
     private _onDidChangeAuthentication = new vscode.EventEmitter<void>();
@@ -27,17 +50,20 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
     private async initialize() {
         try {
-            // Try to restore token from secret storage
-            const token = await this.context.secrets.get('auth-token');
-            if (token) {
+            const sessionDataStr = await this.context.secrets.get(FrontierAuthProvider.SESSION_SECRET_KEY);
+            if (sessionDataStr) {
+                const sessionData: FrontierSessionData = JSON.parse(sessionDataStr);
                 this._sessions = [{
                     id: 'frontier-session',
-                    accessToken: token,
+                    accessToken: sessionData.accessToken,
                     account: {
                         id: 'frontier-user',
                         label: 'Frontier User'
                     },
-                    scopes: ['token']
+                    scopes: ['token'],
+                    // Store additional data in session object
+                    gitlabToken: sessionData.gitlabToken,
+                    gitlabUrl: sessionData.gitlabUrl
                 }];
                 this._onDidChangeSessions.fire({ added: this._sessions, removed: [], changed: [] });
             }
@@ -66,7 +92,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         const sessionIdx = this._sessions.findIndex(session => session.id === sessionId);
         if (sessionIdx > -1) {
             const removed = this._sessions.splice(sessionIdx, 1);
-            await this.context.secrets.delete('auth-token');
+            await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
             this._onDidChangeSessions.fire({ added: [], removed, changed: [] });
             this._onDidChangeAuthentication.fire();
         }
@@ -111,5 +137,50 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
     dispose() {
         this._onDidChangeSessions.dispose();
         this._onDidChangeAuthentication.dispose();
+    }
+
+    // Add methods to get GitLab credentials
+    async getGitLabToken(): Promise<string | undefined> {
+        return (this._sessions[0] as any)?.gitlabToken;
+    }
+
+    async getGitLabUrl(): Promise<string | undefined> {
+        return (this._sessions[0] as any)?.gitlabUrl;
+    }
+
+    async setTokens(tokenResponse: TokenResponse): Promise<void> {
+        try {
+            const sessionData: FrontierSessionData = {
+                accessToken: tokenResponse.access_token,
+                gitlabToken: tokenResponse.gitlab_token,
+                gitlabUrl: tokenResponse.gitlab_url
+            };
+
+            // Store all session data as JSON string
+            await this.context.secrets.store(
+                FrontierAuthProvider.SESSION_SECRET_KEY,
+                JSON.stringify(sessionData)
+            );
+
+            const session: ExtendedAuthSession = {
+                id: 'frontier-session',
+                accessToken: tokenResponse.access_token,
+                account: {
+                    id: 'frontier-user',
+                    label: 'Frontier User'
+                },
+                scopes: ['token'],
+                // Add GitLab properties
+                gitlabToken: tokenResponse.gitlab_token,
+                gitlabUrl: tokenResponse.gitlab_url
+            };
+
+            this._sessions = [session];
+            this._onDidChangeSessions.fire({ added: [session], removed: [], changed: [] });
+            this._onDidChangeAuthentication.fire();
+        } catch (error) {
+            console.error('Failed to store authentication tokens:', error);
+            throw new Error('Failed to save authentication state');
+        }
     }
 }
