@@ -5,7 +5,7 @@ export class StateManager {
     private static instance: StateManager;
     private state: GlobalState;
     private readonly stateKey = 'frontier.globalState';
-    
+
     private constructor(private context: vscode.ExtensionContext) {
         // Initialize with stored state or defaults
         const storedState = this.context.globalState.get<GlobalState>(this.stateKey);

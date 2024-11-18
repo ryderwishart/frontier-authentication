@@ -5,10 +5,6 @@ import fetch, { Response } from 'node-fetch';
 import { URLSearchParams } from 'url';
 import { StateManager } from '../state';
 
-const INITIAL_POLLING_INTERVAL = 100;
-const POLLING_INTERVAL_INCREMENT = 1000;
-const AUTHENTICATED_POLLING_INTERVAL = 30000;
-
 // Combined message types
 interface LoginMessage {
     type: 'login';
@@ -57,9 +53,6 @@ type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChange
 
 export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
-    private _initialized = false;
-    private pollingInterval: number = INITIAL_POLLING_INTERVAL;
-    private pollingTimeout?: NodeJS.Timeout;
     private readonly stateManager = StateManager.getInstance();
 
     constructor(
@@ -68,108 +61,16 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         private apiEndpoint: string
     ) {
         this.authProvider.onDidChangeAuthentication(() => {
-            this.updateStatus();
-            this.adjustPollingInterval();
             this.updateWebviewContent();
         });
 
         this.stateManager.onDidChangeState(() => {
             this.updateWebviewContent();
         });
-
-        this.startPolling();
-    }
-
-    private get currentView(): 'login' | 'register' {
-        return this.stateManager.getAuthState().currentView;
-    }
-
-    private async setCurrentView(value: 'login' | 'register') {
-        await this.stateManager.updateAuthState({ currentView: value });
-    }
-
-    private get connectionStatus(): 'connected' | 'disconnected' {
-        return this.stateManager.getAuthState().connectionStatus;
-    }
-
-    private async setConnectionStatus(value: 'connected' | 'disconnected') {
-        await this.stateManager.updateAuthState({ connectionStatus: value });
     }
 
     public refresh(): void {
-        this.updateStatus();
-    }
-
-    private startPolling(): void {
-        this.checkConnection();
-        this.scheduleNextPoll();
-    }
-
-    private scheduleNextPoll(): void {
-        if (this.pollingTimeout) {
-            clearTimeout(this.pollingTimeout);
-        }
-
-        this.pollingTimeout = setTimeout(() => {
-            this.checkConnection();
-            this.scheduleNextPoll();
-        }, this.pollingInterval);
-    }
-
-    private adjustPollingInterval(): void {
-        if (this.connectionStatus === 'connected') {
-            this.pollingInterval = AUTHENTICATED_POLLING_INTERVAL;
-        } else {
-            this.pollingInterval = Math.min(
-                this.pollingInterval + POLLING_INTERVAL_INCREMENT,
-                5000
-            );
-        }
-    }
-
-    private async checkConnection(): Promise<void> {
-        try {
-            const response = await fetch(`${this.apiEndpoint}/auth/me`, {
-                headers: {
-                    'Authorization': `Bearer ${await this.authProvider.getToken()}`,
-                    'Accept': 'application/json'
-                }
-            });
-
-            const newConnectionStatus = response.ok ? 'connected' : 'disconnected';
-            if (newConnectionStatus !== this.connectionStatus) {
-                await this.setConnectionStatus(newConnectionStatus);
-                this.updateStatus();
-            }
-
-            if (response.ok) {
-                this.pollingInterval = AUTHENTICATED_POLLING_INTERVAL;
-            } else {
-                this.pollingInterval = INITIAL_POLLING_INTERVAL;
-            }
-        } catch {
-            const wasConnected = this.connectionStatus === 'connected';
-            await this.setConnectionStatus('disconnected');
-            if (wasConnected) {
-                this.updateStatus();
-            }
-            this.pollingInterval = INITIAL_POLLING_INTERVAL;
-        }
-
-        this.adjustPollingInterval();
-    }
-
-    private updateStatus(): void {
-        if (!this._view || !this._initialized) {
-            return;
-        }
-
-        const state = this.stateManager.getAuthState();
-        this._view.webview.postMessage({
-            type: 'status',
-            authStatus: state.isAuthenticated ? 'authenticated' : 'unauthenticated',
-            connectionStatus: state.connectionStatus
-        });
+        this.updateWebviewContent();
     }
 
     async resolveWebviewView(
@@ -183,29 +84,11 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this.extensionUri]
         };
 
-        // Show loading state first
-        webviewView.webview.html = this.getLoadingHtml();
-
-        // Wait for auth provider to be fully initialized
+        // Wait for auth provider to be initialized
         await this.authProvider.initialize();
 
-        // Get initial state
-        const initialState = this.stateManager.getAuthState();
-
-        // Set initial view based on auth state
-        if (initialState.isAuthenticated) {
-            await this.setConnectionStatus('connected');
-            // Optionally fetch GitLab info if authenticated
-            await this.fetchGitLabInfo();
-        }
-
-        this._initialized = true;
-
-        // Now show the actual content with correct initial state
+        // Set initial content and handle messages
         webviewView.webview.html = this.getHtmlContent(webviewView.webview);
-
-        // Force an immediate status update
-        this.updateWebviewContent();
 
         webviewView.webview.onDidReceiveMessage(async (data: WebviewMessage) => {
             switch (data.type) {
@@ -216,11 +99,36 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     await this.handleRegister(data, webviewView);
                     break;
                 case 'viewChange':
-                    await this.setCurrentView(data.view);
-                    webviewView.webview.html = this.getHtmlContent(webviewView.webview);
+                    await this.stateManager.updateAuthState({ currentView: data.view });
                     break;
             }
         });
+    }
+
+    private updateWebviewContent(): void {
+        if (!this._view) {
+            return;
+        }
+
+        const state = this.stateManager.getAuthState();
+
+        // Always update the full HTML to ensure consistency
+        this._view.webview.html = this.getHtmlContent(this._view.webview);
+
+        // Send current state to webview
+        this._view.webview.postMessage({
+            type: 'status',
+            authStatus: state.isAuthenticated ? 'authenticated' : 'unauthenticated',
+            connectionStatus: state.connectionStatus
+        });
+
+        // Send GitLab info if available
+        if (state.gitlabInfo) {
+            this._view.webview.postMessage({
+                type: 'gitlabInfo',
+                info: state.gitlabInfo
+            });
+        }
     }
 
     private async handleLogin(data: LoginMessage, webviewView: vscode.WebviewView) {
@@ -357,11 +265,12 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                 });
             }
         }
-        this.updateStatus();
     }
 
     private getHtmlContent(webview: vscode.Webview): string {
         const nonce = getNonce();
+        const state = this.stateManager.getAuthState();
+        const currentView = state.currentView;
 
         return `<!DOCTYPE html>
             <html lang="en">
@@ -374,18 +283,18 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             <body>
                 <div class="status-bar">
                     <div class="status-item">
-                        <span id="authStatus" class="status-indicator"></span>
+                        <span class="status-indicator ${state.isAuthenticated ? 'connected' : ''}"></span>
                         <span class="status-text">Authentication</span>
                     </div>
                     <div class="status-item">
-                        <span id="connectionStatus" class="status-indicator"></span>
+                        <span class="status-indicator ${state.connectionStatus === 'connected' ? 'connected' : ''}"></span>
                         <span class="status-text">Server Connection</span>
                     </div>
                 </div>
-                <div class="container ${this.currentView}">
+                <div class="container ${currentView}">
                     <div id="gitlabInfo" class="gitlab-info"></div>
                     <!-- Login Form -->
-                    <form id="loginForm" class="auth-form ${this.currentView === 'login' ? 'active' : ''}">
+                    <form id="loginForm" class="auth-form ${currentView === 'login' ? 'active' : ''}">
                         <h2>Login</h2>
                         <div class="form-group">
                             <input type="text" id="loginUsername" placeholder="Username" required>
@@ -400,7 +309,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     </form>
 
                     <!-- Register Form -->
-                    <form id="registerForm" class="auth-form ${this.currentView === 'register' ? 'active' : ''}">
+                    <form id="registerForm" class="auth-form ${currentView === 'register' ? 'active' : ''}">
                         <h2>Register</h2>
                         <div class="info-text">
                             This will create your Codex cloud account for backup and sync.
@@ -657,85 +566,9 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             </html>`;
     }
 
-    private getLoadingHtml(): string {
-        return `<!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <style>
-                    body {
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        height: 100vh;
-                        margin: 0;
-                        font-family: var(--vscode-font-family);
-                        color: var(--vscode-foreground);
-                    }
-                    .loading {
-                        display: flex;
-                        align-items: center;
-                        gap: 8px;
-                    }
-                    .loading-spinner {
-                        width: 16px;
-                        height: 16px;
-                        border: 2px solid var(--vscode-foreground);
-                        border-radius: 50%;
-                        border-top-color: transparent;
-                        animation: spin 1s linear infinite;
-                    }
-                    @keyframes spin {
-                        to {
-                            transform: rotate(360deg);
-                        }
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="loading">
-                    <div class="loading-spinner"></div>
-                    <span>Initializing...</span>
-                </div>
-            </body>
-            </html>`;
-    }
-
     public dispose() {
-        if (this.pollingTimeout) {
-            clearTimeout(this.pollingTimeout);
-        }
         if (this._view) {
             this._view = undefined;
-        }
-    }
-
-    private updateWebviewContent(): void {
-        if (!this._view || !this._initialized) {
-            return;
-        }
-
-        const state = this.stateManager.getAuthState();
-
-        // Update the entire webview if needed
-        if (!state.isAuthenticated) {
-            this._view.webview.html = this.getHtmlContent(this._view.webview);
-        }
-
-        // Send status update
-        this._view.webview.postMessage({
-            type: 'status',
-            authStatus: state.isAuthenticated ? 'authenticated' : 'unauthenticated',
-            connectionStatus: state.connectionStatus
-        });
-
-        // Clear GitLab info if logged out
-        if (!state.isAuthenticated) {
-            this._view.webview.postMessage({
-                type: 'gitlabInfo',
-                info: null
-            });
         }
     }
 } 

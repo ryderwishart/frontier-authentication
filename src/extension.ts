@@ -39,8 +39,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	// Create new providers
 	const authViewProvider = new AuthWebviewProvider(
-		context.extensionUri, 
-		authenticationProvider, 
+		context.extensionUri,
+		authenticationProvider,
 		API_ENDPOINT
 	);
 
@@ -66,10 +66,12 @@ export async function activate(context: vscode.ExtensionContext) {
 	// Update status bar when state changes
 	stateManager.onDidChangeState(() => {
 		updateStatusBar(statusBarItem, stateManager.getAuthState());
+		authViewProvider.refresh();
 	});
 
-	// Initial status bar update
+	// Initial status bar and webview updates
 	updateStatusBar(statusBarItem, stateManager.getAuthState());
+	authViewProvider.refresh();
 
 	// Add new command for confirming logout
 	context.subscriptions.push(
