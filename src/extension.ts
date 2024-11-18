@@ -41,7 +41,8 @@ export async function activate(context: vscode.ExtensionContext) {
 	const authViewProvider = new AuthWebviewProvider(
 		context.extensionUri,
 		authenticationProvider,
-		API_ENDPOINT
+		API_ENDPOINT,
+		stateManager
 	);
 
 	// Register webview providers

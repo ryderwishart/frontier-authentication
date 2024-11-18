@@ -53,12 +53,12 @@ type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChange
 
 export class AuthWebviewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
-    private readonly stateManager = StateManager.getInstance();
 
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly authProvider: FrontierAuthProvider,
-        private apiEndpoint: string
+        private readonly apiEndpoint: string,
+        private readonly stateManager: StateManager
     ) {
         this.authProvider.onDidChangeAuthentication(() => {
             this.updateWebviewContent();
@@ -84,12 +84,10 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this.extensionUri]
         };
 
-        // Wait for auth provider to be initialized
-        await this.authProvider.initialize();
-
-        // Set initial content and handle messages
+        // Set initial content with loading state
         webviewView.webview.html = this.getHtmlContent(webviewView.webview);
 
+        // Set up message handlers
         webviewView.webview.onDidReceiveMessage(async (data: WebviewMessage) => {
             switch (data.type) {
                 case 'login':
@@ -103,6 +101,11 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     break;
             }
         });
+
+        // If we're authenticated, fetch GitLab info after initial render
+        if (this.stateManager.getAuthState().isAuthenticated) {
+            await this.fetchGitLabInfo();
+        }
     }
 
     private updateWebviewContent(): void {
@@ -153,7 +156,9 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             await this.authProvider.setTokens(result);
             vscode.window.showInformationMessage('Successfully logged in!');
 
+            // Fetch GitLab info and update the webview
             await this.fetchGitLabInfo();
+            this.updateWebviewContent();  // Make sure webview updates after getting GitLab info
 
         } catch (error: unknown) {
             this.handleError(error, webviewView);
@@ -242,28 +247,20 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
             const result = await this.handleResponse(gitlabResponse);
 
-            const sanitizedInfo = process.env.NODE_ENV === 'development'
-                ? result  // Show everything in development
-                : {
+            // Update the state manager with the GitLab info
+            await this.stateManager.updateAuthState({
+                gitlabInfo: {
                     username: result.username,
                     project_count: result.project_count,
-                    // Other safe fields
-                };
+                    user_id: result.user_id
+                }
+            });
 
-            if (this._view) {
-                this._view.webview.postMessage({
-                    type: 'gitlabInfo',
-                    info: sanitizedInfo
-                });
-            }
+            // The webview will update automatically via the state change listener
         } catch (error) {
             console.log('GitLab info fetch failed (non-critical):', error);
-            if (this._view) {
-                this._view.webview.postMessage({
-                    type: 'gitlabInfo',
-                    info: null
-                });
-            }
+            // Optionally update state to show error
+            await this.stateManager.updateAuthState({ gitlabInfo: undefined });
         }
     }
 
@@ -271,6 +268,13 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         const nonce = getNonce();
         const state = this.stateManager.getAuthState();
         const currentView = state.currentView;
+
+        // Add debug info temporarily to help us diagnose
+        console.log('Auth State:', {
+            isAuthenticated: state.isAuthenticated,
+            hasGitlabInfo: !!state.gitlabInfo,
+            gitlabInfo: state.gitlabInfo
+        });
 
         return `<!DOCTYPE html>
             <html lang="en">
@@ -291,10 +295,34 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         <span class="status-text">Server Connection</span>
                     </div>
                 </div>
-                <div class="container ${currentView}">
-                    <div id="gitlabInfo" class="gitlab-info"></div>
+
+                                <div class="container ${currentView}">
+                    <div id="gitlabInfo" class="gitlab-info" style="display: block">
+                        ${state.isAuthenticated
+                ? state.gitlabInfo
+                    ? `<div class='info-section'>
+                                    <h3>Cloud Projects Info</h3>
+                                    <div class="info-text">
+                                        <p>Welcome, <strong>${state.gitlabInfo.username}</strong></p>
+                                        <p>You have <strong>${state.gitlabInfo.project_count}</strong> project${state.gitlabInfo.project_count !== 1 ? 's' : ''} synced to the cloud</p>
+                                    </div>
+                                  </div>`
+                    : `<div class='info-section'>
+                                    <h3>Cloud Projects Info</h3>
+                                    <div class="info-text">
+                                        <p>Loading cloud info...</p>
+                                    </div>
+                                  </div>`
+                : `<div class='info-section'>
+                                <h3>Cloud Projects Info</h3>
+                                <div class="info-text">
+                                    <p>Please log in to see your cloud projects</p>
+                                </div>
+                              </div>`
+            }
+                    </div>
                     <!-- Login Form -->
-                    <form id="loginForm" class="auth-form ${currentView === 'login' ? 'active' : ''}">
+                    <form id="loginForm" class="auth-form ${!state.isAuthenticated && currentView === 'login' ? 'active' : ''}">
                         <h2>Login</h2>
                         <div class="form-group">
                             <input type="text" id="loginUsername" placeholder="Username" required>
@@ -309,7 +337,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     </form>
 
                     <!-- Register Form -->
-                    <form id="registerForm" class="auth-form ${currentView === 'register' ? 'active' : ''}">
+                    <form id="registerForm" class="auth-form ${!state.isAuthenticated && currentView === 'register' ? 'active' : ''}">
                         <h2>Register</h2>
                         <div class="info-text">
                             This will create your Codex cloud account for backup and sync.
@@ -343,32 +371,27 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                     const showRegister = document.getElementById('showRegister');
                     const showLogin = document.getElementById('showLogin');
 
+                    // Form submissions
                     loginForm.addEventListener('submit', (e) => {
                         e.preventDefault();
-                        const username = document.getElementById('loginUsername').value;
-                        const password = document.getElementById('loginPassword').value;
-
                         vscode.postMessage({
                             type: 'login',
-                            username,
-                            password
+                            username: document.getElementById('loginUsername').value,
+                            password: document.getElementById('loginPassword').value
                         });
                     });
 
                     registerForm.addEventListener('submit', (e) => {
                         e.preventDefault();
-                        const username = document.getElementById('registerUsername').value;
-                        const email = document.getElementById('registerEmail').value;
-                        const password = document.getElementById('registerPassword').value;
-
                         vscode.postMessage({
                             type: 'register',
-                            username,
-                            email,
-                            password
+                            username: document.getElementById('registerUsername').value,
+                            email: document.getElementById('registerEmail').value,
+                            password: document.getElementById('registerPassword').value
                         });
                     });
 
+                    // View switching
                     showRegister.addEventListener('click', (e) => {
                         e.preventDefault();
                         vscode.postMessage({ type: 'viewChange', view: 'register' });
@@ -379,36 +402,11 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         vscode.postMessage({ type: 'viewChange', view: 'login' });
                     });
 
+                    // Only handle errors in JS
                     window.addEventListener('message', event => {
                         const message = event.data;
                         if (message.type === 'error') {
                             errorDiv.textContent = message.message;
-                        }
-                        if (message.type === 'status') {
-                            const authIndicator = document.getElementById('authStatus');
-                            const connectionIndicator = document.getElementById('connectionStatus');
-                            
-                            authIndicator.className = 'status-indicator ' + 
-                                (message.authStatus === 'authenticated' ? 'connected' : '');
-                            connectionIndicator.className = 'status-indicator ' + 
-                                (message.connectionStatus === 'connected' ? 'connected' : '');
-                        }
-                        if (message.type === 'gitlabInfo') {
-                            const gitlabInfoDiv = document.getElementById('gitlabInfo');
-                            if (message.info === null) {
-                                gitlabInfoDiv.innerHTML = 
-                                    "<div class='info-section'>" +
-                                        "<h3>Cloud Projects Info</h3>" +
-                                        "<p>Logged out</p>" +
-                                    "</div>";
-                            } else {
-                                gitlabInfoDiv.innerHTML = 
-                                    "<div class='info-section'>" +
-                                        "<h3>Cloud Projects Info</h3>" +
-                                        "<pre>" + JSON.stringify(message.info, null, 2) + "</pre>" +
-                                    "</div>";
-                            }
-                            gitlabInfoDiv.style.display = 'block';
                         }
                     });
                 </script>
