@@ -4,6 +4,7 @@ import { getNonce } from '../utils';
 import fetch, { Response } from 'node-fetch';
 import { URLSearchParams } from 'url';
 import { StateManager } from '../state';
+import { AuthState } from '../types/state';
 
 // Combined message types
 interface LoginMessage {
@@ -48,6 +49,20 @@ interface GitLabInfoMessage {
     info: GitLabInfo;
 }
 
+// Add at the top with other interfaces
+interface TokenResponse {
+    access_token: string;
+    token_type: string;
+    gitlab_token: string;
+    gitlab_url: string;
+}
+
+interface GitLabInfoResponse {
+    user_id: number;
+    username: string;
+    project_count: number;
+}
+
 // Update WebviewMessage type
 type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChangeMessage | StatusMessage | GitLabInfoMessage;
 
@@ -58,7 +73,8 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         private readonly extensionUri: vscode.Uri,
         private readonly authProvider: FrontierAuthProvider,
         private readonly apiEndpoint: string,
-        private readonly stateManager: StateManager
+        private readonly stateManager: StateManager,
+        private readonly initialAuthState: AuthState
     ) {
         this.authProvider.onDidChangeAuthentication(() => {
             this.updateWebviewContent();
@@ -152,13 +168,27 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                 body: formData
             });
 
-            const result = await this.handleResponse(response);
+            const result = await this.handleResponse<TokenResponse>(response);
+            
+            // Validate required fields
+            if (!result.gitlab_token || !result.gitlab_url) {
+                throw new Error('Invalid server response: missing GitLab credentials');
+            }
+
+            // Store all tokens
             await this.authProvider.setTokens(result);
+            
+            // Update GitLab credentials in state
+            await this.stateManager.updateGitLabCredentials({
+                token: result.gitlab_token,
+                url: result.gitlab_url
+            });
+
             vscode.window.showInformationMessage('Successfully logged in!');
 
             // Fetch GitLab info and update the webview
             await this.fetchGitLabInfo();
-            this.updateWebviewContent();  // Make sure webview updates after getting GitLab info
+            this.updateWebviewContent();
 
         } catch (error: unknown) {
             this.handleError(error, webviewView);
@@ -182,9 +212,27 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                 }),
             });
 
-            const result = await this.handleResponse(response);
+            const result: TokenResponse = await this.handleResponse(response);
+            
+            // Validate required fields
+            if (!result.gitlab_token || !result.gitlab_url) {
+                throw new Error('Invalid server response: missing GitLab credentials');
+            }
+
+            // Store all tokens
             await this.authProvider.setTokens(result);
+            
+            // Update GitLab credentials in state
+            await this.stateManager.updateGitLabCredentials({
+                token: result.gitlab_token,
+                url: result.gitlab_url
+            });
+
             vscode.window.showInformationMessage('Successfully registered!');
+
+            // Fetch GitLab info and update the webview
+            await this.fetchGitLabInfo();
+            this.updateWebviewContent();
 
         } catch (error: unknown) {
             this.handleError(error, webviewView);
@@ -206,7 +254,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private async handleResponse(response: Response) {
+    private async handleResponse<T>(response: Response): Promise<T> {
         const rawText = await response.text();
         let result;
         try {
@@ -219,7 +267,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             throw new Error(result?.detail || 'Operation failed');
         }
 
-        return result;
+        return result as T;
     }
 
     private handleError(error: unknown, webviewView: vscode.WebviewView) {
@@ -245,14 +293,15 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                 }
             });
 
-            const result = await this.handleResponse(gitlabResponse);
+            const result = await this.handleResponse<GitLabInfoResponse>(gitlabResponse);
 
+            console.log('GitLab info:', result);
             // Update the state manager with the GitLab info
             await this.stateManager.updateAuthState({
                 gitlabInfo: {
+                    user_id: result.user_id,
                     username: result.username,
-                    project_count: result.project_count,
-                    user_id: result.user_id
+                    project_count: result.project_count
                 }
             });
 
@@ -295,6 +344,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         <span class="status-text">Server Connection</span>
                     </div>
                 </div>
+                <pre>${JSON.stringify(state, null, 2)}</pre>
 
                                 <div class="container ${currentView}">
                     <div id="gitlabInfo" class="gitlab-info" style="display: block">

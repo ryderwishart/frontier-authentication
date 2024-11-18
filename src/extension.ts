@@ -5,7 +5,7 @@ import { FrontierAuthProvider } from './auth/AuthenticationProvider';
 import { registerCommands } from './commands';
 import { AuthWebviewProvider } from './webviews/authWebviewProvider';
 import { registerGitLabCommands } from './commands/gitlabCommands';
-import { StateManager } from './state';
+import { initialState, StateManager } from './state';
 import { AuthState } from './types/state';
 
 let authenticationProvider: FrontierAuthProvider;
@@ -42,7 +42,8 @@ export async function activate(context: vscode.ExtensionContext) {
 		context.extensionUri,
 		authenticationProvider,
 		API_ENDPOINT,
-		stateManager
+		stateManager,
+		initialState.auth
 	);
 
 	// Register webview providers

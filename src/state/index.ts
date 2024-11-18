@@ -1,5 +1,16 @@
 import * as vscode from 'vscode';
-import { GlobalState, AuthState } from '../types/state';
+import { GlobalState, AuthState, GitLabInfo, GitLabCredentials } from '../types/state';
+
+export const initialState: GlobalState = {
+    auth: {
+        isAuthenticated: false,
+        connectionStatus: 'disconnected',
+        currentView: 'login',
+        gitlabInfo: undefined,
+        gitlabCredentials: undefined,
+        lastSyncTimestamp: undefined
+    }
+};
 
 export class StateManager {
     private static instance: StateManager;
@@ -9,13 +20,7 @@ export class StateManager {
     private constructor(private context: vscode.ExtensionContext) {
         // Initialize with stored state or defaults
         const storedState = this.context.globalState.get<GlobalState>(this.stateKey);
-        this.state = storedState || {
-            auth: {
-                isAuthenticated: false,
-                connectionStatus: 'disconnected',
-                currentView: 'login'
-            }
-        };
+        this.state = storedState || initialState;
     }
 
     static initialize(context: vscode.ExtensionContext): StateManager {
@@ -47,6 +52,32 @@ export class StateManager {
         };
         await this.persistState();
         this.notifyStateChange();
+    }
+
+    async updateGitLabCredentials(credentials: GitLabCredentials | undefined): Promise<void> {
+        await this.updateAuthState({
+            gitlabCredentials: credentials
+        });
+    }
+
+    async updateGitLabInfo(info: GitLabInfo | undefined): Promise<void> {
+        await this.updateAuthState({
+            gitlabInfo: info
+        });
+    }
+
+    async updateLastSyncTimestamp(): Promise<void> {
+        await this.updateAuthState({
+            lastSyncTimestamp: Date.now()
+        });
+    }
+
+    getGitLabCredentials(): GitLabCredentials | undefined {
+        return this.state.auth.gitlabCredentials;
+    }
+
+    getGitLabInfo(): GitLabInfo | undefined {
+        return this.state.auth.gitlabInfo;
     }
 
     private readonly stateChangeEmitter = new vscode.EventEmitter<void>();
