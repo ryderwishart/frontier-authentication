@@ -188,11 +188,24 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
         // Wait for auth provider to be fully initialized
         await this.authProvider.initialize();
+
+        // Get initial state
+        const initialState = this.stateManager.getAuthState();
+
+        // Set initial view based on auth state
+        if (initialState.isAuthenticated) {
+            await this.setConnectionStatus('connected');
+            // Optionally fetch GitLab info if authenticated
+            await this.fetchGitLabInfo();
+        }
+
         this._initialized = true;
 
-        // Now show the actual content
+        // Now show the actual content with correct initial state
         webviewView.webview.html = this.getHtmlContent(webviewView.webview);
-        this.refresh();
+
+        // Force an immediate status update
+        this.updateWebviewContent();
 
         webviewView.webview.onDidReceiveMessage(async (data: WebviewMessage) => {
             switch (data.type) {
