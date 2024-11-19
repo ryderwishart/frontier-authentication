@@ -24,6 +24,29 @@ interface GitLabGroup {
     visibility: 'private' | 'internal' | 'public';
 }
 
+interface GitLabProject {
+    id: number;
+    name: string;
+    description: string | null;
+    visibility: 'private' | 'internal' | 'public';
+    http_url_to_repo: string;
+    web_url: string;
+    created_at: string;
+    last_activity_at: string;
+    owner: {
+        id: number;
+        name: string;
+        username: string;
+    } | null;
+    namespace: {
+        id: number;
+        name: string;
+        path: string;
+        kind: string;
+        full_path: string;
+    };
+}
+
 export class GitLabService {
     private gitlabToken: string | undefined;
     private gitlabBaseUrl: string | undefined;
@@ -182,6 +205,46 @@ export class GitLabService {
         } catch (error) {
             console.error('Failed to list organizations:', error);
             return [];
+        }
+    }
+
+    async listProjects(options: { 
+        owned?: boolean; 
+        membership?: boolean;
+        search?: string;
+        orderBy?: 'id' | 'name' | 'path' | 'created_at' | 'updated_at' | 'last_activity_at';
+        sort?: 'asc' | 'desc';
+    } = {}): Promise<GitLabProject[]> {
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            await this.initialize();
+        }
+
+        try {
+            const queryParams = new URLSearchParams({
+                owned: (options.owned ?? true).toString(),
+                membership: (options.membership ?? true).toString(),
+                ...(options.search && { search: options.search }),
+                ...(options.orderBy && { order_by: options.orderBy }),
+                ...(options.sort && { sort: options.sort }),
+                per_page: '100' // Adjust as needed
+            });
+
+            const response = await fetch(`${this.gitlabBaseUrl}/api/v4/projects?${queryParams}`, {
+                headers: {
+                    'Authorization': `Bearer ${this.gitlabToken}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to list projects: ${response.statusText}`);
+            }
+
+            const projects = await response.json() as GitLabProject[];
+            return projects;
+        } catch (error) {
+            console.error('Error listing projects:', error);
+            throw new Error(`Failed to list projects: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
     }
 

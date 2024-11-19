@@ -49,13 +49,18 @@
         "category": "Frontier"
       },
       {
+        "command": "frontier.listProjects",
+        "title": "List GitLab Projects",
+        "category": "Frontier"
+      },
+      {
         "command": "frontier.createAndCloneProject",
-        "title": "Create and Clone Project",
+        "title": "Create and Clone GitLab Project",
         "category": "Frontier"
       },
       {
         "command": "frontier.cloneRepository",
-        "title": "Clone Repository",
+        "title": "Clone GitLab Repository",
         "category": "Frontier"
       },
       {
