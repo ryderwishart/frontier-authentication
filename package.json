@@ -49,6 +49,26 @@
         "category": "Frontier"
       },
       {
+        "command": "frontier.createAndCloneProject",
+        "title": "Create and Clone Project",
+        "category": "Frontier"
+      },
+      {
+        "command": "frontier.cloneRepository",
+        "title": "Clone Repository",
+        "category": "Frontier"
+      },
+      {
+        "command": "frontier.syncChanges",
+        "title": "Sync Changes",
+        "category": "Frontier"
+      },
+      {
+        "command": "frontier.toggleAutoSync",
+        "title": "Toggle Auto-Sync",
+        "category": "Frontier"
+      },
+      {
         "command": "frontier.confirmLogout",
         "title": "Logout from Frontier"
       }
@@ -56,38 +76,42 @@
     "authentication": [
       {
         "id": "frontier",
-        "label": "Frontier Authentication"
+        "label": "Frontier"
       }
     ]
   },
   "scripts": {
-    "vscode:prepublish": "pnpm run package",
+    "vscode:prepublish": "npm run package",
     "compile": "webpack",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
     "compile-tests": "tsc -p . --outDir out",
-    "watch-tests": "tsc -p . -w --outDir out",
-    "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
+    "watch-tests": "tsc -p . --outDir out --watch",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
-    "@types/mocha": "^10.0.3",
-    "@types/node": "^16.x",
-    "@types/node-fetch": "^2.6.4",
-    "@types/vscode": "^1.80.0",
-    "@typescript-eslint/eslint-plugin": "^6.9.0",
-    "@typescript-eslint/parser": "^6.9.0",
-    "@vscode/test-electron": "^2.3.6",
-    "eslint": "^8.52.0",
-    "glob": "^10.3.10",
-    "mocha": "^10.2.0",
-    "ts-loader": "^9.5.0",
-    "typescript": "^5.2.2",
-    "webpack": "^5.89.0",
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "18.x",
+    "@types/node-fetch": "^2.6.11",
+    "@types/vscode": "^1.87.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.2",
+    "@typescript-eslint/parser": "^7.0.2",
+    "@vscode/test-electron": "^2.3.9",
+    "crypto-browserify": "^3.12.0",
+    "eslint": "^8.56.0",
+    "glob": "^8.1.0",
+    "memfs": "^4.7.1",
+    "path-browserify": "^1.0.1",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.90.3",
     "webpack-cli": "^5.1.4"
   },
   "dependencies": {
-    "node-fetch": "^2.6.7"
+    "isomorphic-git": "^1.25.3",
+    "node-fetch": "^2.7.0"
   }
 }

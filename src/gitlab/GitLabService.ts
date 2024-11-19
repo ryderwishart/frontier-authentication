@@ -1,6 +1,13 @@
 import * as vscode from 'vscode';
 import { FrontierAuthProvider } from '../auth/AuthenticationProvider';
 
+interface GitLabUser {
+    id: number;
+    username: string;
+    name: string;
+    email: string;
+}
+
 export interface GitLabProjectOptions {
     name: string;
     description?: string;
@@ -18,14 +25,13 @@ interface GitLabGroup {
 }
 
 export class GitLabService {
-    private gitlabBaseUrl: string;
     private gitlabToken: string | undefined;
+    private gitlabBaseUrl: string | undefined;
 
     constructor(
         private authProvider: FrontierAuthProvider,
-    ) {
-        this.gitlabBaseUrl = ''; // Will be set during initialization
-    }
+    ) {}
+
     async initialize(): Promise<void> {
         const sessions = await this.authProvider.getSessions();
         const session = sessions[0];
@@ -35,12 +41,34 @@ export class GitLabService {
         this.gitlabToken = (session as any).gitlabToken;
         this.gitlabBaseUrl = (session as any).gitlabUrl;
 
-        console.log('GitLab service initialized with token:', this.gitlabToken, 'and base URL:', this.gitlabBaseUrl);
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            throw new Error('GitLab credentials not found in session');
+        }
+    }
+
+    async getCurrentUser(): Promise<GitLabUser> {
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            throw new Error('GitLab not initialized');
+        }
+
+        const response = await fetch(`${this.gitlabBaseUrl}/api/v4/user`, {
+            headers: {
+                'Authorization': `Bearer ${this.gitlabToken}`,
+                'Content-Type': 'application/json',
+            },
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to get user info: ${response.statusText}`);
+        }
+
+        const user = await response.json() as GitLabUser;
+        return user;
     }
 
     async createProject(options: GitLabProjectOptions): Promise<{ id: number; url: string }> {
-        if (!this.gitlabToken) {
-            throw new Error('GitLab token not available');
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            await this.initialize();
         }
 
         try {
@@ -58,6 +86,7 @@ export class GitLabService {
                     name: options.name,
                     description: options.description,
                     visibility: options.visibility || 'private',
+                    initialize_with_readme: true,
                 }),
             });
 
@@ -85,8 +114,8 @@ export class GitLabService {
     }
 
     async listOrganizations(): Promise<Array<{ id: string; name: string; path: string }>> {
-        if (!this.gitlabToken) {
-            throw new Error('GitLab token not available');
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            await this.initialize();
         }
 
         try {
@@ -99,28 +128,30 @@ export class GitLabService {
                 headers: {
                     'Authorization': `Bearer ${this.gitlabToken}`,
                     'Content-Type': 'application/json',
-                }
+                },
             });
 
-            if (response.status === 403 || response.status === 401) {
-                console.log('User does not have permission to list groups, continuing without organizations');
-                return [];
-            }
-
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(`Failed to fetch organizations: ${error.message || response.statusText}`);
+                throw new Error(`Failed to list organizations: ${response.statusText}`);
             }
 
-            const groups: GitLabGroup[] = await response.json();
-            return groups.map(group => ({
+            const groups = await response.json();
+            return groups.map((group: any) => ({
                 id: group.id.toString(),
                 name: group.name,
                 path: group.path
             }));
         } catch (error) {
-            console.log('Failed to list organizations (non-critical):', error);
+            console.error('Failed to list organizations:', error);
             return [];
         }
     }
-} 
+
+    getToken(): string | undefined {
+        return this.gitlabToken;
+    }
+
+    getBaseUrl(): string | undefined {
+        return this.gitlabBaseUrl;
+    }
+}

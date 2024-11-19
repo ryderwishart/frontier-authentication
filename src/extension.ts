@@ -5,6 +5,7 @@ import { FrontierAuthProvider } from './auth/AuthenticationProvider';
 import { registerCommands } from './commands';
 import { AuthWebviewProvider } from './webviews/authWebviewProvider';
 import { registerGitLabCommands } from './commands/gitlabCommands';
+import { registerSCMCommands } from './commands/scmCommands';
 import { initialState, StateManager } from './state';
 import { AuthState } from './types/state';
 
@@ -58,6 +59,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	// Register commands
 	registerCommands(context, authenticationProvider);
 	registerGitLabCommands(context, authenticationProvider);
+	registerSCMCommands(context, authenticationProvider);
 
 	// Register status bar item
 	const statusBarItem = vscode.window.createStatusBarItem(
