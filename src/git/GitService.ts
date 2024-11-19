@@ -25,6 +25,10 @@ export class GitService {
             },
             async (progress) => {
                 try {
+                    // Ensure the directory exists using VS Code's file system API
+                    const dirUri = vscode.Uri.file(dir);
+                    await vscode.workspace.fs.createDirectory(dirUri);
+
                     await git.clone({
                         fs,
                         http,

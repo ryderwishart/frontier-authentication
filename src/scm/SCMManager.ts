@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { GitService } from '../git/GitService';
 import { GitLabService } from '../gitlab/GitLabService';
-import * as fs from 'fs';
 
 export class SCMManager {
     private scmProvider: vscode.SourceControl;
@@ -71,7 +70,7 @@ export class SCMManager {
             // Ensure GitLab service is initialized
             await this.gitLabService.initialize();
 
-            // Create the project on GitLab
+            // Check if project exists or create a new one
             const project = await this.gitLabService.createProject({
                 name: options.name,
                 description: options.description,
@@ -94,7 +93,8 @@ export class SCMManager {
             // Initialize SCM
             await this.initializeSCM(workspacePath);
 
-            vscode.window.showInformationMessage(`Project ${options.name} created and cloned successfully!`);
+            const action = project.url.includes('already exists') ? 'cloned' : 'created and cloned';
+            vscode.window.showInformationMessage(`Project ${options.name} ${action} successfully!`);
         } catch (error) {
             if (error instanceof Error) {
                 vscode.window.showErrorMessage(`Failed to create and clone project: ${error.message}`);
@@ -145,6 +145,7 @@ export class SCMManager {
     }
 
     private async promptForWorkspacePath(defaultName: string): Promise<string | undefined> {
+        // Use the default downloads directory or home directory
         const homeDir = process.env.HOME || process.env.USERPROFILE;
         const defaultUri = vscode.Uri.file(path.join(homeDir || '', defaultName));
         
@@ -154,7 +155,17 @@ export class SCMManager {
             filters: { 'All Files': ['*'] }
         });
 
-        return result?.fsPath;
+        if (result) {
+            // Create the directory if it doesn't exist
+            try {
+                await vscode.workspace.fs.createDirectory(result);
+                return result.fsPath;
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to create directory: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                return undefined;
+            }
+        }
+        return undefined;
     }
 
     async cloneRepository(repoUrl: string, workspacePath: string): Promise<void> {
@@ -168,11 +179,19 @@ export class SCMManager {
             password: token
         };
 
+        // Ensure the directory exists using VS Code's file system API
+        const workspaceUri = vscode.Uri.file(workspacePath);
+        try {
+            await vscode.workspace.fs.createDirectory(workspaceUri);
+        } catch (error) {
+            throw new Error(`Failed to create workspace directory: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+
+        // Clone the repository
         await this.gitService.clone(repoUrl, workspacePath, auth);
 
         // Open the cloned repository in VS Code
-        const uri = vscode.Uri.file(workspacePath);
-        await vscode.commands.executeCommand('vscode.openFolder', uri);
+        await vscode.commands.executeCommand('vscode.openFolder', workspaceUri);
     }
 
     private async openWorkspace(workspacePath: string): Promise<void> {
@@ -182,16 +201,21 @@ export class SCMManager {
 
     private async loadGitIgnore(workspacePath: string): Promise<void> {
         try {
-            const gitIgnorePath = path.join(workspacePath, '.gitignore');
-            if (fs.existsSync(gitIgnorePath)) {
-                const content = fs.readFileSync(gitIgnorePath, 'utf8');
-                this.gitIgnorePatterns = content
+            const gitIgnoreUri = vscode.Uri.file(path.join(workspacePath, '.gitignore'));
+            try {
+                const content = await vscode.workspace.fs.readFile(gitIgnoreUri);
+                this.gitIgnorePatterns = Buffer.from(content)
+                    .toString('utf8')
                     .split('\n')
                     .map(line => line.trim())
                     .filter(line => line && !line.startsWith('#'));
+            } catch (error) {
+                // It's okay if .gitignore doesn't exist
+                this.gitIgnorePatterns = [];
             }
         } catch (error) {
             console.error('Error loading .gitignore:', error);
+            this.gitIgnorePatterns = [];
         }
     }
 

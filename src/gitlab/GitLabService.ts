@@ -66,12 +66,55 @@ export class GitLabService {
         return user;
     }
 
+    async getProject(name: string, organizationId?: string): Promise<{ id: number; url: string } | null> {
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            await this.initialize();
+        }
+
+        try {
+            let endpoint: string;
+            if (organizationId) {
+                endpoint = `${this.gitlabBaseUrl}/api/v4/groups/${organizationId}/projects?search=${encodeURIComponent(name)}`;
+            } else {
+                endpoint = `${this.gitlabBaseUrl}/api/v4/users/${(await this.getCurrentUser()).id}/projects?search=${encodeURIComponent(name)}`;
+            }
+
+            const response = await fetch(endpoint, {
+                headers: {
+                    'Authorization': `Bearer ${this.gitlabToken}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get project: ${response.statusText}`);
+            }
+
+            const projects = await response.json();
+            const project = projects.find((p: any) => p.name.toLowerCase() === name.toLowerCase());
+            
+            return project ? {
+                id: project.id,
+                url: project.http_url_to_repo,
+            } : null;
+        } catch (error) {
+            console.error('Error getting project:', error);
+            return null;
+        }
+    }
+
     async createProject(options: GitLabProjectOptions): Promise<{ id: number; url: string }> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initialize();
         }
 
         try {
+            // First check if project already exists
+            const existingProject = await this.getProject(options.name, options.organizationId);
+            if (existingProject) {
+                return existingProject;
+            }
+
             const endpoint = options.organizationId
                 ? `${this.gitlabBaseUrl}/api/v4/groups/${options.organizationId}/projects`
                 : `${this.gitlabBaseUrl}/api/v4/projects`;
@@ -92,7 +135,7 @@ export class GitLabService {
 
             if (!response.ok) {
                 const error = await response.json();
-                throw new Error(`Failed to create project: ${error.message || response.statusText}`);
+                throw new Error(error.message || response.statusText);
             }
 
             const project = await response.json();
@@ -102,12 +145,7 @@ export class GitLabService {
             };
         } catch (error) {
             if (error instanceof Error) {
-                if (error.message.includes('401')) {
-                    throw new Error('GitLab authentication failed. Please check your credentials.');
-                }
-                if (error.message.includes('403')) {
-                    throw new Error('You don\'t have permission to create projects in this organization.');
-                }
+                throw new Error(`Failed to create project: ${error.message}`);
             }
             throw error;
         }
