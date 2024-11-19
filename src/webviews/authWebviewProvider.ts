@@ -344,29 +344,27 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         <span class="status-text">Server Connection</span>
                     </div>
                 </div>
-                <pre>${JSON.stringify(state, null, 2)}</pre>
 
                                 <div class="container ${currentView}">
                     <div id="gitlabInfo" class="gitlab-info" style="display: block">
                         ${state.isAuthenticated
                 ? state.gitlabInfo
                     ? `<div class='info-section'>
-                                    <h3>Cloud Projects Info</h3>
+                                    <h3>Authentication Status</h3>
                                     <div class="info-text">
-                                        <p>Welcome, <strong>${state.gitlabInfo.username}</strong></p>
-                                        <p>You have <strong>${state.gitlabInfo.project_count}</strong> project${state.gitlabInfo.project_count !== 1 ? 's' : ''} synced to the cloud</p>
+                                        <p>✓ Logged in as <strong>${state.gitlabInfo.username}</strong></p>
                                     </div>
                                   </div>`
                     : `<div class='info-section'>
-                                    <h3>Cloud Projects Info</h3>
+                                    <h3>Authentication Status</h3>
                                     <div class="info-text">
-                                        <p>Loading cloud info...</p>
+                                        <p>✓ Authenticated</p>
                                     </div>
                                   </div>`
                 : `<div class='info-section'>
-                                <h3>Cloud Projects Info</h3>
+                                <h3>Authentication Status</h3>
                                 <div class="info-text">
-                                    <p>Please log in to see your cloud projects</p>
+                                    <p>Please log in to continue</p>
                                 </div>
                               </div>`
             }

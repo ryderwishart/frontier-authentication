@@ -12,7 +12,7 @@ export function registerSCMCommands(
 
     // Register list projects command
     context.subscriptions.push(
-        vscode.commands.registerCommand('frontier.listProjects', async () => {
+        vscode.commands.registerCommand('frontier.listProjects', async ({ showUI = true } = {}) => {
             console.log('Listing projects...');
             try {
                 await gitLabService.initialize();
@@ -21,9 +21,26 @@ export function registerSCMCommands(
                     sort: 'desc'
                 });
 
+                // Transform projects into a consistent return format
+                const formattedProjects = projects.map(project => ({
+                    id: project.id,
+                    name: project.name,
+                    description: project.description,
+                    visibility: project.visibility,
+                    url: project.http_url_to_repo,
+                    webUrl: project.web_url,
+                    lastActivity: project.last_activity_at,
+                    namespace: project.namespace.full_path,
+                    owner: project.owner?.name || project.namespace.name
+                }));
+
+                if (!showUI) {
+                    return formattedProjects;
+                }
+
                 if (projects.length === 0) {
                     vscode.window.showInformationMessage('No projects found.');
-                    return;
+                    return [];
                 }
 
                 // Show projects in QuickPick
@@ -61,8 +78,12 @@ export function registerSCMCommands(
                         await vscode.commands.executeCommand('frontier.cloneRepository', selectedProject.project.http_url_to_repo);
                     }
                 }
+
+                return formattedProjects;
             } catch (error) {
-                vscode.window.showErrorMessage(`Failed to list projects: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                if (showUI) {
+                    vscode.window.showErrorMessage(`Failed to list projects: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                }
                 return [];
             }
         })
