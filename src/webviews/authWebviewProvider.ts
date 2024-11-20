@@ -5,6 +5,7 @@ import fetch, { Response } from 'node-fetch';
 import { URLSearchParams } from 'url';
 import { StateManager } from '../state';
 import { AuthState } from '../types/state';
+import { GitService } from '../git/GitService';
 
 // Combined message types
 interface LoginMessage {
@@ -49,6 +50,18 @@ interface GitLabInfoMessage {
     info: GitLabInfo;
 }
 
+// Add new interface for repository status
+interface RepoStatus {
+    hasRemote: boolean;
+    projectName?: string;
+    projectUrl?: string;
+}
+
+interface RepoStatusMessage {
+    type: 'repoStatus';
+    status: RepoStatus;
+}
+
 // Add at the top with other interfaces
 interface TokenResponse {
     access_token: string;
@@ -64,9 +77,11 @@ interface GitLabInfoResponse {
 }
 
 // Update WebviewMessage type
-type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChangeMessage | StatusMessage | GitLabInfoMessage;
+type WebviewMessage = LoginMessage | RegisterMessage | ErrorMessage | ViewChangeMessage | StatusMessage | GitLabInfoMessage | RepoStatusMessage;
 
 export class AuthWebviewProvider implements vscode.WebviewViewProvider {
+    public static readonly viewType = 'frontier.auth';
+
     private _view?: vscode.WebviewView;
 
     constructor(
@@ -105,17 +120,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
         // Set up message handlers
         webviewView.webview.onDidReceiveMessage(async (data: WebviewMessage) => {
-            switch (data.type) {
-                case 'login':
-                    await this.handleLogin(data, webviewView);
-                    break;
-                case 'register':
-                    await this.handleRegister(data, webviewView);
-                    break;
-                case 'viewChange':
-                    await this.stateManager.updateAuthState({ currentView: data.view });
-                    break;
-            }
+            await this.handleWebviewMessage(data, webviewView);
         });
 
         // If we're authenticated, fetch GitLab info after initial render
@@ -124,17 +129,44 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private updateWebviewContent(): void {
+    private async handleWebviewMessage(message: any, webviewView: vscode.WebviewView) {
+        switch (message.type) {
+            case 'login':
+                await this.handleLogin(message, webviewView);
+                break;
+            case 'register':
+                await this.handleRegister(message, webviewView);
+                break;
+            case 'viewChange':
+                await this.stateManager.updateAuthState({ currentView: message.view });
+                break;
+        }
+
+        // Handle sync command
+        if (message.command === 'sync') {
+            try {
+                await vscode.commands.executeCommand('frontier.syncChanges');
+            } catch (error) {
+                webviewView.webview.postMessage({
+                    type: 'error',
+                    message: error instanceof Error ? error.message : 'Failed to sync changes'
+                });
+            }
+        }
+    }
+
+    private async updateWebviewContent(): Promise<void> {
         if (!this._view) {
             return;
         }
 
-        const state = this.stateManager.getAuthState();
-
-        // Always update the full HTML to ensure consistency
+        // Update the HTML first
         this._view.webview.html = this.getHtmlContent(this._view.webview);
 
-        // Send current state to webview
+        // Then send all the current state information
+        const state = this.stateManager.getAuthState();
+
+        // Send authentication status
         this._view.webview.postMessage({
             type: 'status',
             authStatus: state.isAuthenticated ? 'authenticated' : 'unauthenticated',
@@ -142,11 +174,22 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         });
 
         // Send GitLab info if available
-        if (state.gitlabInfo) {
+        if (state.isAuthenticated && state.gitlabInfo) {
             this._view.webview.postMessage({
                 type: 'gitlabInfo',
                 info: state.gitlabInfo
             });
+        }
+
+        // Send repository status
+        try {
+            const repoStatus = await this.getRepoStatus();
+            this._view.webview.postMessage({
+                type: 'repoStatus',
+                status: repoStatus
+            });
+        } catch (error) {
+            console.error('Failed to update repo status:', error);
         }
     }
 
@@ -169,7 +212,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             });
 
             const result = await this.handleResponse<TokenResponse>(response);
-            
+
             // Validate required fields
             if (!result.gitlab_token || !result.gitlab_url) {
                 throw new Error('Invalid server response: missing GitLab credentials');
@@ -177,7 +220,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
             // Store all tokens
             await this.authProvider.setTokens(result);
-            
+
             // Update GitLab credentials in state
             await this.stateManager.updateGitLabCredentials({
                 token: result.gitlab_token,
@@ -213,7 +256,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
             });
 
             const result: TokenResponse = await this.handleResponse(response);
-            
+
             // Validate required fields
             if (!result.gitlab_token || !result.gitlab_url) {
                 throw new Error('Invalid server response: missing GitLab credentials');
@@ -221,7 +264,7 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
 
             // Store all tokens
             await this.authProvider.setTokens(result);
-            
+
             // Update GitLab credentials in state
             await this.stateManager.updateGitLabCredentials({
                 token: result.gitlab_token,
@@ -313,17 +356,39 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private async getRepoStatus(): Promise<RepoStatus> {
+        try {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                return { hasRemote: false };
+            }
+
+            const gitService = new GitService();
+            const remoteUrl = await gitService.getRemoteUrl(workspaceFolder.uri.fsPath);
+
+            if (!remoteUrl) {
+                return { hasRemote: false };
+            }
+
+            // Parse project name and URL from remote
+            const url = new URL(remoteUrl);
+            const projectName = url.pathname.split('/').pop()?.replace('.git', '');
+
+            return {
+                hasRemote: true,
+                projectName,
+                projectUrl: remoteUrl.replace('.git', '')
+            };
+        } catch (error) {
+            console.error('Error getting repo status:', error);
+            return { hasRemote: false };
+        }
+    }
+
     private getHtmlContent(webview: vscode.Webview): string {
         const nonce = getNonce();
         const state = this.stateManager.getAuthState();
         const currentView = state.currentView;
-
-        // Add debug info temporarily to help us diagnose
-        console.log('Auth State:', {
-            isAuthenticated: state.isAuthenticated,
-            hasGitlabInfo: !!state.gitlabInfo,
-            gitlabInfo: state.gitlabInfo
-        });
 
         return `<!DOCTYPE html>
             <html lang="en">
@@ -332,133 +397,6 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
                 <title>Authentication</title>
-            </head>
-            <body>
-                <div class="status-bar">
-                    <div class="status-item">
-                        <span class="status-indicator ${state.isAuthenticated ? 'connected' : ''}"></span>
-                        <span class="status-text">Authentication</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="status-indicator ${state.connectionStatus === 'connected' ? 'connected' : ''}"></span>
-                        <span class="status-text">Server Connection</span>
-                    </div>
-                </div>
-
-                                <div class="container ${currentView}">
-                    <div id="gitlabInfo" class="gitlab-info" style="display: block">
-                        ${state.isAuthenticated
-                ? state.gitlabInfo
-                    ? `<div class='info-section'>
-                                    <h3>Authentication Status</h3>
-                                    <div class="info-text">
-                                        <p>✓ Logged in as <strong>${state.gitlabInfo.username}</strong></p>
-                                    </div>
-                                  </div>`
-                    : `<div class='info-section'>
-                                    <h3>Authentication Status</h3>
-                                    <div class="info-text">
-                                        <p>✓ Authenticated</p>
-                                    </div>
-                                  </div>`
-                : `<div class='info-section'>
-                                <h3>Authentication Status</h3>
-                                <div class="info-text">
-                                    <p>Please log in to continue</p>
-                                </div>
-                              </div>`
-            }
-                    </div>
-                    <!-- Login Form -->
-                    <form id="loginForm" class="auth-form ${!state.isAuthenticated && currentView === 'login' ? 'active' : ''}">
-                        <h2>Login</h2>
-                        <div class="form-group">
-                            <input type="text" id="loginUsername" placeholder="Username" required>
-                        </div>
-                        <div class="form-group">
-                            <input type="password" id="loginPassword" placeholder="Password" required>
-                        </div>
-                        <button type="submit">Login</button>
-                        <div class="switch-view">
-                            Don't have an account? <a href="#" id="showRegister">Register</a>
-                        </div>
-                    </form>
-
-                    <!-- Register Form -->
-                    <form id="registerForm" class="auth-form ${!state.isAuthenticated && currentView === 'register' ? 'active' : ''}">
-                        <h2>Register</h2>
-                        <div class="info-text">
-                            This will create your Codex cloud account for backup and sync.
-                        </div>
-                        <div class="form-group">
-                            <input type="text" id="registerUsername" placeholder="Username" required>
-                        </div>
-                        <div class="form-group">
-                            <input type="email" id="registerEmail" placeholder="Email" required>
-                        </div>
-                        <div class="form-group">
-                            <input type="password" id="registerPassword" placeholder="Password" required>
-                            <div class="password-requirements">
-                                Password must contain at least 8 characters, including uppercase, lowercase, and numbers
-                            </div>
-                        </div>
-                        <button type="submit">Register</button>
-                        <div class="switch-view">
-                            Already have an account? <a href="#" id="showLogin">Login</a>
-                        </div>
-                    </form>
-
-                    <div id="error" class="error"></div>
-                </div>
-
-                <script nonce="${nonce}">
-                    const vscode = acquireVsCodeApi();
-                    const loginForm = document.getElementById('loginForm');
-                    const registerForm = document.getElementById('registerForm');
-                    const errorDiv = document.getElementById('error');
-                    const showRegister = document.getElementById('showRegister');
-                    const showLogin = document.getElementById('showLogin');
-
-                    // Form submissions
-                    loginForm.addEventListener('submit', (e) => {
-                        e.preventDefault();
-                        vscode.postMessage({
-                            type: 'login',
-                            username: document.getElementById('loginUsername').value,
-                            password: document.getElementById('loginPassword').value
-                        });
-                    });
-
-                    registerForm.addEventListener('submit', (e) => {
-                        e.preventDefault();
-                        vscode.postMessage({
-                            type: 'register',
-                            username: document.getElementById('registerUsername').value,
-                            email: document.getElementById('registerEmail').value,
-                            password: document.getElementById('registerPassword').value
-                        });
-                    });
-
-                    // View switching
-                    showRegister.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        vscode.postMessage({ type: 'viewChange', view: 'register' });
-                    });
-
-                    showLogin.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        vscode.postMessage({ type: 'viewChange', view: 'login' });
-                    });
-
-                    // Only handle errors in JS
-                    window.addEventListener('message', event => {
-                        const message = event.data;
-                        if (message.type === 'error') {
-                            errorDiv.textContent = message.message;
-                        }
-                    });
-                </script>
-
                 <style>
                     body {
                         padding: 15px;
@@ -607,7 +545,177 @@ export class AuthWebviewProvider implements vscode.WebviewViewProvider {
                         white-space: pre-wrap;
                         word-wrap: break-word;
                     }
+                    .repo-status {
+                        margin-top: 1rem;
+                        padding: 0.5rem;
+                        border: 1px solid var(--vscode-button-background);
+                        border-radius: 4px;
+                    }
+                    .repo-status a {
+                        color: var(--vscode-textLink-foreground);
+                        text-decoration: none;
+                    }
+                    .repo-status a:hover {
+                        text-decoration: underline;
+                    }
+                    .sync-button {
+                        margin-top: 0.5rem;
+                    }
                 </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="status-bar">
+                        <div class="status-item">
+                            <span class="status-indicator ${state.isAuthenticated ? 'connected' : ''}"></span>
+                            <span class="status-text">Authentication</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-indicator ${state.connectionStatus === 'connected' ? 'connected' : ''}"></span>
+                            <span class="status-text">Server Connection</span>
+                        </div>
+                    </div>
+
+                    ${state.isAuthenticated ? `
+                        <!-- Authenticated View -->
+                        <div class="auth-status">
+                            <div class="info-section">
+                                <h3>Authentication Status</h3>
+                                <div class="info-text">
+                                    ${state.gitlabInfo
+                    ? `<p>✓ Logged in as <strong>${state.gitlabInfo.username}</strong></p>
+                                           <p>Projects: ${state.gitlabInfo.project_count}</p>`
+                    : '<p>✓ Authenticated</p>'
+                }
+                                </div>
+                            </div>
+                            
+                            <div id="repoStatus" class="repo-status">
+                                <!-- Repository status will be updated dynamically -->
+                            </div>
+                            
+                            <button class="secondary-button" id="logoutButton">Log Out</button>
+                        </div>
+                    ` : `
+                        <!-- Unauthenticated View -->
+                        <div class="container ${currentView}">
+                            <!-- Login Form -->
+                            <form id="loginForm" class="auth-form ${currentView === 'login' ? 'active' : ''}">
+                                <h2>Login</h2>
+                                <div class="form-group">
+                                    <input type="text" id="loginUsername" placeholder="Username" required>
+                                </div>
+                                <div class="form-group">
+                                    <input type="password" id="loginPassword" placeholder="Password" required>
+                                </div>
+                                <button type="submit">Login</button>
+                                <div class="switch-view">
+                                    Don't have an account? <a href="#" id="showRegister">Register</a>
+                                </div>
+                            </form>
+
+                            <!-- Register Form -->
+                            <form id="registerForm" class="auth-form ${currentView === 'register' ? 'active' : ''}">
+                                <h2>Register</h2>
+                                <div class="info-text">
+                                    This will create your Codex cloud account for backup and sync.
+                                </div>
+                                <div class="form-group">
+                                    <input type="text" id="registerUsername" placeholder="Username" required>
+                                </div>
+                                <div class="form-group">
+                                    <input type="email" id="registerEmail" placeholder="Email" required>
+                                </div>
+                                <div class="form-group">
+                                    <input type="password" id="registerPassword" placeholder="Password" required>
+                                    <div class="password-requirements">
+                                        Password must contain at least 8 characters, including uppercase, lowercase, and numbers
+                                    </div>
+                                </div>
+                                <button type="submit">Register</button>
+                                <div class="switch-view">
+                                    Already have an account? <a href="#" id="showLogin">Login</a>
+                                </div>
+                            </form>
+
+                            <div id="error" class="error"></div>
+                        </div>
+                    `}
+                </div>
+                <script nonce="${nonce}">
+                    const vscode = acquireVsCodeApi();
+                    const loginForm = document.getElementById('loginForm');
+                    const registerForm = document.getElementById('registerForm');
+                    const errorDiv = document.getElementById('error');
+                    const showRegister = document.getElementById('showRegister');
+                    const showLogin = document.getElementById('showLogin');
+                    const logoutButton = document.getElementById('logoutButton');
+
+                    // Form submissions
+                    loginForm.addEventListener('submit', (e) => {
+                        e.preventDefault();
+                        vscode.postMessage({
+                            type: 'login',
+                            username: document.getElementById('loginUsername').value,
+                            password: document.getElementById('loginPassword').value
+                        });
+                    });
+
+                    registerForm.addEventListener('submit', (e) => {
+                        e.preventDefault();
+                        vscode.postMessage({
+                            type: 'register',
+                            username: document.getElementById('registerUsername').value,
+                            email: document.getElementById('registerEmail').value,
+                            password: document.getElementById('registerPassword').value
+                        });
+                    });
+
+                    // View switching
+                    showRegister.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        vscode.postMessage({ type: 'viewChange', view: 'register' });
+                    });
+
+                    showLogin.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        vscode.postMessage({ type: 'viewChange', view: 'login' });
+                    });
+
+                    // Only handle errors in JS
+                    window.addEventListener('message', event => {
+                        const message = event.data;
+                        if (message.type === 'error') {
+                            errorDiv.textContent = message.message;
+                        }
+                    });
+
+                    // Handle repository status updates
+                    window.addEventListener('message', event => {
+                        const message = event.data;
+                        if (message.type === 'repoStatus') {
+                            const repoStatusEl = document.getElementById('repoStatus');
+                            if (!repoStatusEl) return;
+                            
+                            if (message.status.hasRemote) {
+                                repoStatusEl.innerHTML = \`
+                                    <p>📁 Project: <a href="\${message.status.projectUrl}" target="_blank" title="Open in GitLab">\${message.status.projectName}</a></p>
+                                    <button class="sync-button" onclick="vscode.postMessage({command: 'sync'})">
+                                        Sync Changes
+                                    </button>
+                                \`;
+                            } else {
+                                repoStatusEl.innerHTML = '<p>No remote repository connected</p>';
+                            }
+                        }
+                    });
+
+                    if (logoutButton) {
+                        logoutButton.addEventListener('click', () => {
+                            vscode.postMessage({ type: 'logout' });
+                        });
+                    }
+                </script>
             </body>
             </html>`;
     }

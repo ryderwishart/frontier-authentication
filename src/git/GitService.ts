@@ -1,15 +1,12 @@
 import * as git from 'isomorphic-git';
 import http from 'isomorphic-git/http/web';
-import { fs } from 'memfs';
+import * as fs from 'fs';
 import * as vscode from 'vscode';
 import * as path from 'path';
 
 export class GitService {
     constructor() {
-        // Initialize the filesystem if needed
-        if (!fs.existsSync('/')) {
-            fs.mkdirSync('/', { recursive: true });
-        }
+        // No need to initialize filesystem anymore as we're using the real fs
     }
 
     async clone(
@@ -114,7 +111,8 @@ export class GitService {
 
     async pull(
         dir: string,
-        auth: { username: string; password: string }
+        auth: { username: string; password: string },
+        author?: { name: string; email: string }
     ): Promise<void> {
         await vscode.window.withProgress(
             {
@@ -124,6 +122,11 @@ export class GitService {
             },
             async (progress) => {
                 try {
+                    // Ensure author is configured before pulling
+                    if (author) {
+                        await this.configureAuthor(dir, author.name, author.email);
+                    }
+
                     await git.pull({
                         fs,
                         http,
@@ -150,7 +153,7 @@ export class GitService {
         return git.statusMatrix({ fs, dir });
     }
 
-    async getCurrentBranch(dir: string): Promise<string> {
+    async getCurrentBranch(dir: string): Promise<string | void> {
         return git.currentBranch({ fs, dir }) || 'main';
     }
 
@@ -164,5 +167,99 @@ export class GitService {
 
     async log(dir: string, depth: number = 10): Promise<Array<{ oid: string; commit: any }>> {
         return git.log({ fs, dir, depth });
+    }
+
+    async getRemoteUrl(dir: string): Promise<string | undefined> {
+        try {
+            const config = await git.listRemotes({
+                fs,
+                dir
+            });
+            
+            const origin = config.find(remote => remote.remote === 'origin');
+            return origin?.url;
+        } catch (error) {
+            console.error('Error getting remote URL:', error);
+            return undefined;
+        }
+    }
+
+    async init(dir: string): Promise<void> {
+        try {
+            await git.init({ fs, dir });
+            console.log('Git repository initialized at:', dir);
+        } catch (error) {
+            console.error('Init error:', error);
+            throw new Error(`Failed to initialize repository: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+
+    async addRemote(dir: string, name: string, url: string): Promise<void> {
+        try {
+            await git.addRemote({ fs, dir, remote: name, url });
+            console.log('Added remote:', name, url);
+        } catch (error) {
+            // If remote already exists, try to update it
+            if (error instanceof Error && error.message.includes('already exists')) {
+                await git.deleteRemote({ fs, dir, remote: name });
+                await git.addRemote({ fs, dir, remote: name, url });
+                console.log('Updated existing remote:', name, url);
+            } else {
+                console.error('Add remote error:', error);
+                throw new Error(`Failed to add remote: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
+        }
+    }
+
+    async getRemotes(dir: string): Promise<Array<{ remote: string; url: string }>> {
+        try {
+            return await git.listRemotes({ fs, dir });
+        } catch (error) {
+            console.error('List remotes error:', error);
+            throw new Error(`Failed to list remotes: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+
+    async hasGitRepository(dir: string): Promise<boolean> {
+        try {
+            await git.resolveRef({ fs, dir, ref: 'HEAD' });
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    async setConfig(dir: string, path: string, value: string): Promise<void> {
+        try {
+            await git.setConfig({
+                fs,
+                dir,
+                path,
+                value
+            });
+            console.log(`Git config set: ${path} = ${value}`);
+        } catch (error) {
+            console.error('Set config error:', error);
+            throw new Error(`Failed to set git config: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+
+    async getConfig(dir: string, path: string): Promise<string | void> {
+        try {
+            const value = await git.getConfig({
+                fs,
+                dir,
+                path
+            });
+            return value;
+        } catch (error) {
+            console.error('Get config error:', error);
+            return undefined;
+        }
+    }
+
+    async configureAuthor(dir: string, name: string, email: string): Promise<void> {
+        await this.setConfig(dir, 'user.name', name);
+        await this.setConfig(dir, 'user.email', email);
     }
 }

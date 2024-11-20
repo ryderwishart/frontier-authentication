@@ -4,6 +4,7 @@ import * as glob from 'glob';
 
 export function run(): Promise<void> {
     // Create the mocha test
+    // @ts-expect-error Mocha is apparently not a constructor, but it works!
     const mocha = new Mocha({
         ui: 'tdd',
         color: true
@@ -18,7 +19,7 @@ export function run(): Promise<void> {
 
         try {
             // Run the mocha test
-            mocha.run(failures => {
+            mocha.run((failures: number) => {
                 if (failures > 0) {
                     reject(new Error(`${failures} tests failed.`));
                 } else {

@@ -248,7 +248,10 @@ export class GitLabService {
         }
     }
 
-    getToken(): string | undefined {
+    async getToken(): Promise<string | undefined> {
+        if (!this.gitlabToken) {
+            await this.initialize();
+        }
         return this.gitlabToken;
     }
 

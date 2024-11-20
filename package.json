@@ -1,7 +1,8 @@
 {
   "name": "frontier-authentication",
-  "displayName": "frontier-authentication",
-  "description": "Authenticate with remote server",
+  "displayName": "Frontier Authentication",
+  "description": "Authentication extension for Frontier",
+  "publisher": "frontier-rnd",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.87.0"
@@ -18,30 +19,41 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "codex",
-          "title": "Codex",
+          "id": "frontier-sidebar",
+          "title": "Cloud Sync",
           "icon": "$(cloud-download)"
         }
       ]
     },
     "views": {
-      "codex": [
+      "frontier-sidebar": [
         {
           "type": "webview",
-          "id": "codex.auth",
-          "name": "Authentication",
-          "when": "!codex.isAuthenticated"
+          "id": "frontier.auth",
+          "name": "Frontier Authentication"
         }
       ]
     },
     "commands": [
       {
         "command": "frontier.login",
-        "title": "Login"
+        "title": "Login",
+        "category": "Frontier"
       },
       {
-        "command": "frontier.register",
-        "title": "Register"
+        "command": "frontier.logout",
+        "title": "Logout",
+        "category": "Frontier"
+      },
+      {
+        "command": "frontier.listProjects",
+        "title": "List Projects",
+        "category": "Frontier"
+      },
+      {
+        "command": "frontier.cloneRepository",
+        "title": "Clone Repository",
+        "category": "Frontier"
       },
       {
         "command": "frontier.createGitLabProject",
@@ -49,18 +61,8 @@
         "category": "Frontier"
       },
       {
-        "command": "frontier.listProjects",
-        "title": "List GitLab Projects",
-        "category": "Frontier"
-      },
-      {
         "command": "frontier.createAndCloneProject",
         "title": "Create and Clone GitLab Project",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.cloneRepository",
-        "title": "Clone GitLab Repository",
         "category": "Frontier"
       },
       {
