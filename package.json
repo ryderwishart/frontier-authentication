@@ -11,29 +11,10 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:frontier.loginView",
-    "onView:frontier.registerView"
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "frontier-sidebar",
-          "title": "Cloud Sync",
-          "icon": "$(cloud-download)"
-        }
-      ]
-    },
-    "views": {
-      "frontier-sidebar": [
-        {
-          "type": "webview",
-          "id": "frontier.auth",
-          "name": "Frontier Authentication"
-        }
-      ]
-    },
     "commands": [
       {
         "command": "frontier.login",
@@ -41,8 +22,18 @@
         "category": "Frontier"
       },
       {
+        "command": "frontier.register",
+        "title": "Register",
+        "category": "Frontier"
+      },
+      {
         "command": "frontier.logout",
         "title": "Logout",
+        "category": "Frontier"
+      },
+      {
+        "command": "frontier.getAuthStatus",
+        "title": "Get Authentication Status",
         "category": "Frontier"
       },
       {

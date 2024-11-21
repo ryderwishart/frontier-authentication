@@ -3,7 +3,6 @@
 import * as vscode from 'vscode';
 import { FrontierAuthProvider } from './auth/AuthenticationProvider';
 import { registerCommands } from './commands';
-import { AuthWebviewProvider } from './webviews/authWebviewProvider';
 import { registerGitLabCommands } from './commands/gitlabCommands';
 import { registerSCMCommands } from './commands/scmCommands';
 import { initialState, StateManager } from './state';
@@ -28,70 +27,56 @@ export async function activate(context: vscode.ExtensionContext) {
 	authenticationProvider = new FrontierAuthProvider(context, API_ENDPOINT);
 	await authenticationProvider.initialize();
 
-	// Only show activation message if not already authenticated
-	if (!authenticationProvider.isAuthenticated) {
-		vscode.window.showInformationMessage('Activating Frontier Authentication extension');
-	}
-
-	// Dispose existing providers if they exist
-	if (authenticationProvider) {
-		authenticationProvider.dispose();
-	}
-
-	// Create new providers
-	const authWebviewProvider = new AuthWebviewProvider(
-		context.extensionUri,
-		authenticationProvider,
-		API_ENDPOINT,
-		stateManager,
-		initialState.auth
-	);
-
-	// Register the authentication webview provider
-	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider(
-			AuthWebviewProvider.viewType,
-			authWebviewProvider
-		)
-	);
-
 	// Register commands
 	registerCommands(context, authenticationProvider);
 	registerGitLabCommands(context, authenticationProvider);
 	registerSCMCommands(context, authenticationProvider);
 
-	// Register status bar item
+	// Create and register status bar item immediately
 	const statusBarItem = vscode.window.createStatusBarItem(
-		vscode.StatusBarAlignment.Right
+		vscode.StatusBarAlignment.Right,
+		100
 	);
 	context.subscriptions.push(statusBarItem);
 
 	// Update status bar when state changes
 	stateManager.onDidChangeState(() => {
 		updateStatusBar(statusBarItem, stateManager.getAuthState());
-		authWebviewProvider.refresh();
 	});
 
-	// Initial status bar and webview updates
+	// Initial status bar update and show
 	updateStatusBar(statusBarItem, stateManager.getAuthState());
-	authWebviewProvider.refresh();
+	statusBarItem.show();
 
-	// Add new command for confirming logout
-	context.subscriptions.push(
-		vscode.commands.registerCommand('frontier.confirmLogout', async () => {
-			const choice = await vscode.window.showWarningMessage(
-				'Are you sure you want to log out?',
-				{ modal: true },
-				'Log Out',
-				'Cancel'
-			);
+	// Only show activation message if not already authenticated
+	if (!authenticationProvider.isAuthenticated) {
+		vscode.window.showInformationMessage('Frontier Authentication: Click the status bar icon to log in');
+	}
 
-			if (choice === 'Log Out') {
-				await authenticationProvider.logout();
-				vscode.window.showInformationMessage('Successfully logged out');
-			}
-		})
-	);
+	// Dispose existing providers if they exist
+	if (authenticationProvider) {
+		// Removed dispose call here
+	}
+
+	// Register status bar item
+	// Removed redundant registration here
+
+	return {
+		// Export the authentication provider for other extensions
+		authProvider: authenticationProvider,
+		
+		// Export convenience methods
+		getAuthStatus: () => authenticationProvider.getAuthStatus(),
+		onAuthStatusChanged: (callback: (status: { isAuthenticated: boolean; gitlabInfo?: any }) => void) => 
+			authenticationProvider.onAuthStatusChanged(callback),
+		
+		// Export direct auth methods
+		login: async (username: string, password: string) => 
+			vscode.commands.executeCommand('frontier.login', username, password),
+		register: async (username: string, email: string, password: string) => 
+			vscode.commands.executeCommand('frontier.register', username, email, password),
+		logout: async () => vscode.commands.executeCommand('frontier.logout')
+	};
 }
 
 function updateStatusBar(
@@ -99,13 +84,15 @@ function updateStatusBar(
 	authState: AuthState
 ) {
 	if (authState.isAuthenticated) {
-		statusBarItem.text = "$(check) Authenticated";
-		statusBarItem.command = 'frontier.confirmLogout';
+		statusBarItem.text = '$(check) Frontier: Logged In';
+		statusBarItem.tooltip = 'Click to log out';
+		statusBarItem.command = 'frontier.logout';
 	} else {
-		statusBarItem.text = "$(key) Login";
+		statusBarItem.text = '$(sign-in) Frontier: Sign In';
+		statusBarItem.tooltip = 'Click to log in';
 		statusBarItem.command = 'frontier.login';
 	}
-	statusBarItem.show();
+	statusBarItem.show(); // Always show the status bar item
 }
 
 // This method is called when your extension is deactivated

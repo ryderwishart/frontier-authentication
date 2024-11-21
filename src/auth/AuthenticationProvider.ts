@@ -22,6 +22,12 @@ interface ExtendedAuthSession extends vscode.AuthenticationSession {
     gitlabUrl?: string;
 }
 
+interface GitLabInfoResponse {
+    user_id: number;
+    username: string;
+    project_count: number;
+}
+
 export class FrontierAuthProvider implements vscode.AuthenticationProvider, vscode.Disposable {
     private static readonly AUTH_TYPE = 'frontier';
     private static readonly AUTH_NAME = 'Frontier Authentication';
@@ -171,6 +177,153 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         await this.stateManager.updateAuthState({
             isAuthenticated: false,
             gitlabInfo: undefined
+        });
+    }
+
+    async login(username: string, password: string): Promise<boolean> {
+        try {
+            const formData = new URLSearchParams({
+                username: username,
+                password: password,
+                grant_type: 'password',
+                scope: ''
+            });
+
+            const response = await fetch(`${this.API_ENDPOINT}/auth/token`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Accept': 'application/json',
+                },
+                body: formData
+            });
+
+            if (!response.ok) {
+                return false;
+            }
+
+            const result = await response.json();
+
+            // Validate required fields
+            if (!result.gitlab_token || !result.gitlab_url) {
+                throw new Error('Invalid server response: missing GitLab credentials');
+            }
+
+            // Store all tokens
+            await this.setTokens(result);
+
+            // Get state manager instance and update GitLab credentials
+            const stateManager = StateManager.getInstance();
+            await stateManager.updateGitLabCredentials({
+                token: result.gitlab_token,
+                url: result.gitlab_url
+            });
+
+            return true;
+        } catch (error) {
+            console.error('Login error:', error);
+            return false;
+        }
+    }
+
+    private validatePassword(password: string) {
+        if (password.length < 8) {
+            throw new Error('Password must be at least 8 characters long');
+        }
+        // Add any other password validation rules here
+    }
+
+    private async handleResponse<T>(response: Response): Promise<T> {
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(errorText || 'Request failed');
+        }
+        return response.json();
+    }
+
+    private async fetchGitLabInfo() {
+        try {
+            const token = await this.getToken();
+            if (!token) {
+                throw new Error('No authentication token found');
+            }
+
+            const response = await fetch(`${this.API_ENDPOINT}/gitlab/me`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/json'
+                }
+            });
+
+            const gitlabInfo = await this.handleResponse(response) as GitLabInfoResponse;
+            const stateManager = StateManager.getInstance();
+            await stateManager.updateAuthState({
+                isAuthenticated: true,
+                gitlabInfo
+            });
+
+            return gitlabInfo;
+        } catch (error) {
+            console.error('Error fetching GitLab info:', error);
+            throw error;
+        }
+    }
+
+    async register(username: string, email: string, password: string): Promise<boolean> {
+        try {
+            this.validatePassword(password);
+
+            const response = await fetch(`${this.API_ENDPOINT}/auth/register`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify({
+                    username,
+                    email,
+                    password,
+                }),
+            });
+
+            const result = await this.handleResponse<TokenResponse>(response);
+
+            // Validate required fields
+            if (!result.gitlab_token || !result.gitlab_url) {
+                throw new Error('Invalid server response: missing GitLab credentials');
+            }
+
+            // Store all tokens
+            await this.setTokens(result);
+
+            // Get state manager instance and update GitLab credentials
+            const stateManager = StateManager.getInstance();
+            await stateManager.updateGitLabCredentials({
+                token: result.gitlab_token,
+                url: result.gitlab_url
+            });
+
+            // Fetch GitLab info and update state
+            await this.fetchGitLabInfo();
+
+            return true;
+        } catch (error) {
+            console.error('Registration error:', error);
+            throw error; // Re-throw to let the command handler show the error
+        }
+    }
+
+    getAuthStatus(): { isAuthenticated: boolean; gitlabInfo?: any } {
+        const stateManager = StateManager.getInstance();
+        return {
+            isAuthenticated: this.isAuthenticated,
+            gitlabInfo: stateManager.getAuthState().gitlabInfo
+        };
+    }
+
+    onAuthStatusChanged(callback: (status: { isAuthenticated: boolean; gitlabInfo?: any }) => void): vscode.Disposable {
+        return this._onDidChangeAuthentication.event(() => {
+            callback(this.getAuthStatus());
         });
     }
 
