@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { StateManager } from '../state';
 
 // Add interface for token response
 interface TokenResponse {
@@ -85,11 +86,34 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                             gitlabToken: sessionData.gitlabToken,
                             gitlabUrl: sessionData.gitlabUrl
                         }];
+
+                        // Update state manager with restored session data
+                        await this.stateManager.updateAuthState({
+                            isAuthenticated: true,
+                            gitlabCredentials: {
+                                token: sessionData.gitlabToken,
+                                url: sessionData.gitlabUrl
+                            }
+                        });
+
+                        // Fetch and update GitLab info
+                        try {
+                            const gitlabInfo = await this.fetchGitLabInfo();
+                            await this.stateManager.updateAuthState({ gitlabInfo });
+                        } catch (error) {
+                            console.error('Failed to fetch GitLab info during session restore:', error);
+                        }
+
                         this._onDidChangeSessions.fire({ added: this._sessions, removed: [], changed: [] });
                         this._onDidChangeAuthentication.fire();
                     } else {
                         // If token is invalid, clean up stored data
                         await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
+                        await this.stateManager.updateAuthState({
+                            isAuthenticated: false,
+                            gitlabCredentials: undefined,
+                            gitlabInfo: undefined
+                        });
                     }
                 }
             } catch (error) {
