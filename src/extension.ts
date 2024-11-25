@@ -24,7 +24,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	const stateManager = StateManager.initialize(context);
 
 	// Initialize auth provider with state manager
-	authenticationProvider = new FrontierAuthProvider(context, API_ENDPOINT);
+	authenticationProvider = new FrontierAuthProvider(context, API_ENDPOINT, stateManager);
 	await authenticationProvider.initialize();
 
 	// Register commands

@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { StateManager } from '../state';
 
 // Add interface for token response
 interface TokenResponse {
@@ -44,9 +43,11 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
     private _onDidChangeAuthentication = new vscode.EventEmitter<void>();
     readonly onDidChangeAuthentication = this._onDidChangeAuthentication.event;
 
-    private readonly stateManager = StateManager.getInstance();
+    private readonly stateManager: StateManager;
 
-    constructor(private readonly context: vscode.ExtensionContext, private readonly API_ENDPOINT: string) {
+    constructor(private readonly context: vscode.ExtensionContext, private readonly apiEndpoint: string, stateManager: StateManager) {
+        this.stateManager = stateManager;
+
         // Register the auth provider
         context.subscriptions.push(
             vscode.authentication.registerAuthenticationProvider(
@@ -104,7 +105,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
     private async validateStoredToken(token: string): Promise<boolean> {
         try {
-            const response = await fetch(`${this.API_ENDPOINT}/auth/me`, {
+            const response = await fetch(`${this.apiEndpoint}/auth/me`, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Accept': 'application/json'
@@ -189,7 +190,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                 scope: ''
             });
 
-            const response = await fetch(`${this.API_ENDPOINT}/auth/token`, {
+            const response = await fetch(`${this.apiEndpoint}/auth/token`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
@@ -213,8 +214,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
             await this.setTokens(result);
 
             // Get state manager instance and update GitLab credentials
-            const stateManager = StateManager.getInstance();
-            await stateManager.updateGitLabCredentials({
+            await this.stateManager.updateGitLabCredentials({
                 token: result.gitlab_token,
                 url: result.gitlab_url
             });
@@ -248,7 +248,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                 throw new Error('No authentication token found');
             }
 
-            const response = await fetch(`${this.API_ENDPOINT}/gitlab/info`, {
+            const response = await fetch(`${this.apiEndpoint}/gitlab/info`, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Accept': 'application/json'
@@ -256,8 +256,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
             });
 
             const gitlabInfo = await this.handleResponse(response) as GitLabInfoResponse;
-            const stateManager = StateManager.getInstance();
-            await stateManager.updateAuthState({
+            await this.stateManager.updateAuthState({
                 isAuthenticated: true,
                 gitlabInfo
             });
@@ -273,7 +272,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         try {
             this.validatePassword(password);
 
-            const response = await fetch(`${this.API_ENDPOINT}/auth/register`, {
+            const response = await fetch(`${this.apiEndpoint}/auth/register`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -297,8 +296,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
             await this.setTokens(result);
 
             // Get state manager instance and update GitLab credentials
-            const stateManager = StateManager.getInstance();
-            await stateManager.updateGitLabCredentials({
+            await this.stateManager.updateGitLabCredentials({
                 token: result.gitlab_token,
                 url: result.gitlab_url
             });
@@ -314,10 +312,9 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
     }
 
     getAuthStatus(): { isAuthenticated: boolean; gitlabInfo?: any } {
-        const stateManager = StateManager.getInstance();
         return {
             isAuthenticated: this.isAuthenticated,
-            gitlabInfo: stateManager.getAuthState().gitlabInfo
+            gitlabInfo: this.stateManager.getAuthState().gitlabInfo
         };
     }
 
