@@ -248,7 +248,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                 throw new Error('No authentication token found');
             }
 
-            const response = await fetch(`${this.API_ENDPOINT}/gitlab/me`, {
+            const response = await fetch(`${this.API_ENDPOINT}/gitlab/info`, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Accept': 'application/json'
@@ -304,7 +304,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
             });
 
             // Fetch GitLab info and update state
-            await this.fetchGitLabInfo();
+            // await this.fetchGitLabInfo(); // NOTE: now we just access gitlab directly with the user's gitlab token create during registration, so we don't need this anymore.
 
             return true;
         } catch (error) {
