@@ -12,11 +12,9 @@ export interface FrontierAPI {
     authProvider: FrontierAuthProvider;
     getAuthStatus: () => { 
         isAuthenticated: boolean; 
-        gitlabInfo?: any;
     };
     onAuthStatusChanged: (callback: (status: { 
         isAuthenticated: boolean; 
-        gitlabInfo?: any 
     }) => void) => vscode.Disposable;
     login: (username: string, password: string) => Promise<boolean>;
     register: (username: string, email: string, password: string) => Promise<boolean>;
@@ -82,7 +80,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		
 		// Export convenience methods
 		getAuthStatus: () => authenticationProvider.getAuthStatus(),
-		onAuthStatusChanged: (callback: (status: { isAuthenticated: boolean; gitlabInfo?: any }) => void) => 
+		onAuthStatusChanged: (callback: (status: { isAuthenticated: boolean; }) => void) => 
 			authenticationProvider.onAuthStatusChanged(callback),
 		
 		// Export direct auth methods
