@@ -8,6 +8,21 @@ import { registerSCMCommands } from './commands/scmCommands';
 import { initialState, StateManager } from './state';
 import { AuthState } from './types/state';
 
+export interface FrontierAPI {
+    authProvider: FrontierAuthProvider;
+    getAuthStatus: () => { 
+        isAuthenticated: boolean; 
+        gitlabInfo?: any;
+    };
+    onAuthStatusChanged: (callback: (status: { 
+        isAuthenticated: boolean; 
+        gitlabInfo?: any 
+    }) => void) => vscode.Disposable;
+    login: (username: string, password: string) => Promise<boolean>;
+    register: (username: string, email: string, password: string) => Promise<boolean>;
+    logout: () => Promise<void>;
+}
+
 let authenticationProvider: FrontierAuthProvider;
 
 const API_ENDPOINT = 'https://api.frontierrnd.com/api/v1';
@@ -72,11 +87,11 @@ export async function activate(context: vscode.ExtensionContext) {
 		
 		// Export direct auth methods
 		login: async (username: string, password: string) => 
-			vscode.commands.executeCommand('frontier.login', username, password),
+			vscode.commands.executeCommand('frontier.login', username, password) as Promise<boolean>,
 		register: async (username: string, email: string, password: string) => 
-			vscode.commands.executeCommand('frontier.register', username, email, password),
+			vscode.commands.executeCommand('frontier.register', username, email, password) as Promise<boolean>,
 		logout: async () => vscode.commands.executeCommand('frontier.logout')
-	};
+	} as FrontierAPI;
 }
 
 function updateStatusBar(
