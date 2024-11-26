@@ -19,6 +19,17 @@ export interface FrontierAPI {
     login: (username: string, password: string) => Promise<boolean>;
     register: (username: string, email: string, password: string) => Promise<boolean>;
     logout: () => Promise<void>;
+    listProjects: (showUI?: boolean) => Promise<Array<{
+        id: number;
+        name: string;
+        description: string | null;
+        visibility: string;
+        url: string;
+        webUrl: string;
+        lastActivity: string;
+        namespace: string;
+        owner: string;
+    }>>;
 }
 
 let authenticationProvider: FrontierAuthProvider;
@@ -88,7 +99,19 @@ export async function activate(context: vscode.ExtensionContext) {
 			vscode.commands.executeCommand('frontier.login', username, password) as Promise<boolean>,
 		register: async (username: string, email: string, password: string) => 
 			vscode.commands.executeCommand('frontier.register', username, email, password) as Promise<boolean>,
-		logout: async () => vscode.commands.executeCommand('frontier.logout')
+		logout: async () => vscode.commands.executeCommand('frontier.logout'),
+		listProjects: async (showUI = true) => 
+			vscode.commands.executeCommand('frontier.listProjects', { showUI }) as Promise<Array<{
+				id: number;
+				name: string;
+				description: string | null;
+				visibility: string;
+				url: string;
+				webUrl: string;
+				lastActivity: string;
+				namespace: string;
+				owner: string;
+			}>>,
 	} as FrontierAPI;
 }
 

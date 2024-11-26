@@ -3,7 +3,7 @@
   "displayName": "Frontier Authentication",
   "description": "Authentication extension for Frontier",
   "publisher": "frontier-rnd",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "engines": {
     "vscode": "^1.87.0"
   },
