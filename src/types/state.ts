@@ -16,8 +16,8 @@ export interface GitLabCredentials {
 
 export interface AuthState {
     isAuthenticated: boolean;
-    connectionStatus: 'connected' | 'disconnected';
-    currentView: 'login' | 'register';
+    connectionStatus: "connected" | "disconnected";
+    currentView: "login" | "register";
     gitlabInfo?: GitLabInfo;
     gitlabCredentials?: GitLabCredentials;
     lastSyncTimestamp?: number;
@@ -33,17 +33,13 @@ export interface GlobalState {
 // Add some type guards for better type safety
 export const isGitLabInfo = (obj: any): obj is GitLabInfo => {
     return (
-        typeof obj === 'object' &&
-        typeof obj.username === 'string' &&
-        typeof obj.project_count === 'number' &&
-        typeof obj.user_id === 'number'
+        typeof obj === "object" &&
+        typeof obj.username === "string" &&
+        typeof obj.project_count === "number" &&
+        typeof obj.user_id === "number"
     );
 };
 
 export const isGitLabCredentials = (obj: any): obj is GitLabCredentials => {
-    return (
-        typeof obj === 'object' &&
-        typeof obj.token === 'string' &&
-        typeof obj.url === 'string'
-    );
-}; 
+    return typeof obj === "object" && typeof obj.token === "string" && typeof obj.url === "string";
+};

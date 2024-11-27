@@ -1,8 +1,8 @@
-import * as git from 'isomorphic-git';
-import http from 'isomorphic-git/http/web';
-import * as fs from 'fs';
-import * as vscode from 'vscode';
-import * as path from 'path';
+import * as git from "isomorphic-git";
+import http from "isomorphic-git/http/web";
+import * as fs from "fs";
+import * as vscode from "vscode";
+import * as path from "path";
 
 export class GitService {
     constructor() {
@@ -17,8 +17,8 @@ export class GitService {
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
-                title: 'Cloning repository...',
-                cancellable: false
+                title: "Cloning repository...",
+                cancellable: false,
             },
             async (progress) => {
                 try {
@@ -32,20 +32,22 @@ export class GitService {
                         dir,
                         url,
                         onProgress: (event) => {
-                            if (event.phase === 'Receiving objects') {
+                            if (event.phase === "Receiving objects") {
                                 progress.report({
                                     message: `${event.phase}: ${event.loaded}/${event.total} objects`,
-                                    increment: (event.loaded / event.total) * 100
+                                    increment: (event.loaded / event.total) * 100,
                                 });
                             }
                         },
                         ...(auth && {
-                            onAuth: () => auth
-                        })
+                            onAuth: () => auth,
+                        }),
                     });
                 } catch (error) {
-                    console.error('Clone error:', error);
-                    throw new Error(`Failed to clone repository: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                    console.error("Clone error:", error);
+                    throw new Error(
+                        `Failed to clone repository: ${error instanceof Error ? error.message : "Unknown error"}`
+                    );
                 }
             }
         );
@@ -65,25 +67,26 @@ export class GitService {
         );
     }
 
-    async commit(dir: string, message: string, author: { name: string; email: string }): Promise<string> {
+    async commit(
+        dir: string,
+        message: string,
+        author: { name: string; email: string }
+    ): Promise<string> {
         const sha = await git.commit({
             fs,
             dir,
             message,
-            author
+            author,
         });
         return sha;
     }
 
-    async push(
-        dir: string,
-        auth: { username: string; password: string }
-    ): Promise<void> {
+    async push(dir: string, auth: { username: string; password: string }): Promise<void> {
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
-                title: 'Pushing changes...',
-                cancellable: false
+                title: "Pushing changes...",
+                cancellable: false,
             },
             async (progress) => {
                 try {
@@ -96,14 +99,16 @@ export class GitService {
                             if (event.phase) {
                                 progress.report({
                                     message: event.phase,
-                                    increment: 20
+                                    increment: 20,
                                 });
                             }
-                        }
+                        },
                     });
                 } catch (error) {
-                    console.error('Push error:', error);
-                    throw new Error(`Failed to push changes: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                    console.error("Push error:", error);
+                    throw new Error(
+                        `Failed to push changes: ${error instanceof Error ? error.message : "Unknown error"}`
+                    );
                 }
             }
         );
@@ -117,8 +122,8 @@ export class GitService {
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
-                title: 'Pulling changes...',
-                cancellable: false
+                title: "Pulling changes...",
+                cancellable: false,
             },
             async (progress) => {
                 try {
@@ -136,14 +141,16 @@ export class GitService {
                             if (event.phase) {
                                 progress.report({
                                     message: event.phase,
-                                    increment: 20
+                                    increment: 20,
                                 });
                             }
-                        }
+                        },
                     });
                 } catch (error) {
-                    console.error('Pull error:', error);
-                    throw new Error(`Failed to pull changes: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                    console.error("Pull error:", error);
+                    throw new Error(
+                        `Failed to pull changes: ${error instanceof Error ? error.message : "Unknown error"}`
+                    );
                 }
             }
         );
@@ -154,7 +161,7 @@ export class GitService {
     }
 
     async getCurrentBranch(dir: string): Promise<string | void> {
-        return git.currentBranch({ fs, dir }) || 'main';
+        return git.currentBranch({ fs, dir }) || "main";
     }
 
     async listBranches(dir: string): Promise<string[]> {
@@ -173,13 +180,13 @@ export class GitService {
         try {
             const config = await git.listRemotes({
                 fs,
-                dir
+                dir,
             });
-            
-            const origin = config.find(remote => remote.remote === 'origin');
+
+            const origin = config.find((remote) => remote.remote === "origin");
             return origin?.url;
         } catch (error) {
-            console.error('Error getting remote URL:', error);
+            console.error("Error getting remote URL:", error);
             return undefined;
         }
     }
@@ -187,26 +194,30 @@ export class GitService {
     async init(dir: string): Promise<void> {
         try {
             await git.init({ fs, dir });
-            console.log('Git repository initialized at:', dir);
+            console.log("Git repository initialized at:", dir);
         } catch (error) {
-            console.error('Init error:', error);
-            throw new Error(`Failed to initialize repository: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            console.error("Init error:", error);
+            throw new Error(
+                `Failed to initialize repository: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
         }
     }
 
     async addRemote(dir: string, name: string, url: string): Promise<void> {
         try {
             await git.addRemote({ fs, dir, remote: name, url });
-            console.log('Added remote:', name, url);
+            console.log("Added remote:", name, url);
         } catch (error) {
             // If remote already exists, try to update it
-            if (error instanceof Error && error.message.includes('already exists')) {
+            if (error instanceof Error && error.message.includes("already exists")) {
                 await git.deleteRemote({ fs, dir, remote: name });
                 await git.addRemote({ fs, dir, remote: name, url });
-                console.log('Updated existing remote:', name, url);
+                console.log("Updated existing remote:", name, url);
             } else {
-                console.error('Add remote error:', error);
-                throw new Error(`Failed to add remote: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                console.error("Add remote error:", error);
+                throw new Error(
+                    `Failed to add remote: ${error instanceof Error ? error.message : "Unknown error"}`
+                );
             }
         }
     }
@@ -215,14 +226,16 @@ export class GitService {
         try {
             return await git.listRemotes({ fs, dir });
         } catch (error) {
-            console.error('List remotes error:', error);
-            throw new Error(`Failed to list remotes: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            console.error("List remotes error:", error);
+            throw new Error(
+                `Failed to list remotes: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
         }
     }
 
     async hasGitRepository(dir: string): Promise<boolean> {
         try {
-            await git.resolveRef({ fs, dir, ref: 'HEAD' });
+            await git.resolveRef({ fs, dir, ref: "HEAD" });
             return true;
         } catch (error) {
             return false;
@@ -235,12 +248,14 @@ export class GitService {
                 fs,
                 dir,
                 path,
-                value
+                value,
             });
             console.log(`Git config set: ${path} = ${value}`);
         } catch (error) {
-            console.error('Set config error:', error);
-            throw new Error(`Failed to set git config: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            console.error("Set config error:", error);
+            throw new Error(
+                `Failed to set git config: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
         }
     }
 
@@ -249,17 +264,17 @@ export class GitService {
             const value = await git.getConfig({
                 fs,
                 dir,
-                path
+                path,
             });
             return value;
         } catch (error) {
-            console.error('Get config error:', error);
+            console.error("Get config error:", error);
             return undefined;
         }
     }
 
     async configureAuthor(dir: string, name: string, email: string): Promise<void> {
-        await this.setConfig(dir, 'user.name', name);
-        await this.setConfig(dir, 'user.email', email);
+        await this.setConfig(dir, "user.name", name);
+        await this.setConfig(dir, "user.email", email);
     }
 }

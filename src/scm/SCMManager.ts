@@ -1,7 +1,7 @@
-import * as vscode from 'vscode';
-import * as path from 'path';
-import { GitService } from '../git/GitService';
-import { GitLabService } from '../gitlab/GitLabService';
+import * as vscode from "vscode";
+import * as path from "path";
+import { GitService } from "../git/GitService";
+import { GitLabService } from "../gitlab/GitLabService";
 
 export class SCMManager {
     private scmProvider: vscode.SourceControl;
@@ -19,16 +19,16 @@ export class SCMManager {
         this.context = context;
         this.gitService = new GitService();
         this.gitLabService = gitLabService;
-        
+
         // We'll initialize the SCM provider when we have a workspace
-        this.scmProvider = vscode.scm.createSourceControl('genesis', 'Genesis SCM');
-        
+        this.scmProvider = vscode.scm.createSourceControl("genesis", "Genesis SCM");
+
         // Initialize resource groups
-        this.workingTree = this.scmProvider.createResourceGroup('working', 'Working Tree');
-        this.staging = this.scmProvider.createResourceGroup('staging', 'Staged Changes');
-        
+        this.workingTree = this.scmProvider.createResourceGroup("working", "Working Tree");
+        this.staging = this.scmProvider.createResourceGroup("staging", "Staged Changes");
+
         // Set up input box for commit messages
-        this.scmProvider.inputBox.placeholder = 'Enter commit message';
+        this.scmProvider.inputBox.placeholder = "Enter commit message";
 
         // Register sync commands
         this.registerCommands();
@@ -37,34 +37,34 @@ export class SCMManager {
     private getWorkspacePath(): string {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
-            throw new Error('No workspace folder found');
+            throw new Error("No workspace folder found");
         }
         const path = workspaceFolder.uri.fsPath;
-        console.log('Using workspace path:', path);
+        console.log("Using workspace path:", path);
         return path;
     }
 
     private registerCommands(): void {
         // Manual sync command
         this.context.subscriptions.push(
-            vscode.commands.registerCommand('frontier.syncChanges', () => this.syncChanges())
+            vscode.commands.registerCommand("frontier.syncChanges", () => this.syncChanges())
         );
 
         // Toggle auto-sync command
         this.context.subscriptions.push(
-            vscode.commands.registerCommand('frontier.toggleAutoSync', () => this.toggleAutoSync())
+            vscode.commands.registerCommand("frontier.toggleAutoSync", () => this.toggleAutoSync())
         );
 
         // Commit changes command (used by SCM input box)
         this.context.subscriptions.push(
-            vscode.commands.registerCommand('frontier.commitChanges', () => this.commitChanges())
+            vscode.commands.registerCommand("frontier.commitChanges", () => this.commitChanges())
         );
     }
 
     async createAndCloneProject(options: {
         name: string;
         description?: string;
-        visibility?: 'private' | 'internal' | 'public';
+        visibility?: "private" | "internal" | "public";
         organizationId?: string;
         workspacePath?: string;
     }): Promise<void> {
@@ -77,13 +77,14 @@ export class SCMManager {
                 name: options.name,
                 description: options.description,
                 visibility: options.visibility,
-                organizationId: options.organizationId
+                organizationId: options.organizationId,
             });
 
             // Determine workspace path
-            const workspacePath = options.workspacePath || await this.promptForWorkspacePath(options.name);
+            const workspacePath =
+                options.workspacePath || (await this.promptForWorkspacePath(options.name));
             if (!workspacePath) {
-                throw new Error('No workspace path selected');
+                throw new Error("No workspace path selected");
             }
 
             // Clone the repository using the token for authentication
@@ -95,11 +96,13 @@ export class SCMManager {
             // Initialize SCM
             await this.initializeSCM(workspacePath);
 
-            const action = project.url.includes('already exists') ? 'cloned' : 'created and cloned';
+            const action = project.url.includes("already exists") ? "cloned" : "created and cloned";
             vscode.window.showInformationMessage(`Project ${options.name} ${action} successfully!`);
         } catch (error) {
             if (error instanceof Error) {
-                vscode.window.showErrorMessage(`Failed to create and clone project: ${error.message}`);
+                vscode.window.showErrorMessage(
+                    `Failed to create and clone project: ${error.message}`
+                );
             }
             throw error;
         }
@@ -113,19 +116,19 @@ export class SCMManager {
             // Get GitLab credentials
             const gitlabToken = await this.gitLabService.getToken();
             if (!gitlabToken) {
-                throw new Error('GitLab token not available');
+                throw new Error("GitLab token not available");
             }
 
             // Extract project name from URL and construct authenticated URL
             const url = new URL(repoUrl);
-            const projectName = url.pathname.split('/').pop()?.replace('.git', '') || 'project';
-            url.username = 'oauth2';
+            const projectName = url.pathname.split("/").pop()?.replace(".git", "") || "project";
+            url.username = "oauth2";
             url.password = gitlabToken;
-            
+
             // Get workspace path
             const workspacePath = await this.promptForWorkspacePath(projectName);
             if (!workspacePath) {
-                throw new Error('No workspace path selected');
+                throw new Error("No workspace path selected");
             }
 
             // Clone the repository
@@ -137,7 +140,7 @@ export class SCMManager {
             // Initialize SCM
             await this.initializeSCM(workspacePath);
 
-            vscode.window.showInformationMessage('Repository cloned successfully!');
+            vscode.window.showInformationMessage("Repository cloned successfully!");
         } catch (error) {
             if (error instanceof Error) {
                 vscode.window.showErrorMessage(`Failed to clone repository: ${error.message}`);
@@ -149,12 +152,12 @@ export class SCMManager {
     private async promptForWorkspacePath(defaultName: string): Promise<string | undefined> {
         // Use the default downloads directory or home directory
         const homeDir = process.env.HOME || process.env.USERPROFILE;
-        const defaultUri = vscode.Uri.file(path.join(homeDir || '', defaultName));
-        
+        const defaultUri = vscode.Uri.file(path.join(homeDir || "", defaultName));
+
         const result = await vscode.window.showSaveDialog({
             defaultUri,
-            title: 'Select Workspace Location',
-            filters: { 'All Files': ['*'] }
+            title: "Select Workspace Location",
+            filters: { "All Files": ["*"] },
         });
 
         if (result) {
@@ -163,7 +166,11 @@ export class SCMManager {
                 await vscode.workspace.fs.createDirectory(result);
                 return result.fsPath;
             } catch (error) {
-                vscode.window.showErrorMessage(`Failed to create directory: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                vscode.window.showErrorMessage(
+                    `Failed to create directory: ${
+                        error instanceof Error ? error.message : "Unknown error"
+                    }`
+                );
                 return undefined;
             }
         }
@@ -175,13 +182,13 @@ export class SCMManager {
             const url = new URL(repoUrl);
             const gitlabToken = await this.gitLabService.getToken();
             if (!gitlabToken) {
-                throw new Error('GitLab token not available');
+                throw new Error("GitLab token not available");
             }
 
             // Set up authentication
             const auth = {
-                username: 'oauth2',
-                password: gitlabToken
+                username: "oauth2",
+                password: gitlabToken,
             };
 
             // Clone the repository
@@ -189,14 +196,18 @@ export class SCMManager {
 
             // Ensure remote is properly configured
             const remotes = await this.gitService.getRemotes(workspacePath);
-            if (!remotes.some(r => r.remote === 'origin')) {
-                await this.gitService.addRemote(workspacePath, 'origin', repoUrl);
+            if (!remotes.some((r) => r.remote === "origin")) {
+                await this.gitService.addRemote(workspacePath, "origin", repoUrl);
             }
 
-            console.log('Repository cloned successfully to:', workspacePath);
+            console.log("Repository cloned successfully to:", workspacePath);
         } catch (error) {
-            console.error('Clone error:', error);
-            throw new Error(`Failed to clone repository: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            console.error("Clone error:", error);
+            throw new Error(
+                `Failed to clone repository: ${
+                    error instanceof Error ? error.message : "Unknown error"
+                }`
+            );
         }
     }
 
@@ -223,50 +234,54 @@ export class SCMManager {
             // Check remote configuration
             const remotes = await this.gitService.getRemotes(workspacePath);
             const remoteUrl = await this.gitService.getRemoteUrl(workspacePath);
-            
-            if (remoteUrl && !remotes.some(r => r.remote === 'origin')) {
-                await this.gitService.addRemote(workspacePath, 'origin', remoteUrl);
+
+            if (remoteUrl && !remotes.some((r) => r.remote === "origin")) {
+                await this.gitService.addRemote(workspacePath, "origin", remoteUrl);
             }
 
-            console.log('SCM initialized successfully');
+            console.log("SCM initialized successfully");
         } catch (error) {
-            console.error('SCM initialization error:', error);
-            throw new Error(`Failed to initialize SCM: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            console.error("SCM initialization error:", error);
+            throw new Error(
+                `Failed to initialize SCM: ${
+                    error instanceof Error ? error.message : "Unknown error"
+                }`
+            );
         }
     }
 
     private async openWorkspace(workspacePath: string): Promise<void> {
         const uri = vscode.Uri.file(workspacePath);
-        await vscode.commands.executeCommand('vscode.openFolder', uri);
+        await vscode.commands.executeCommand("vscode.openFolder", uri);
     }
 
     private async loadGitIgnore(workspacePath: string): Promise<void> {
         try {
-            const gitIgnoreUri = vscode.Uri.file(path.join(workspacePath, '.gitignore'));
+            const gitIgnoreUri = vscode.Uri.file(path.join(workspacePath, ".gitignore"));
             try {
                 const content = await vscode.workspace.fs.readFile(gitIgnoreUri);
                 this.gitIgnorePatterns = Buffer.from(content)
-                    .toString('utf8')
-                    .split('\n')
-                    .map(line => line.trim())
-                    .filter(line => line && !line.startsWith('#'));
+                    .toString("utf8")
+                    .split("\n")
+                    .map((line) => line.trim())
+                    .filter((line) => line && !line.startsWith("#"));
             } catch (error) {
                 // It's okay if .gitignore doesn't exist
                 this.gitIgnorePatterns = [];
             }
         } catch (error) {
-            console.error('Error loading .gitignore:', error);
+            console.error("Error loading .gitignore:", error);
             this.gitIgnorePatterns = [];
         }
     }
 
     private shouldIgnoreFile(filePath: string): boolean {
         const relativePath = vscode.workspace.asRelativePath(filePath);
-        return this.gitIgnorePatterns.some(pattern => {
-            if (pattern.endsWith('/')) {
+        return this.gitIgnorePatterns.some((pattern) => {
+            if (pattern.endsWith("/")) {
                 return relativePath.startsWith(pattern);
             }
-            return new RegExp(`^${pattern.replace(/\*/g, '.*')}$`).test(relativePath);
+            return new RegExp(`^${pattern.replace(/\*/g, ".*")}$`).test(relativePath);
         });
     }
 
@@ -276,23 +291,23 @@ export class SCMManager {
 
         // Create new watcher for all files in workspace
         this.fileSystemWatcher = vscode.workspace.createFileSystemWatcher(
-            new vscode.RelativePattern(workspacePath, '**/*')
+            new vscode.RelativePattern(workspacePath, "**/*")
         );
 
         // Handle file changes
-        this.fileSystemWatcher.onDidChange(async uri => {
+        this.fileSystemWatcher.onDidChange(async (uri) => {
             if (this.autoSyncEnabled && !this.shouldIgnoreFile(uri.fsPath)) {
                 await this.syncChanges();
             }
         });
 
-        this.fileSystemWatcher.onDidCreate(async uri => {
+        this.fileSystemWatcher.onDidCreate(async (uri) => {
             if (this.autoSyncEnabled && !this.shouldIgnoreFile(uri.fsPath)) {
                 await this.syncChanges();
             }
         });
 
-        this.fileSystemWatcher.onDidDelete(async uri => {
+        this.fileSystemWatcher.onDidDelete(async (uri) => {
             if (this.autoSyncEnabled && !this.shouldIgnoreFile(uri.fsPath)) {
                 await this.syncChanges();
             }
@@ -302,34 +317,36 @@ export class SCMManager {
     async syncChanges(): Promise<void> {
         const token = await this.gitLabService.getToken();
         if (!token) {
-            throw new Error('GitLab token not found. Please authenticate first.');
+            throw new Error("GitLab token not found. Please authenticate first.");
         }
 
         const auth = {
-            username: 'oauth2',
-            password: token
+            username: "oauth2",
+            password: token,
         };
 
         try {
             const workspacePath = this.getWorkspacePath();
-            console.log('Syncing changes in workspace:', workspacePath);
+            console.log("Syncing changes in workspace:", workspacePath);
 
             // Verify that this is a git repository
             try {
                 await this.gitService.getStatus(workspacePath);
             } catch (error) {
-                console.error('Git status check failed:', error);
-                throw new Error('Current workspace is not a git repository. Please initialize git or clone a repository first.');
+                console.error("Git status check failed:", error);
+                throw new Error(
+                    "Current workspace is not a git repository. Please initialize git or clone a repository first."
+                );
             }
-            
+
             // Get current user info for commit author details
             const user = await this.gitLabService.getCurrentUser();
             const authorName = user.name || user.username;
             const authorEmail = user.email || `${user.username}@users.noreply.gitlab.com`;
-            
+
             // Ensure git config is set
             await this.gitService.configureAuthor(workspacePath, authorName, authorEmail);
-            
+
             // Add all changes
             await this.gitService.addAll(workspacePath);
 
@@ -338,38 +355,52 @@ export class SCMManager {
             const hasChanges = status.some(([, , worktreeStatus]) => worktreeStatus !== 0);
 
             if (hasChanges) {
-                console.log('Changes detected, committing...');
+                console.log("Changes detected, committing...");
                 // Commit changes
-                await this.gitService.commit(workspacePath, 'Auto-sync changes', {
+                await this.gitService.commit(workspacePath, "Auto-sync changes", {
                     name: authorName,
-                    email: authorEmail
+                    email: authorEmail,
                 });
 
                 // Pull any remote changes first
-                console.log('Pulling remote changes...');
-                await this.gitService.pull(workspacePath, auth, { name: authorName, email: authorEmail });
+                console.log("Pulling remote changes...");
+                await this.gitService.pull(workspacePath, auth, {
+                    name: authorName,
+                    email: authorEmail,
+                });
 
                 // Push changes
-                console.log('Pushing changes...');
+                console.log("Pushing changes...");
                 await this.gitService.push(workspacePath, auth);
-                console.log('Sync completed successfully');
+                console.log("Sync completed successfully");
             } else {
-                console.log('No changes to sync');
+                console.log("No changes to sync");
             }
         } catch (error) {
-            console.error('Sync error:', error);
-            throw new Error(`Failed to sync changes: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            console.error("Sync error:", error);
+            throw new Error(
+                `Failed to sync changes: ${
+                    error instanceof Error ? error.message : "Unknown error"
+                }`
+            );
         }
     }
 
     enableAutoSync(workspacePath: string, intervalMinutes: number = 5): void {
         this.autoSyncEnabled = true;
-        this.autoSyncInterval = setInterval(() => {
-            this.syncChanges().catch(error => {
-                console.error('Auto-sync error:', error);
-                vscode.window.showErrorMessage(`Auto-sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-            });
-        }, intervalMinutes * 60 * 1000);
+        this.autoSyncInterval = setInterval(
+            () => {
+                this.syncChanges().catch((error) => {
+                    console.error("Auto-sync error:", error);
+                    vscode.window.showErrorMessage(
+                        `Auto-sync failed: ${
+                            error instanceof Error ? error.message : "Unknown error"
+                        }`
+                    );
+                });
+            },
+            intervalMinutes * 60 * 1000
+        );
     }
 
     disableAutoSync(): void {
@@ -388,40 +419,40 @@ export class SCMManager {
         try {
             const message = this.scmProvider.inputBox.value;
             if (!message) {
-                throw new Error('Please enter a commit message');
+                throw new Error("Please enter a commit message");
             }
 
             const workspacePath = this.getWorkspacePath();
 
             // Get current user info for commit author details
             const user = await this.gitLabService.getCurrentUser();
-            
+
             // Add all changes
             await this.gitService.addAll(workspacePath);
 
             // Commit
             await this.gitService.commit(workspacePath, message, {
                 name: user.name || user.username,
-                email: user.email || `${user.username}@users.noreply.gitlab.com`
+                email: user.email || `${user.username}@users.noreply.gitlab.com`,
             });
 
             // Clear the input box
-            this.scmProvider.inputBox.value = '';
+            this.scmProvider.inputBox.value = "";
 
             // Push changes
             const token = await this.gitLabService.getToken();
             if (!token) {
-                throw new Error('GitLab token not found. Please authenticate first.');
+                throw new Error("GitLab token not found. Please authenticate first.");
             }
 
             const auth = {
-                username: 'oauth2',
-                password: token
+                username: "oauth2",
+                password: token,
             };
 
             await this.gitService.push(workspacePath, auth);
 
-            vscode.window.showInformationMessage('Changes committed and pushed successfully');
+            vscode.window.showInformationMessage("Changes committed and pushed successfully");
         } catch (error) {
             if (error instanceof Error) {
                 vscode.window.showErrorMessage(`Failed to commit changes: ${error.message}`);
@@ -432,7 +463,7 @@ export class SCMManager {
     private async toggleAutoSync(): Promise<void> {
         this.autoSyncEnabled = !this.autoSyncEnabled;
         vscode.window.showInformationMessage(
-            `Auto-sync is now ${this.autoSyncEnabled ? 'enabled' : 'disabled'}`
+            `Auto-sync is now ${this.autoSyncEnabled ? "enabled" : "disabled"}`
         );
     }
 }

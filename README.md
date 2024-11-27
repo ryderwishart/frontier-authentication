@@ -14,9 +14,9 @@ A VS Code extension that provides seamless authentication and GitLab integration
 
 1. Download the VSIX file from the releases page
 2. Install via VS Code:
-   - Open VS Code
-   - Press `Ctrl+Shift+P` (Windows/Linux) or `Cmd+Shift+P` (macOS)
-   - Type "Install from VSIX" and select the downloaded file
+    - Open VS Code
+    - Press `Ctrl+Shift+P` (Windows/Linux) or `Cmd+Shift+P` (macOS)
+    - Type "Install from VSIX" and select the downloaded file
 
 ## Usage
 
@@ -33,13 +33,14 @@ A VS Code extension that provides seamless authentication and GitLab integration
 2. Press `Ctrl+Shift+P` (Windows/Linux) or `Cmd+Shift+P` (macOS)
 3. Type "Frontier: Create GitLab Project"
 4. Follow the prompts to:
-   - Enter project name
-   - Add optional description
-   - Select visibility (private/internal/public)
+    - Enter project name
+    - Add optional description
+    - Select visibility (private/internal/public)
 
 ### Status Indicators
 
 The extension provides two status indicators:
+
 - **Authentication**: Shows if you're currently logged in
 - **Server Connection**: Shows if the Frontier services are reachable
 
@@ -62,20 +63,22 @@ frontier.createGitLabProject - Create a new GitLab project
 ### Setup
 
 1. Clone the repository:
-   ```bash
-   git clone https://github.com/your-org/frontier-authentication
-   cd frontier-authentication
-   ```
+
+    ```bash
+    git clone https://github.com/your-org/frontier-authentication
+    cd frontier-authentication
+    ```
 
 2. Install dependencies:
-   ```bash
-   npm install
-   ```
+
+    ```bash
+    npm install
+    ```
 
 3. Open in VS Code:
-   ```bash
-   code .
-   ```
+    ```bash
+    code .
+    ```
 
 ### Building
 
@@ -112,6 +115,7 @@ frontier.createGitLabProject - Create a new GitLab project
 ## Support
 
 For support, please:
+
 1. Check the [issues](https://github.com/your-org/frontier-authentication/issues) page
 2. Create a new issue if needed
 3. Contact Frontier RND support
@@ -119,6 +123,7 @@ For support, please:
 ## Release Notes
 
 ### 1.0.0
+
 - Initial release
 - Authentication system
 - GitLab project creation

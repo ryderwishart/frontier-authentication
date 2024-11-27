@@ -1,21 +1,21 @@
-import * as vscode from 'vscode';
-import { GlobalState, AuthState, GitLabInfo, GitLabCredentials } from '../types/state';
+import * as vscode from "vscode";
+import { GlobalState, AuthState, GitLabInfo, GitLabCredentials } from "../types/state";
 
 export const initialState: GlobalState = {
     auth: {
         isAuthenticated: false,
-        connectionStatus: 'disconnected',
-        currentView: 'login',
+        connectionStatus: "disconnected",
+        currentView: "login",
         gitlabInfo: undefined,
         gitlabCredentials: undefined,
-        lastSyncTimestamp: undefined
-    }
+        lastSyncTimestamp: undefined,
+    },
 };
 
 export class StateManager {
     private static instance: StateManager;
     private state: GlobalState;
-    private readonly stateKey = 'frontier.globalState';
+    private readonly stateKey = "frontier.globalState";
 
     private constructor(private context: vscode.ExtensionContext) {
         // Initialize with stored state or defaults
@@ -32,7 +32,7 @@ export class StateManager {
 
     static getInstance(): StateManager {
         if (!StateManager.instance) {
-            throw new Error('StateManager not initialized');
+            throw new Error("StateManager not initialized");
         }
         return StateManager.instance;
     }
@@ -48,7 +48,7 @@ export class StateManager {
     async updateAuthState(update: Partial<AuthState>): Promise<void> {
         this.state.auth = {
             ...this.state.auth,
-            ...update
+            ...update,
         };
         await this.persistState();
         this.notifyStateChange();
@@ -56,19 +56,19 @@ export class StateManager {
 
     async updateGitLabCredentials(credentials: GitLabCredentials | undefined): Promise<void> {
         await this.updateAuthState({
-            gitlabCredentials: credentials
+            gitlabCredentials: credentials,
         });
     }
 
     async updateGitLabInfo(info: GitLabInfo | undefined): Promise<void> {
         await this.updateAuthState({
-            gitlabInfo: info
+            gitlabInfo: info,
         });
     }
 
     async updateLastSyncTimestamp(): Promise<void> {
         await this.updateAuthState({
-            lastSyncTimestamp: Date.now()
+            lastSyncTimestamp: Date.now(),
         });
     }
 
@@ -90,4 +90,4 @@ export class StateManager {
     dispose(): void {
         this.stateChangeEmitter.dispose();
     }
-} 
+}

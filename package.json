@@ -1,115 +1,118 @@
 {
-  "name": "frontier-authentication",
-  "displayName": "Frontier Authentication",
-  "description": "Authentication extension for Frontier",
-  "publisher": "frontier-rnd",
-  "version": "0.0.4",
-  "engines": {
-    "vscode": "^1.87.0"
-  },
-  "categories": [
-    "Other"
-  ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
-  "main": "./dist/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "frontier.login",
-        "title": "Login",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.register",
-        "title": "Register",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.logout",
-        "title": "Logout",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.getAuthStatus",
-        "title": "Get Authentication Status",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.listProjects",
-        "title": "List Projects",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.cloneRepository",
-        "title": "Clone Repository",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.createGitLabProject",
-        "title": "Create GitLab Project",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.createAndCloneProject",
-        "title": "Create and Clone GitLab Project",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.syncChanges",
-        "title": "Sync Changes",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.toggleAutoSync",
-        "title": "Toggle Auto-Sync",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.confirmLogout",
-        "title": "Logout from Frontier"
-      }
+    "name": "frontier-authentication",
+    "displayName": "Frontier Authentication",
+    "description": "Authentication extension for Frontier",
+    "publisher": "frontier-rnd",
+    "version": "0.0.4",
+    "engines": {
+        "vscode": "^1.87.0"
+    },
+    "categories": [
+        "Other"
     ],
-    "authentication": [
-      {
-        "id": "frontier",
-        "label": "Frontier"
-      }
-    ]
-  },
-  "scripts": {
-    "vscode:prepublish": "npm run package",
-    "compile": "webpack",
-    "watch": "webpack --watch",
-    "package": "webpack --mode production --devtool hidden-source-map",
-    "compile-tests": "tsc -p . --outDir out",
-    "watch-tests": "tsc -p . --outDir out --watch",
-    "pretest": "npm run compile-tests && npm run compile && npm run lint",
-    "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
-  },
-  "devDependencies": {
-    "@types/glob": "^8.1.0",
-    "@types/mocha": "^10.0.6",
-    "@types/node": "18.x",
-    "@types/node-fetch": "^2.6.11",
-    "@types/vscode": "^1.87.0",
-    "@typescript-eslint/eslint-plugin": "^7.0.2",
-    "@typescript-eslint/parser": "^7.0.2",
-    "@vscode/test-electron": "^2.3.9",
-    "crypto-browserify": "^3.12.0",
-    "eslint": "^8.56.0",
-    "glob": "^8.1.0",
-    "memfs": "^4.7.1",
-    "path-browserify": "^1.0.1",
-    "ts-loader": "^9.5.1",
-    "typescript": "^5.3.3",
-    "webpack": "^5.90.3",
-    "webpack-cli": "^5.1.4"
-  },
-  "dependencies": {
-    "isomorphic-git": "^1.25.3",
-    "node-fetch": "^2.7.0"
-  }
+    "activationEvents": [
+        "onStartupFinished"
+    ],
+    "main": "./dist/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "frontier.login",
+                "title": "Login",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.register",
+                "title": "Register",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.logout",
+                "title": "Logout",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.getAuthStatus",
+                "title": "Get Authentication Status",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.listProjects",
+                "title": "List Projects",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.cloneRepository",
+                "title": "Clone Repository",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.createGitLabProject",
+                "title": "Create GitLab Project",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.createAndCloneProject",
+                "title": "Create and Clone GitLab Project",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.syncChanges",
+                "title": "Sync Changes",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.toggleAutoSync",
+                "title": "Toggle Auto-Sync",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.confirmLogout",
+                "title": "Logout from Frontier"
+            }
+        ],
+        "authentication": [
+            {
+                "id": "frontier",
+                "label": "Frontier"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run package",
+        "compile": "webpack",
+        "watch": "webpack --watch",
+        "package": "webpack --mode production --devtool hidden-source-map",
+        "compile-tests": "tsc -p . --outDir out",
+        "watch-tests": "tsc -p . --outDir out --watch",
+        "pretest": "npm run compile-tests && npm run compile && npm run lint",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js",
+        "format": "prettier --write \"src/**/*.{ts,js,json,md}\"",
+        "format:check": "prettier --check \"src/**/*.{ts,js,json,md}\""
+    },
+    "devDependencies": {
+        "@types/glob": "^8.1.0",
+        "@types/mocha": "^10.0.6",
+        "@types/node": "18.x",
+        "@types/node-fetch": "^2.6.11",
+        "@types/vscode": "^1.87.0",
+        "@typescript-eslint/eslint-plugin": "^7.0.2",
+        "@typescript-eslint/parser": "^7.0.2",
+        "@vscode/test-electron": "^2.3.9",
+        "crypto-browserify": "^3.12.0",
+        "eslint": "^8.56.0",
+        "glob": "^8.1.0",
+        "memfs": "^4.7.1",
+        "path-browserify": "^1.0.1",
+        "prettier": "^3.4.1",
+        "ts-loader": "^9.5.1",
+        "typescript": "^5.3.3",
+        "webpack": "^5.90.3",
+        "webpack-cli": "^5.1.4"
+    },
+    "dependencies": {
+        "isomorphic-git": "^1.25.3",
+        "node-fetch": "^2.7.0"
+    }
 }
