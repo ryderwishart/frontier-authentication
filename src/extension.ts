@@ -32,6 +32,7 @@ export interface FrontierAPI {
             owner: string;
         }>
     >;
+    cloneRepository: (repositoryUrl: string) => Promise<boolean>;
 }
 
 let authenticationProvider: FrontierAuthProvider;
@@ -86,7 +87,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Register status bar item
     // Removed redundant registration here
 
-    return {
+    const frontierAPI: FrontierAPI = {
         // Export the authentication provider for other extensions
         authProvider: authenticationProvider,
 
@@ -127,11 +128,10 @@ export async function activate(context: vscode.ExtensionContext) {
                 }>
             >,
         cloneRepository: async (repositoryUrl: string) =>
-            vscode.commands.executeCommand(
-                "frontier.cloneRepository",
-                repositoryUrl
-            ) as Promise<boolean>,
-    } as FrontierAPI;
+            vscode.commands.executeCommand<boolean>("frontier.cloneRepository", repositoryUrl),
+    };
+
+    return frontierAPI;
 }
 
 function updateStatusBar(statusBarItem: vscode.StatusBarItem, authState: AuthState) {
