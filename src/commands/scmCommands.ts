@@ -225,4 +225,75 @@ export function registerSCMCommands(
             }
         )
     );
+
+    // Register publish workspace command
+    context.subscriptions.push(
+        vscode.commands.registerCommand("frontier.publishWorkspace", async (options?: {
+            name: string;
+            description?: string;
+            visibility?: "private" | "internal" | "public";
+            organizationId?: string;
+        }) => {
+            try {
+                await gitLabService.initialize();
+
+                // Get project name from workspace folder
+                const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+                if (!workspaceFolder) {
+                    throw new Error("No workspace folder found");
+                }
+                const defaultName = workspaceFolder.name;
+
+                // Prompt for project details
+                const name = options?.name || await vscode.window.showInputBox({
+                    prompt: "Enter project name",
+                    value: defaultName,
+                    validateInput: (value) => {
+                        if (!value) {
+                            return "Project name is required";
+                        }
+                        return null;
+                    },
+                });
+
+                if (!name) {
+                    return; // User cancelled
+                }
+
+                const description = options?.description || await vscode.window.showInputBox({
+                    prompt: "Enter project description (optional)",
+                });
+
+                const visibility = options?.visibility || await vscode.window.showQuickPick(
+                    [
+                        { label: "Private", value: "private" },
+                        { label: "Internal", value: "internal" },
+                        { label: "Public", value: "public" },
+                    ],
+                    {
+                        placeHolder: "Select project visibility",
+                    }
+                ).then((selected) => {
+                    return selected?.value;
+                });
+
+                if (!visibility) {
+                    return; // User cancelled
+                }
+
+                // Publish workspace
+                await scmManager.publishWorkspace({
+                    name,
+                    description,
+                    visibility: visibility as "private" | "internal" | "public",
+                    organizationId: options?.organizationId,
+                });
+
+            } catch (error) {
+                if (error instanceof Error) {
+                    vscode.window.showErrorMessage(`Failed to publish workspace: ${error.message}`);
+                }
+            }
+        })
+    );
 }

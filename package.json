@@ -69,6 +69,11 @@
             {
                 "command": "frontier.confirmLogout",
                 "title": "Logout from Frontier"
+            },
+            {
+                "command": "frontier.publishWorkspace",
+                "title": "Publish Workspace",
+                "category": "Frontier"
             }
         ],
         "authentication": [

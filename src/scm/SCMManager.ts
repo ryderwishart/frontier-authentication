@@ -21,7 +21,7 @@ export class SCMManager {
         this.gitLabService = gitLabService;
 
         // We'll initialize the SCM provider when we have a workspace
-        this.scmProvider = vscode.scm.createSourceControl("genesis", "Genesis SCM");
+        this.scmProvider = vscode.scm.createSourceControl("frontier", "Frontier SCM");
 
         // Initialize resource groups
         this.workingTree = this.scmProvider.createResourceGroup("working", "Working Tree");
@@ -465,5 +465,94 @@ export class SCMManager {
         vscode.window.showInformationMessage(
             `Auto-sync is now ${this.autoSyncEnabled ? "enabled" : "disabled"}`
         );
+    }
+
+    async publishWorkspace(options: {
+        name: string;
+        description?: string;
+        visibility?: "private" | "internal" | "public";
+        organizationId?: string;
+    }): Promise<void> {
+        try {
+            const workspacePath = this.getWorkspacePath();
+
+            // Check if workspace is already a git repository
+            const isGitRepo = await this.gitService.hasGitRepository(workspacePath);
+            if (!isGitRepo) {
+                await this.gitService.init(workspacePath);
+                // Add all files
+                await this.gitService.addAll(workspacePath);
+                // We will make initial commit below
+            }
+
+            // NOTE: We are assuming that when codex-editor creates a new project,
+            // we init a git repo using isomorphic git init. BUT we do not add a 
+            // remote by default. Thus, when we use this publish function, we need
+            // to create the remote project before pushing.
+
+            // Get current remote URL if it exists
+            const currentRemoteUrl = await this.gitService.getRemoteUrl(workspacePath);
+            if (!currentRemoteUrl) {
+                // Create a new project on GitLab
+                const project = await this.gitLabService.createProject({
+                    name: options.name,
+                    description: options.description,
+                    visibility: options.visibility,
+                    organizationId: options.organizationId,
+                });
+
+                // Get GitLab credentials
+                const gitlabToken = await this.gitLabService.getToken();
+                if (!gitlabToken) {
+                    throw new Error("GitLab token not available");
+                }
+
+                // Add remote
+                await this.gitService.addRemote(workspacePath, "origin", project.url);
+
+                // Get user info for commit author details
+                const user = await this.gitLabService.getCurrentUser();
+                const authorName = user.name || user.username;
+                const authorEmail = user.email;
+                if (!authorEmail) {
+                    throw new Error("GitLab user email not available");
+                }
+
+                // Configure git author
+                await this.gitService.configureAuthor(workspacePath, authorName, authorEmail);
+
+                // If we just initialized the repo, create initial commit
+                if (!isGitRepo) {
+                    await this.gitService.commit(workspacePath, "Initial commit", {
+                        name: authorName,
+                        email: authorEmail,
+                    });
+                }
+
+                // Push to remote
+                await this.gitService.push(workspacePath, {
+                    username: "oauth2",
+                    password: gitlabToken,
+                });
+
+                vscode.window.showInformationMessage(
+                    `Workspace published successfully to ${project.url}!`
+                );
+            } else {
+                vscode.window.showInformationMessage(
+                    "Workspace is already connected to a remote repository."
+                );
+            }
+
+            // Initialize SCM provider
+            await this.initializeSCM(workspacePath);
+        } catch (error) {
+            console.error("Publish workspace error:", error);
+            throw new Error(
+                `Failed to publish workspace: ${
+                    error instanceof Error ? error.message : "Unknown error"
+                }`
+            );
+        }
     }
 }
