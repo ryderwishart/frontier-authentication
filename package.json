@@ -3,7 +3,7 @@
     "displayName": "Frontier Authentication",
     "description": "Authentication extension for Frontier",
     "publisher": "frontier-rnd",
-    "version": "0.0.12",
+    "version": "0.0.13",
     "engines": {
         "vscode": "^1.87.0"
     },
@@ -73,6 +73,11 @@
             {
                 "command": "frontier.publishWorkspace",
                 "title": "Publish Workspace",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.getUserInfo",
+                "title": "Get User Info",
                 "category": "Frontier"
             }
         ],

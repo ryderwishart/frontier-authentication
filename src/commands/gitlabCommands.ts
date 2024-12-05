@@ -102,4 +102,11 @@ export function registerGitLabCommands(
             }
         })
     );
+
+    context.subscriptions.push(vscode.commands.registerCommand("frontier.getUserInfo", () => {
+        gitlabService.getUserInfo().then((userInfo) => {
+                console.log("USER INFO", JSON.stringify(userInfo, null, 2));
+            });
+        })
+    );
 }

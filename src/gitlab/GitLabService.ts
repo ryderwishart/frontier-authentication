@@ -6,6 +6,7 @@ interface GitLabUser {
     username: string;
     name: string;
     email: string;
+    group?: string;
 }
 
 export interface GitLabProjectOptions {
@@ -84,6 +85,7 @@ export class GitLabService {
         }
 
         const user = (await response.json()) as GitLabUser;
+        console.log("USER IN GITLAB", JSON.stringify(user, null, 2));
         return user;
     }
 
@@ -268,12 +270,13 @@ export class GitLabService {
         return this.gitlabBaseUrl;
     }
 
-    async getUserInfo(): Promise<{ email: string; username: string }> {
+    async getUserInfo(): Promise<{ email: string; username: string; group?: string }> {
         try {
             const user = await this.getCurrentUser();
             return {
                 email: user.email,
                 username: user.username,
+                group: user.group,
             };
         } catch (error) {
             console.error("Failed to get user info:", error);
