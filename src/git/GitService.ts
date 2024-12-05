@@ -196,7 +196,7 @@ export class GitService {
 
     async init(dir: string): Promise<void> {
         try {
-            await git.init({ fs, dir });
+            await git.init({ fs, dir, defaultBranch: 'main' });
             console.log("Git repository initialized at:", dir);
         } catch (error) {
             console.error("Init error:", error);
