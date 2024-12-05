@@ -480,16 +480,29 @@ export class SCMManager {
             // Check if workspace is already a git repository
             const isGitRepo = await this.gitService.hasGitRepository(workspacePath);
             if (!isGitRepo) {
+                // Initialize git with main branch
                 await this.gitService.init(workspacePath);
+                
+                // Get user info for commit author details before making any commits
+                const user = await this.gitLabService.getCurrentUser();
+                const authorName = user.name || user.username;
+                const authorEmail = user.email;
+                if (!authorEmail) {
+                    throw new Error("GitLab user email not available");
+                }
+
+                // Configure git author
+                await this.gitService.configureAuthor(workspacePath, authorName, authorEmail);
+                
                 // Add all files
                 await this.gitService.addAll(workspacePath);
-                // We will make initial commit below
+                
+                // Create initial commit
+                await this.gitService.commit(workspacePath, "Initial commit", {
+                    name: authorName,
+                    email: authorEmail,
+                });
             }
-
-            // NOTE: We are assuming that when codex-editor creates a new project,
-            // we init a git repo using isomorphic git init. BUT we do not add a 
-            // remote by default. Thus, when we use this publish function, we need
-            // to create the remote project before pushing.
 
             // Get current remote URL if it exists
             const currentRemoteUrl = await this.gitService.getRemoteUrl(workspacePath);
@@ -511,26 +524,7 @@ export class SCMManager {
                 // Add remote
                 await this.gitService.addRemote(workspacePath, "origin", project.url);
 
-                // Get user info for commit author details
-                const user = await this.gitLabService.getCurrentUser();
-                const authorName = user.name || user.username;
-                const authorEmail = user.email;
-                if (!authorEmail) {
-                    throw new Error("GitLab user email not available");
-                }
-
-                // Configure git author
-                await this.gitService.configureAuthor(workspacePath, authorName, authorEmail);
-
-                // If we just initialized the repo, create initial commit
-                if (!isGitRepo) {
-                    await this.gitService.commit(workspacePath, "Initial commit", {
-                        name: authorName,
-                        email: authorEmail,
-                    });
-                }
-
-                // Push to remote with force option
+                // Push to remote with force option if specified
                 await this.gitService.push(workspacePath, {
                     username: "oauth2",
                     password: gitlabToken,

@@ -90,10 +90,20 @@ export class GitService {
             },
             async (progress) => {
                 try {
+                    // Ensure we're on main branch
+                    // TODO: Make branch configurable
+                    const currentBranch = await this.getCurrentBranch(dir);
+                    if (currentBranch !== 'main') {
+                        await git.branch({ fs, dir, ref: 'main' });
+                        await git.checkout({ fs, dir, ref: 'main' });
+                    }
+
                     await git.push({
                         fs,
                         http,
                         dir,
+                        remote: 'origin',
+                        ref: 'main',
                         onAuth: () => auth,
                         onProgress: (event) => {
                             if (event.phase) {
