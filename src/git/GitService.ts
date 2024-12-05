@@ -98,25 +98,35 @@ export class GitService {
                         await git.checkout({ fs, dir, ref: 'main' });
                     }
 
-                    await git.push({
+                    const pushOptions = {
                         fs,
                         http,
                         dir,
                         remote: 'origin',
                         ref: 'main',
+                        force: force,
                         onAuth: () => auth,
-                        onProgress: (event) => {
+                        onProgress: (event: { phase?: string }) => {
                             if (event.phase) {
                                 progress.report({
                                     message: event.phase,
                                     increment: 20,
                                 });
                             }
-                        },
-                        ...(force && {
-                            force: true,
-                        }),
-                    });
+                        }
+                    };
+
+                    try {
+                        // Try normal push first
+                        await git.push(pushOptions);
+                    } catch (pushError) {
+                        console.log("Initial push failed, trying with force");
+                        // If normal push fails, try with force again
+                        await git.push({
+                            ...pushOptions,
+                            force: true
+                        });
+                    }
                 } catch (error) {
                     console.error("Push error:", error);
                     throw new Error(
@@ -206,7 +216,12 @@ export class GitService {
 
     async init(dir: string): Promise<void> {
         try {
+            // Initialize with explicit main branch
             await git.init({ fs, dir, defaultBranch: 'main' });
+            
+            // Explicitly create and checkout main branch
+            await git.branch({ fs, dir, ref: 'main', checkout: true });
+            
             console.log("Git repository initialized at:", dir);
         } catch (error) {
             console.error("Init error:", error);
