@@ -226,8 +226,10 @@ export class GitLabService {
 
         try {
             const queryParams = new URLSearchParams({
-                owned: (options.owned ?? true).toString(),
-                membership: (options.membership ?? true).toString(),
+                ...(options.owned !== undefined && { owned: options.owned.toString() }),
+                ...(options.membership !== undefined && {
+                    membership: options.membership.toString(),
+                }),
                 ...(options.search && { search: options.search }),
                 ...(options.orderBy && { order_by: options.orderBy }),
                 ...(options.sort && { sort: options.sort }),
