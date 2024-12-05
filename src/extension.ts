@@ -39,6 +39,10 @@ export interface FrontierAPI {
         visibility?: "private" | "internal" | "public";
         organizationId?: string;
     }) => Promise<void>;
+    getUserInfo: () => Promise<{
+        email: string;
+        username: string;
+    }>;
 }
 
 let authenticationProvider: FrontierAuthProvider;
@@ -141,6 +145,11 @@ export async function activate(context: vscode.ExtensionContext) {
             visibility?: "private" | "internal" | "public";
             organizationId?: string;
         }) => vscode.commands.executeCommand("frontier.publishWorkspace", options),
+        getUserInfo: async () => 
+            vscode.commands.executeCommand("frontier.getUserInfo") as Promise<{
+                email: string;
+                username: string;
+            }>,
     };
 
     return frontierAPI;

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { FrontierAuthProvider } from "../auth/AuthenticationProvider";
+import { GitLabService } from "../gitlab/GitLabService";
 
 export async function loginWithCredentials(
     authProvider: FrontierAuthProvider,
@@ -192,6 +193,20 @@ export function registerCommands(
         // Get auth status command
         vscode.commands.registerCommand("frontier.getAuthStatus", () => {
             return authProvider.getAuthStatus();
+        }),
+
+        // Add getUserInfo command
+        vscode.commands.registerCommand("frontier.getUserInfo", async () => {
+            try {
+                const gitLabService = new GitLabService(authProvider);
+                await gitLabService.initialize();
+                return await gitLabService.getUserInfo();
+            } catch (error) {
+                vscode.window.showErrorMessage(
+                    `Failed to get user info: ${error instanceof Error ? error.message : "Unknown error"}`
+                );
+                throw error;
+            }
         })
     );
 }

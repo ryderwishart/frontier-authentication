@@ -267,4 +267,17 @@ export class GitLabService {
     getBaseUrl(): string | undefined {
         return this.gitlabBaseUrl;
     }
+
+    async getUserInfo(): Promise<{ email: string; username: string }> {
+        try {
+            const user = await this.getCurrentUser();
+            return {
+                email: user.email,
+                username: user.username,
+            };
+        } catch (error) {
+            console.error("Failed to get user info:", error);
+            throw new Error("Failed to get user information");
+        }
+    }
 }
