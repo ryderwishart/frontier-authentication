@@ -140,40 +140,21 @@ export async function activate(context: vscode.ExtensionContext) {
             >,
         cloneRepository: async (repositoryUrl: string) =>
             vscode.commands.executeCommand<boolean>("frontier.cloneRepository", repositoryUrl),
-        publishWorkspace: async ({
-            name,
-            description,
-            visibility,
-            organizationId,
-            force = true,
-        }: {
+        publishWorkspace: async (options: {
             name: string;
             description?: string;
             visibility?: "private" | "internal" | "public";
             organizationId?: string;
             force: boolean;
         }) => {
-            const options = {
-                name,
-                description,
-                visibility,
-                organizationId,
-                force,
-            };
-
             try {
-                await vscode.commands.executeCommand("frontier.publishWorkspace", options);
+                await vscode.commands.executeCommand("frontier.publishWorkspace", {
+                    ...options,
+                    force: true, // Always force push when publishing, since it won't be a simple fast-forward
+                });
             } catch (error: unknown) {
                 if (error instanceof Error && error.message.includes("Push rejected because it was not a simple fast-forward")) {
-                    if (options.force) {
-                        // Retry with force option
-                        await vscode.commands.executeCommand("frontier.publishWorkspace", {
-                            ...options,
-                            force: true,
-                        });
-                    } else {
-                        throw new Error("Failed to publish workspace: Push rejected. Use 'force: true' to override. Error: " + error.message);
-                    }
+                    throw new Error("Failed to publish workspace: Push rejected. Use 'force: true' to override.");
                 } else {
                     throw error;
                 }

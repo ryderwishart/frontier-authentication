@@ -233,6 +233,7 @@ export function registerSCMCommands(
             description?: string;
             visibility?: "private" | "internal" | "public";
             organizationId?: string;
+            force?: boolean;
         }) => {
             try {
                 await gitLabService.initialize();
@@ -287,6 +288,7 @@ export function registerSCMCommands(
                     description,
                     visibility: visibility as "private" | "internal" | "public",
                     organizationId: options?.organizationId,
+                    force: options?.force || false,
                 });
 
             } catch (error) {

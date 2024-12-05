@@ -81,7 +81,7 @@ export class GitService {
         return sha;
     }
 
-    async push(dir: string, auth: { username: string; password: string }): Promise<void> {
+    async push(dir: string, auth: { username: string; password: string }, force: boolean = false): Promise<void> {
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -103,6 +103,9 @@ export class GitService {
                                 });
                             }
                         },
+                        ...(force && {
+                            force: true,
+                        }),
                     });
                 } catch (error) {
                     console.error("Push error:", error);

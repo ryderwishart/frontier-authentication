@@ -472,6 +472,7 @@ export class SCMManager {
         description?: string;
         visibility?: "private" | "internal" | "public";
         organizationId?: string;
+        force: boolean;
     }): Promise<void> {
         try {
             const workspacePath = this.getWorkspacePath();
@@ -529,11 +530,11 @@ export class SCMManager {
                     });
                 }
 
-                // Push to remote
+                // Push to remote with force option
                 await this.gitService.push(workspacePath, {
                     username: "oauth2",
                     password: gitlabToken,
-                });
+                }, options.force);
 
                 vscode.window.showInformationMessage(
                     `Workspace published successfully to ${project.url}!`
