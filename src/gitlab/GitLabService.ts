@@ -48,6 +48,13 @@ interface GitLabProject {
     };
 }
 
+interface GitLabMembership {
+    source_id: number;
+    source_name: string;
+    source_type: "Project" | "Namespace";
+    access_level: number;
+}
+
 export class GitLabService {
     private gitlabToken: string | undefined;
     private gitlabBaseUrl: string | undefined;
@@ -185,28 +192,29 @@ export class GitLabService {
         }
 
         try {
-            const params = new URLSearchParams({
-                min_access_level: "20",
-                owned: "true",
-            }).toString();
-
-            const response = await fetch(`${this.gitlabBaseUrl}/api/v4/groups?${params}`, {
-                headers: {
-                    Authorization: `Bearer ${this.gitlabToken}`,
-                    "Content-Type": "application/json",
-                },
-            });
+            const currentUser = await this.getCurrentUser();
+            const response = await fetch(
+                `${this.gitlabBaseUrl}/api/v4/users/${currentUser.id}/memberships`,
+                {
+                    headers: {
+                        Authorization: `Bearer ${this.gitlabToken}`,
+                        "Content-Type": "application/json",
+                    },
+                }
+            );
 
             if (!response.ok) {
                 throw new Error(`Failed to list organizations: ${response.statusText}`);
             }
 
-            const groups = await response.json();
-            return groups.map((group: any) => ({
-                id: group.id.toString(),
-                name: group.name,
-                path: group.path,
-            }));
+            const memberships = (await response.json()) as GitLabMembership[];
+            return memberships
+                .filter((membership) => membership.source_type === "Namespace")
+                .map((membership) => ({
+                    id: membership.source_id.toString(),
+                    name: membership.source_name,
+                    path: membership.source_name.toLowerCase(), // GitLab typically uses lowercase for paths
+                }));
         } catch (error) {
             console.error("Failed to list organizations:", error);
             return [];
