@@ -189,6 +189,13 @@ export function registerSCMCommands(
         })
     );
 
+    // Get all organizations the user is at least a member of
+    context.subscriptions.push(vscode.commands.registerCommand("frontier.listOrganizationsUserIsAtLeastMemberOf", async () => {
+        const orgs = await gitLabService.listOrganizations();
+        console.log("ORGS", JSON.stringify(orgs, null, 2));
+        return orgs;
+    }));
+
     // Register clone existing repository command
     context.subscriptions.push(
         vscode.commands.registerCommand(

@@ -3,7 +3,7 @@
     "displayName": "Frontier Authentication",
     "description": "Authentication extension for Frontier",
     "publisher": "frontier-rnd",
-    "version": "0.0.15",
+    "version": "0.0.16",
     "engines": {
         "vscode": "^1.87.0"
     },
@@ -78,6 +78,11 @@
             {
                 "command": "frontier.getUserInfo",
                 "title": "Get User Info",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.listOrganizationsUserIsAtLeastMemberOf",
+                "title": "List Organizations User Is At Least Member Of",
                 "category": "Frontier"
             }
         ],
