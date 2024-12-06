@@ -27,10 +27,11 @@ export async function registerUser(
     } catch (error) {
         if (error instanceof Error) {
             vscode.window.showErrorMessage(`Registration failed: ${error.message}`);
+            return false;
         } else {
             vscode.window.showErrorMessage("Registration failed. Please try again.");
+            return false;
         }
-        return false;
     }
 }
 
