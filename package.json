@@ -81,8 +81,8 @@
                 "category": "Frontier"
             },
             {
-                "command": "frontier.listOrganizationsUserIsAtLeastMemberOf",
-                "title": "List Organizations User Is At Least Member Of",
+                "command": "frontier.listGroupsUserIsAtLeastMemberOf",
+                "title": "List Groups User Is At Least Member Of",
                 "category": "Frontier"
             }
         ],

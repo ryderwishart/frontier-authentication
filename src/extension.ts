@@ -37,7 +37,7 @@ export interface FrontierAPI {
         name: string;
         description?: string;
         visibility?: "private" | "internal" | "public";
-        organizationId?: string;
+        groupId?: string;
         force: boolean;
     }) => Promise<void>;
     getUserInfo: () => Promise<{
@@ -144,7 +144,7 @@ export async function activate(context: vscode.ExtensionContext) {
             name: string;
             description?: string;
             visibility?: "private" | "internal" | "public";
-            organizationId?: string;
+            groupId?: string;
             force: boolean;
         }) => {
             try {

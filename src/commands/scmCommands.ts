@@ -148,30 +148,30 @@ export function registerSCMCommands(
                         visibility,
                     });
                 } catch (error) {
-                    // If personal project creation fails, try with organization
+                    // If personal project creation fails, try with group
                     if (
                         error instanceof Error &&
                         !error.message.includes("authentication failed")
                     ) {
-                        const orgs = await gitLabService.listOrganizations();
-                        if (orgs.length > 0) {
-                            const selectedOrg = await vscode.window.showQuickPick(
-                                orgs.map((org) => ({
-                                    label: org.name,
-                                    description: org.path,
-                                    id: org.id.toString(),
+                        const groups = await gitLabService.listGroups();
+                        if (groups.length > 0) {
+                            const selectedGroup = await vscode.window.showQuickPick(
+                                groups.map((group) => ({
+                                    label: group.name,
+                                    description: group.path,
+                                    id: group.id.toString(),
                                 })),
                                 {
-                                    placeHolder: "Select an organization",
+                                    placeHolder: "Select a group",
                                 }
                             );
 
-                            if (selectedOrg) {
+                            if (selectedGroup) {
                                 await scmManager.createAndCloneProject({
                                     name,
                                     description,
                                     visibility,
-                                    organizationId: selectedOrg.id,
+                                    groupId: selectedGroup.id,
                                 });
                                 return;
                             }
@@ -189,12 +189,16 @@ export function registerSCMCommands(
         })
     );
 
-    // Get all organizations the user is at least a member of
-    context.subscriptions.push(vscode.commands.registerCommand("frontier.listOrganizationsUserIsAtLeastMemberOf", async () => {
-        const orgs = await gitLabService.listOrganizations();
-        console.log("ORGS", JSON.stringify(orgs, null, 2));
-        return orgs;
-    }));
+    // Get all groups the user is at least a member of
+    context.subscriptions.push(vscode.commands.registerCommand("frontier.listGroupsUserIsAtLeastMemberOf", async () => {
+        const groups = await gitLabService.listGroups();
+        return groups as {
+                id: string;
+                name: string;
+                path: string;
+            }[];
+        }
+    ));
 
     // Register clone existing repository command
     context.subscriptions.push(
@@ -238,8 +242,8 @@ export function registerSCMCommands(
         vscode.commands.registerCommand("frontier.publishWorkspace", async (options?: {
             name: string;
             description?: string;
-            visibility?: "private" | "internal" | "public";
-            organizationId?: string;
+            visibility?: "private" | /* "internal" | */ "public";
+            groupId?: string;
             force?: boolean;
         }) => {
             try {
@@ -275,7 +279,7 @@ export function registerSCMCommands(
                 const visibility = options?.visibility || await vscode.window.showQuickPick(
                     [
                         { label: "Private", value: "private" },
-                        { label: "Internal", value: "internal" },
+                        // { label: "Internal", value: "internal" },
                         { label: "Public", value: "public" },
                     ],
                     {
@@ -289,12 +293,22 @@ export function registerSCMCommands(
                     return; // User cancelled
                 }
 
+                const groups = await gitLabService.listGroups();
+
+                const groupId = options?.groupId || await vscode.window.showQuickPick(
+                    groups.map((group) => ({
+                        label: group.name,
+                        description: group.path,
+                        id: group.id.toString(),
+                    })),
+                );
+
                 // Publish workspace
                 await scmManager.publishWorkspace({
                     name,
                     description,
-                    visibility: visibility as "private" | "internal" | "public",
-                    organizationId: options?.organizationId,
+                    visibility: visibility as "private" /* | "internal" */ | "public",
+                    groupId: options?.groupId,
                     force: options?.force || false,
                 });
 

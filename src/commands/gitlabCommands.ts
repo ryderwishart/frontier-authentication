@@ -50,7 +50,7 @@ export function registerGitLabCommands(
                         name,
                         description,
                         visibility: visibility as "private" | "internal" | "public",
-                        // Don't specify organizationId for personal projects
+                        // Don't specify groupId for personal projects
                     });
 
                     vscode.window.showInformationMessage(
@@ -58,31 +58,31 @@ export function registerGitLabCommands(
                     );
                     return;
                 } catch (error) {
-                    // If personal project creation fails, try with organization
+                    // If personal project creation fails, try with group
                     // Only if the error isn't about authentication
                     if (
                         error instanceof Error &&
                         !error.message.includes("authentication failed")
                     ) {
-                        const orgs = await gitlabService.listOrganizations();
+                        const groups = await gitlabService.listGroups();
 
-                        // Only proceed with organization selection if we have orgs
-                        if (orgs.length > 0) {
-                            const selectedOrg = await vscode.window.showQuickPick(
-                                orgs.map((org) => ({ label: org.name, id: org.id })),
+                        // Only proceed with group selection if we have groups
+                        if (groups.length > 0) {
+                            const selectedGroup = await vscode.window.showQuickPick(
+                                groups.map((group) => ({ label: group.name, id: group.id })),
                                 {
                                     placeHolder:
-                                        "Personal project creation failed. Select an organization to try there instead",
-                                    title: "Select Organization",
+                                        "Personal project creation failed. Select a group to try there instead",
+                                    title: "Select Group",
                                 }
                             );
 
-                            if (selectedOrg) {
+                            if (selectedGroup) {
                                 const project = await gitlabService.createProject({
                                     name,
                                     description,
                                     visibility: visibility as "private" | "internal" | "public",
-                                    organizationId: selectedOrg.id,
+                                    groupId: selectedGroup.id,
                                 });
 
                                 vscode.window.showInformationMessage(

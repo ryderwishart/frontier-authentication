@@ -13,7 +13,7 @@ export interface GitLabProjectOptions {
     name: string;
     description?: string;
     visibility?: "private" | "internal" | "public";
-    organizationId?: string;
+    groupId?: string;
 }
 
 interface GitLabGroup {
@@ -91,7 +91,7 @@ export class GitLabService {
 
     async getProject(
         name: string,
-        organizationId?: string
+        groupId?: string
     ): Promise<{ id: number; url: string } | null> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initialize();
@@ -99,8 +99,8 @@ export class GitLabService {
 
         try {
             let endpoint: string;
-            if (organizationId) {
-                endpoint = `${this.gitlabBaseUrl}/api/v4/groups/${organizationId}/projects?search=${encodeURIComponent(name)}`;
+            if (groupId) {
+                endpoint = `${this.gitlabBaseUrl}/api/v4/groups/${groupId}/projects?search=${encodeURIComponent(name)}`;
             } else {
                 endpoint = `${this.gitlabBaseUrl}/api/v4/users/${(await this.getCurrentUser()).id}/projects?search=${encodeURIComponent(name)}`;
             }
@@ -138,13 +138,13 @@ export class GitLabService {
 
         try {
             // First check if project already exists
-            const existingProject = await this.getProject(options.name, options.organizationId);
+            const existingProject = await this.getProject(options.name, options.groupId);
             if (existingProject) {
                 return existingProject;
             }
 
-            const endpoint = options.organizationId
-                ? `${this.gitlabBaseUrl}/api/v4/groups/${options.organizationId}/projects`
+            const endpoint = options.groupId
+                ? `${this.gitlabBaseUrl}/api/v4/groups/${options.groupId}/projects`
                 : `${this.gitlabBaseUrl}/api/v4/projects`;
 
             const response = await fetch(endpoint, {
@@ -179,7 +179,7 @@ export class GitLabService {
         }
     }
 
-    async listOrganizations(): Promise<Array<{ id: string; name: string; path: string }>> {
+    async listGroups(): Promise<Array<{ id: string; name: string; path: string }>> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initialize();
         }
@@ -197,7 +197,7 @@ export class GitLabService {
             });
 
             if (!response.ok) {
-                throw new Error(`Failed to list organizations: ${response.statusText}`);
+                throw new Error(`Failed to list groups: ${response.statusText}`);
             }
 
             const groups = await response.json();
@@ -207,7 +207,7 @@ export class GitLabService {
                 path: group.path,
             }));
         } catch (error) {
-            console.error("Failed to list organizations:", error);
+            console.error("Failed to list groups:", error);
             return [];
         }
     }

@@ -65,7 +65,7 @@ export class SCMManager {
         name: string;
         description?: string;
         visibility?: "private" | "internal" | "public";
-        organizationId?: string;
+        groupId?: string;
         workspacePath?: string;
     }): Promise<void> {
         try {
@@ -77,7 +77,7 @@ export class SCMManager {
                 name: options.name,
                 description: options.description,
                 visibility: options.visibility,
-                organizationId: options.organizationId,
+                groupId: options.groupId,
             });
 
             // Determine workspace path
@@ -471,7 +471,7 @@ export class SCMManager {
         name: string;
         description?: string;
         visibility?: "private" | "internal" | "public";
-        organizationId?: string;
+        groupId?: string;
         force: boolean;
     }): Promise<void> {
         try {
@@ -512,7 +512,7 @@ export class SCMManager {
                     name: options.name,
                     description: options.description,
                     visibility: options.visibility,
-                    organizationId: options.organizationId,
+                    groupId: options.groupId,
                 });
 
                 // Get GitLab credentials

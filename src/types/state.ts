@@ -2,7 +2,7 @@ export interface GitLabInfo {
     username: string;
     project_count: number;
     user_id: number;
-    organizations?: Array<{
+    groups?: Array<{
         id: string;
         name: string;
         path: string;
