@@ -187,7 +187,6 @@ export class GitLabService {
         try {
             const params = new URLSearchParams({
                 min_access_level: "20",
-                owned: "true",
             }).toString();
 
             const response = await fetch(`${this.gitlabBaseUrl}/api/v4/groups?${params}`, {
