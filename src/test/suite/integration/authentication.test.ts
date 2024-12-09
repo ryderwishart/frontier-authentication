@@ -1,14 +1,19 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { activateExtension, sleep, clearAuthenticationState } from '../../helpers/testHelper';
+import { registerMockAuthProvider } from '../../helpers/mockAuthProvider';
 
 suite('Authentication Integration Tests', () => {
+    let mockProvider: vscode.Disposable;
+
     suiteSetup(async () => {
         await clearAuthenticationState();
+        // Register our mock provider before tests
+        mockProvider = registerMockAuthProvider();
     });
 
     test('Should handle authentication flow', async function() {
-        this.timeout(10000); // Authentication might take some time
+        this.timeout(5000); // Reduced timeout since we're not waiting for user input
         
         const { ext } = await activateExtension();
         
@@ -16,10 +21,10 @@ suite('Authentication Integration Tests', () => {
         const initialSession = await vscode.authentication.getSession('frontier', [], { createIfNone: false });
         assert.strictEqual(initialSession, undefined, 'Should start with no active session');
 
-        // Trigger login command (this will open browser, so we can't fully automate it)
-        // But we can test the command exists and executes
-        const loginCommand = await vscode.commands.executeCommand('frontier.login');
-        assert.ok(loginCommand !== undefined);
+        // Simulate login by creating a session through the mock provider
+        const session = await vscode.authentication.getSession('frontier', [], { createIfNone: true });
+        assert.ok(session, 'Should have created a session');
+        assert.strictEqual(session.account.label, 'Mock User');
 
         // Test logout functionality
         await vscode.commands.executeCommand('frontier.logout');
@@ -34,5 +39,9 @@ suite('Authentication Integration Tests', () => {
 
     suiteTeardown(async () => {
         await clearAuthenticationState();
+        // Clean up our mock provider
+        if (mockProvider) {
+            mockProvider.dispose();
+        }
     });
 }); 

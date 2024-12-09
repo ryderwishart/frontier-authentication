@@ -21,10 +21,13 @@ export function assertCommandExists(commandId: string) {
 
 export async function clearAuthenticationState() {
     try {
+        // Use the built-in logout command to clear the session
+        await vscode.commands.executeCommand('frontier.logout');
+        
+        // Verify the session is cleared
         const session = await vscode.authentication.getSession('frontier', [], { createIfNone: false });
         if (session) {
-            // Use the built-in logout command instead of direct session removal
-            await vscode.commands.executeCommand('frontier.logout');
+            throw new Error('Failed to clear authentication state');
         }
     } catch (error) {
         console.error('Error clearing authentication state:', error);

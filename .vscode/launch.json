@@ -21,13 +21,26 @@
 			"request": "launch",
 			"args": [
 				"--extensionDevelopmentPath=${workspaceFolder}",
-				"--extensionTestsPath=${workspaceFolder}/out/test/suite/index"
+				"--extensionTestsPath=${workspaceFolder}/out/test/suite/index",
+				"--disable-extensions"
 			],
 			"outFiles": [
 				"${workspaceFolder}/out/**/*.js",
 				"${workspaceFolder}/dist/**/*.js"
 			],
-			"preLaunchTask": "tasks: watch-tests"
+			"env": {
+				"VSCODE_DEBUG_TEST": "true",
+				"NODE_ENV": "test"
+			},
+			"internalConsoleOptions": "openOnSessionStart",
+			"sourceMaps": true,
+			"smartStep": true,
+			"skipFiles": [
+				"<node_internals>/**",
+				"**/node_modules/**"
+			],
+			"preLaunchTask": "tasks: watch-tests",
+			"postDebugTask": "Terminate All Tasks"
 		}
 	]
 }
