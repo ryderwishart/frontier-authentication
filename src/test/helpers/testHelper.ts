@@ -19,17 +19,30 @@ export function assertCommandExists(commandId: string) {
     assert.ok(commands.then(cmds => cmds.includes(commandId)), `Command ${commandId} should exist`);
 }
 
+export async function isProviderRegistered(providerId: string): Promise<boolean> {
+    try {
+        await vscode.authentication.getSession(providerId, [], { createIfNone: false });
+        return true;
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('No authentication provider')) {
+            return false;
+        }
+        throw error;
+    }
+}
+
 export async function clearAuthenticationState() {
     try {
-        // Use the built-in logout command to clear the session
-        await vscode.commands.executeCommand('frontier.logout');
-        
-        // Verify the session is cleared
+        // Get the current session
         const session = await vscode.authentication.getSession('frontier', [], { createIfNone: false });
         if (session) {
-            throw new Error('Failed to clear authentication state');
+            // Use the extension's API to force logout without dialog
+            await vscode.commands.executeCommand('frontier.forceLogout');
         }
-    } catch (error) {
-        console.error('Error clearing authentication state:', error);
+    } catch (error: unknown) {
+        // Ignore dialog-related errors in test environment
+        if (error instanceof Error && !error.message.includes('DialogService')) {
+            console.error('Error clearing authentication state:', error);
+        }
     }
 } 

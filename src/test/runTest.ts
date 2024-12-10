@@ -26,8 +26,14 @@ async function main() {
             extensionTestsPath,
             launchArgs: [
                 '--disable-extensions', // Disable other extensions
-                '--disable-telemetry'  // Disable telemetry
-            ]
+                '--disable-telemetry', // Disable telemetry
+                '--user-data-dir', // Use a clean user data directory
+                path.resolve(__dirname, './test-user-data'),
+            ],
+            extensionTestsEnv: {
+                VSCODE_TEST_MODE: 'true', // Signal that we're running in test mode
+                NODE_ENV: 'test',
+            },
         });
     } catch (err) {
         console.error('Failed to run tests');
