@@ -89,10 +89,7 @@ export class GitLabService {
         return user;
     }
 
-    async getProject(
-        name: string,
-        groupId?: string
-    ): Promise<{ id: number; url: string } | null> {
+    async getProject(name: string, groupId?: string): Promise<{ id: number; url: string } | null> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initialize();
         }
@@ -143,13 +140,19 @@ export class GitLabService {
                 return existingProject;
             }
 
+            const name =
+                options.name.replace(/ /g, "-").replace(/\./g, "-") || vscode.workspace.name;
+            const description = options.description || "";
+            const visibility = options.visibility || "private";
+
             const endpoint = `${this.gitlabBaseUrl}/api/v4/projects`;
 
             const body: Record<string, any> = {
-                name: options.name,
-                description: options.description,
-                visibility: options.visibility || "private",
-                initialize_with_readme: true,
+                name,
+                description,
+                visibility,
+                initialize_with_readme: true, // TODO: use the project metadata to populate a project README?
+                default_branch_protection: 0, // NOTE: we have no default branch protection
             };
 
             if (options.groupId) {
