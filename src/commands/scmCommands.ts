@@ -190,15 +190,16 @@ export function registerSCMCommands(
     );
 
     // Get all groups the user is at least a member of
-    context.subscriptions.push(vscode.commands.registerCommand("frontier.listGroupsUserIsAtLeastMemberOf", async () => {
-        const groups = await gitLabService.listGroups();
-        return groups as {
+    context.subscriptions.push(
+        vscode.commands.registerCommand("frontier.listGroupsUserIsAtLeastMemberOf", async () => {
+            const groups = await gitLabService.listGroups();
+            return groups as {
                 id: string;
                 name: string;
                 path: string;
             }[];
-        }
-    ));
+        })
+    );
 
     // Register clone existing repository command
     context.subscriptions.push(
@@ -239,84 +240,109 @@ export function registerSCMCommands(
 
     // Register publish workspace command
     context.subscriptions.push(
-        vscode.commands.registerCommand("frontier.publishWorkspace", async (options?: {
-            name: string;
-            description?: string;
-            visibility?: "private" | /* "internal" | */ "public";
-            groupId?: string;
-            force?: boolean;
-        }) => {
-            try {
-                await gitLabService.initialize();
+        vscode.commands.registerCommand(
+            "frontier.publishWorkspace",
+            async (options?: {
+                name: string;
+                description?: string;
+                visibility?: "private" | /* "internal" | */ "public";
+                groupId?: string;
+                force?: boolean;
+            }) => {
+                try {
+                    await gitLabService.initialize();
 
-                // Get project name from workspace folder
-                const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-                if (!workspaceFolder) {
-                    throw new Error("No workspace folder found");
-                }
-                const defaultName = workspaceFolder.name;
-
-                // Prompt for project details
-                const name = options?.name || await vscode.window.showInputBox({
-                    prompt: "Enter project name",
-                    value: defaultName,
-                    validateInput: (value) => {
-                        if (!value) {
-                            return "Project name is required";
-                        }
-                        return null;
-                    },
-                });
-
-                if (!name) {
-                    return; // User cancelled
-                }
-
-                const description = options?.description || await vscode.window.showInputBox({
-                    prompt: "Enter project description (optional)",
-                });
-
-                const visibility = options?.visibility || await vscode.window.showQuickPick(
-                    [
-                        { label: "Private", value: "private" },
-                        // { label: "Internal", value: "internal" },
-                        { label: "Public", value: "public" },
-                    ],
-                    {
-                        placeHolder: "Select project visibility",
+                    // Get project name from workspace folder
+                    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+                    if (!workspaceFolder) {
+                        throw new Error("No workspace folder found");
                     }
-                ).then((selected) => {
-                    return selected?.value;
-                });
+                    const defaultName = workspaceFolder.name;
 
-                if (!visibility) {
-                    return; // User cancelled
-                }
+                    // Prompt for project details
+                    const name =
+                        options?.name ||
+                        (await vscode.window.showInputBox({
+                            prompt: "Enter project name",
+                            value: defaultName,
+                            validateInput: (value) => {
+                                if (!value) {
+                                    return "Project name is required";
+                                }
+                                return null;
+                            },
+                        }));
 
-                const groups = await gitLabService.listGroups();
+                    if (!name) {
+                        return; // User cancelled
+                    }
 
-                const groupId = options?.groupId || await vscode.window.showQuickPick(
-                    groups.map((group) => ({
-                        label: group.name,
-                        description: group.path,
-                        id: group.id.toString(),
-                    })),
-                );
+                    const description =
+                        options?.description ||
+                        (await vscode.window.showInputBox({
+                            prompt: "Enter project description (optional)",
+                        }));
 
-                // Publish workspace
-                await scmManager.publishWorkspace({
-                    name,
-                    description,
-                    visibility: visibility as "private" /* | "internal" */ | "public",
-                    groupId: options?.groupId,
-                    force: options?.force || false,
-                });
+                    const visibility =
+                        options?.visibility ||
+                        (await vscode.window
+                            .showQuickPick(
+                                [
+                                    { label: "Private", value: "private" },
+                                    // { label: "Internal", value: "internal" },
+                                    { label: "Public", value: "public" },
+                                ],
+                                {
+                                    placeHolder: "Select project visibility",
+                                }
+                            )
+                            .then((selected) => {
+                                return selected?.value;
+                            }));
 
-            } catch (error) {
-                if (error instanceof Error) {
-                    vscode.window.showErrorMessage(`Failed to publish workspace: ${error.message}`);
+                    if (!visibility) {
+                        return; // User cancelled
+                    }
+
+                    const groups = await gitLabService.listGroups();
+
+                    const groupId =
+                        options?.groupId ||
+                        (await vscode.window
+                            .showQuickPick(
+                                groups.map((group) => ({
+                                    label: group.name,
+                                    description: group.path,
+                                    id: group.id.toString(),
+                                })),
+                                {
+                                    placeHolder: "Select a group",
+                                }
+                            )
+                            .then((selected) => {
+                                return selected?.id;
+                            }));
+
+                    if (!groupId) {
+                        return; // User cancelled
+                    }
+
+                    // Publish workspace
+                    await scmManager.publishWorkspace({
+                        name,
+                        description,
+                        visibility: visibility as "private" /* | "internal" */ | "public",
+                        groupId: groupId,
+                        force: options?.force || false,
+                    });
+                } catch (error) {
+                    if (error instanceof Error) {
+                        vscode.window.showErrorMessage(
+                            `Failed to publish workspace: ${error.message}`
+                        );
+                    }
                 }
             }
-        })
+        )
     );
 }
