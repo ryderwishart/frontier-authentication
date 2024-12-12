@@ -143,9 +143,18 @@ export class GitLabService {
                 return existingProject;
             }
 
-            const endpoint = options.groupId
-                ? `${this.gitlabBaseUrl}/api/v4/groups/${options.groupId}/projects`
-                : `${this.gitlabBaseUrl}/api/v4/projects`;
+            const endpoint = `${this.gitlabBaseUrl}/api/v4/projects`;
+
+            const body: Record<string, any> = {
+                name: options.name,
+                description: options.description,
+                visibility: options.visibility || "private",
+                initialize_with_readme: true,
+            };
+
+            if (options.groupId) {
+                body.namespace_id = options.groupId;
+            }
 
             const response = await fetch(endpoint, {
                 method: "POST",
@@ -153,12 +162,7 @@ export class GitLabService {
                     Authorization: `Bearer ${this.gitlabToken}`,
                     "Content-Type": "application/json",
                 },
-                body: JSON.stringify({
-                    name: options.name,
-                    description: options.description,
-                    visibility: options.visibility || "private",
-                    initialize_with_readme: true,
-                }),
+                body: JSON.stringify(body),
             });
 
             if (!response.ok) {
