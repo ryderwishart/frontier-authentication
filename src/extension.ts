@@ -153,18 +153,32 @@ export async function activate(context: vscode.ExtensionContext) {
                     force: true, // Always force push when publishing, since it won't be a simple fast-forward
                 });
             } catch (error: unknown) {
-                if (error instanceof Error && error.message.includes("Push rejected because it was not a simple fast-forward")) {
-                    throw new Error("Failed to publish workspace: Push rejected. Use 'force: true' to override.");
+                if (
+                    error instanceof Error &&
+                    error.message.includes("Push rejected because it was not a simple fast-forward")
+                ) {
+                    throw new Error(
+                        "Failed to publish workspace: Push rejected. Use 'force: true' to override."
+                    );
                 } else {
                     throw error;
                 }
             }
         },
-        getUserInfo: async () => 
-            vscode.commands.executeCommand("frontier.getUserInfo") as Promise<{
-                email: string;
-                username: string;
-            }>,
+        getUserInfo: async () => {
+            const { isAuthenticated } = authenticationProvider.getAuthStatus();
+            if (isAuthenticated) {
+                return vscode.commands.executeCommand("frontier.getUserInfo") as Promise<{
+                    email: string;
+                    username: string;
+                }>;
+            } else {
+                return {
+                    email: "",
+                    username: "",
+                };
+            }
+        },
     };
 
     return frontierAPI;
