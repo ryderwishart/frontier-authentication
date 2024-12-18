@@ -44,6 +44,7 @@ export interface FrontierAPI {
         email: string;
         username: string;
     }>;
+    getLlmEndpoint: () => Promise<string | undefined>;
 }
 
 let authenticationProvider: FrontierAuthProvider;
@@ -178,6 +179,9 @@ export async function activate(context: vscode.ExtensionContext) {
                     username: "",
                 };
             }
+        },
+        getLlmEndpoint: async () => {
+            return API_ENDPOINT;
         },
     };
 
