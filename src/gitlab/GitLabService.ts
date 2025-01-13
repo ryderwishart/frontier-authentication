@@ -85,7 +85,7 @@ export class GitLabService {
         }
 
         const user = (await response.json()) as GitLabUser;
-        console.log("USER IN GITLAB", JSON.stringify(user, null, 2));
+        // console.log("USER IN GITLAB", JSON.stringify(user, null, 2));
         return user;
     }
 

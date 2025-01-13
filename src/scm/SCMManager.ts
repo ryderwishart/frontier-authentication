@@ -37,10 +37,10 @@ export class SCMManager {
     private getWorkspacePath(): string {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
-            throw new Error("No workspace folder found");
+        throw new Error("No workspace folder found");
         }
         const path = workspaceFolder.uri.fsPath;
-        console.log("Using workspace path:", path);
+        // console.log("Using workspace path:", path);
         return path;
     }
 
@@ -200,7 +200,7 @@ export class SCMManager {
                 await this.gitService.addRemote(workspacePath, "origin", repoUrl);
             }
 
-            console.log("Repository cloned successfully to:", workspacePath);
+            // console.log("Repository cloned successfully to:", workspacePath);
         } catch (error) {
             console.error("Clone error:", error);
             throw new Error(
@@ -239,7 +239,7 @@ export class SCMManager {
                 await this.gitService.addRemote(workspacePath, "origin", remoteUrl);
             }
 
-            console.log("SCM initialized successfully");
+            // console.log("SCM initialized successfully");
         } catch (error) {
             console.error("SCM initialization error:", error);
             throw new Error(
@@ -327,7 +327,7 @@ export class SCMManager {
 
         try {
             const workspacePath = this.getWorkspacePath();
-            console.log("Syncing changes in workspace:", workspacePath);
+            // console.log("Syncing changes in workspace:", workspacePath);
 
             // Verify that this is a git repository
             try {
@@ -355,7 +355,7 @@ export class SCMManager {
             const hasChanges = status.some(([, , worktreeStatus]) => worktreeStatus !== 0);
 
             if (hasChanges) {
-                console.log("Changes detected, committing...");
+                // console.log("Changes detected, committing...");
                 // Commit changes
                 await this.gitService.commit(workspacePath, "Auto-sync changes", {
                     name: authorName,
@@ -363,18 +363,18 @@ export class SCMManager {
                 });
 
                 // Pull any remote changes first
-                console.log("Pulling remote changes...");
+                // console.log("Pulling remote changes...");
                 await this.gitService.pull(workspacePath, auth, {
                     name: authorName,
                     email: authorEmail,
                 });
 
                 // Push changes
-                console.log("Pushing changes...");
+                // console.log("Pushing changes...");
                 await this.gitService.push(workspacePath, auth);
-                console.log("Sync completed successfully");
+                // console.log("Sync completed successfully");
             } else {
-                console.log("No changes to sync");
+                // console.log("No changes to sync");
             }
         } catch (error) {
             console.error("Sync error:", error);
@@ -482,7 +482,7 @@ export class SCMManager {
             if (!isGitRepo) {
                 // Initialize git with main branch
                 await this.gitService.init(workspacePath);
-                
+
                 // Get user info for commit author details before making any commits
                 const user = await this.gitLabService.getCurrentUser();
                 const authorName = user.name || user.username;
@@ -493,10 +493,10 @@ export class SCMManager {
 
                 // Configure git author
                 await this.gitService.configureAuthor(workspacePath, authorName, authorEmail);
-                
+
                 // Add all files
                 await this.gitService.addAll(workspacePath);
-                
+
                 // Create initial commit
                 await this.gitService.commit(workspacePath, "Initial commit", {
                     name: authorName,
@@ -525,10 +525,14 @@ export class SCMManager {
                 await this.gitService.addRemote(workspacePath, "origin", project.url);
 
                 // Push to remote with force option if specified
-                await this.gitService.push(workspacePath, {
-                    username: "oauth2",
-                    password: gitlabToken,
-                }, options.force);
+                await this.gitService.push(
+                    workspacePath,
+                    {
+                        username: "oauth2",
+                        password: gitlabToken,
+                    },
+                    options.force
+                );
 
                 vscode.window.showInformationMessage(
                     `Workspace published successfully to ${project.url}!`

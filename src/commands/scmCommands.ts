@@ -13,7 +13,7 @@ export function registerSCMCommands(
     // Register list projects command
     context.subscriptions.push(
         vscode.commands.registerCommand("frontier.listProjects", async ({ showUI = true } = {}) => {
-            console.log("Listing projects...");
+            // console.log("Listing projects...");
             try {
                 await gitLabService.initialize();
                 const projects = await gitLabService.listProjects({

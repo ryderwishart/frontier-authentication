@@ -120,7 +120,7 @@ export class GitService {
                         // Try normal push first
                         await git.push(pushOptions);
                     } catch (pushError) {
-                        console.log("Initial push failed, trying with force");
+                        // console.log("Initial push failed, trying with force");
                         // If normal push fails, try with force again
                         await git.push({
                             ...pushOptions,
@@ -222,7 +222,7 @@ export class GitService {
             // Explicitly create and checkout main branch
             await git.branch({ fs, dir, ref: 'main', checkout: true });
             
-            console.log("Git repository initialized at:", dir);
+            // console.log("Git repository initialized at:", dir);
         } catch (error) {
             console.error("Init error:", error);
             throw new Error(
@@ -234,13 +234,13 @@ export class GitService {
     async addRemote(dir: string, name: string, url: string): Promise<void> {
         try {
             await git.addRemote({ fs, dir, remote: name, url });
-            console.log("Added remote:", name, url);
+            // console.log("Added remote:", name, url);
         } catch (error) {
             // If remote already exists, try to update it
             if (error instanceof Error && error.message.includes("already exists")) {
                 await git.deleteRemote({ fs, dir, remote: name });
                 await git.addRemote({ fs, dir, remote: name, url });
-                console.log("Updated existing remote:", name, url);
+                // console.log("Updated existing remote:", name, url);
             } else {
                 console.error("Add remote error:", error);
                 throw new Error(
@@ -278,7 +278,7 @@ export class GitService {
                 path,
                 value,
             });
-            console.log(`Git config set: ${path} = ${value}`);
+            // console.log(`Git config set: ${path} = ${value}`);
         } catch (error) {
             console.error("Set config error:", error);
             throw new Error(
