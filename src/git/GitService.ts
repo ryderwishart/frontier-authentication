@@ -81,7 +81,11 @@ export class GitService {
         return sha;
     }
 
-    async push(dir: string, auth: { username: string; password: string }, force: boolean = false): Promise<void> {
+    async push(
+        dir: string,
+        auth: { username: string; password: string },
+        force: boolean = false
+    ): Promise<void> {
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -93,17 +97,17 @@ export class GitService {
                     // Ensure we're on main branch
                     // TODO: Make branch configurable
                     const currentBranch = await this.getCurrentBranch(dir);
-                    if (currentBranch !== 'main') {
-                        await git.branch({ fs, dir, ref: 'main' });
-                        await git.checkout({ fs, dir, ref: 'main' });
+                    if (currentBranch !== "main") {
+                        await git.branch({ fs, dir, ref: "main" });
+                        await git.checkout({ fs, dir, ref: "main" });
                     }
 
                     const pushOptions = {
                         fs,
                         http,
                         dir,
-                        remote: 'origin',
-                        ref: 'main',
+                        remote: "origin",
+                        ref: "main",
                         force: force,
                         onAuth: () => auth,
                         onProgress: (event: { phase?: string }) => {
@@ -113,7 +117,7 @@ export class GitService {
                                     increment: 20,
                                 });
                             }
-                        }
+                        },
                     };
 
                     try {
@@ -124,7 +128,7 @@ export class GitService {
                         // If normal push fails, try with force again
                         await git.push({
                             ...pushOptions,
-                            force: true
+                            force: true,
                         });
                     }
                 } catch (error) {
@@ -141,7 +145,10 @@ export class GitService {
         dir: string,
         auth: { username: string; password: string },
         author?: { name: string; email: string }
-    ): Promise<void> {
+    ): Promise<{ hadConflicts: boolean; conflicts: ConflictedFile[] }> {
+        let hadConflicts = false;
+        const conflicts: ConflictedFile[] = [];
+
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -155,7 +162,7 @@ export class GitService {
                         await this.configureAuthor(dir, author.name, author.email);
                     }
 
-                    await git.pull({
+                    const result = await git.pull({
                         fs,
                         http,
                         dir,
@@ -168,15 +175,47 @@ export class GitService {
                                 });
                             }
                         },
+                        fastForwardOnly: false,
                     });
-                } catch (error) {
-                    console.error("Pull error:", error);
-                    throw new Error(
-                        `Failed to pull changes: ${error instanceof Error ? error.message : "Unknown error"}`
+
+                    // Check for merge conflicts
+                    const status = await this.getStatus(dir);
+                    conflicts.push(
+                        ...status
+                            .filter(
+                                ([_, head, workdir, stage]) =>
+                                    stage === 2 || (head === 2 && workdir === 1)
+                            )
+                            .map(([filepath]) => ({
+                                filepath,
+                                ourVersion: `${dir}/.git/OUR_${filepath}`,
+                                theirVersion: `${dir}/git/THEIR_${filepath}`,
+                                commonAncestor: `${dir}/.git/BASE_${filepath}`,
+                            }))
                     );
+
+                    hadConflicts = conflicts.length > 0;
+                } catch (error) {
+                    if (error instanceof git.Errors.MergeConflictError) {
+                        // Parse conflict information
+                        const conflictFiles = (error.data as any).conflictPaths;
+                        conflicts.push(
+                            ...conflictFiles.map((filepath: string) => ({
+                                filepath,
+                                ourVersion: `${dir}/.git/OUR_${filepath}`,
+                                theirVersion: `${dir}/.git/THEIR_${filepath}`,
+                                commonAncestor: `${dir}/.git/BASE_${filepath}`,
+                            }))
+                        );
+                        hadConflicts = true;
+                    } else {
+                        throw error;
+                    }
                 }
             }
         );
+
+        return { hadConflicts, conflicts };
     }
 
     async getStatus(dir: string): Promise<Array<[string, number, number, number]>> {
@@ -217,11 +256,11 @@ export class GitService {
     async init(dir: string): Promise<void> {
         try {
             // Initialize with explicit main branch
-            await git.init({ fs, dir, defaultBranch: 'main' });
-            
+            await git.init({ fs, dir, defaultBranch: "main" });
+
             // Explicitly create and checkout main branch
-            await git.branch({ fs, dir, ref: 'main', checkout: true });
-            
+            await git.branch({ fs, dir, ref: "main", checkout: true });
+
             // console.log("Git repository initialized at:", dir);
         } catch (error) {
             console.error("Init error:", error);
@@ -305,4 +344,12 @@ export class GitService {
         await this.setConfig(dir, "user.name", name);
         await this.setConfig(dir, "user.email", email);
     }
+}
+
+// Add new type definitions
+export interface ConflictedFile {
+    filepath: string;
+    ourVersion: string;
+    theirVersion: string;
+    commonAncestor: string;
 }

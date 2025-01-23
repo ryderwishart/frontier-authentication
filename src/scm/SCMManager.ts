@@ -1,7 +1,8 @@
 import * as vscode from "vscode";
 import * as path from "path";
-import { GitService } from "../git/GitService";
+import { ConflictedFile, GitService } from "../git/GitService";
 import { GitLabService } from "../gitlab/GitLabService";
+import * as git from "isomorphic-git";
 
 export class SCMManager {
     private scmProvider: vscode.SourceControl;
@@ -37,7 +38,7 @@ export class SCMManager {
     private getWorkspacePath(): string {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
-        throw new Error("No workspace folder found");
+            throw new Error("No workspace folder found");
         }
         const path = workspaceFolder.uri.fsPath;
         // console.log("Using workspace path:", path);
@@ -58,6 +59,13 @@ export class SCMManager {
         // Commit changes command (used by SCM input box)
         this.context.subscriptions.push(
             vscode.commands.registerCommand("frontier.commitChanges", () => this.commitChanges())
+        );
+
+        this.context.subscriptions.push(
+            vscode.commands.registerCommand(
+                "frontier.resolveConflicts",
+                (conflicts: ConflictedFile[]) => this.handleConflictResolution(conflicts)
+            )
         );
     }
 
@@ -314,7 +322,7 @@ export class SCMManager {
         });
     }
 
-    async syncChanges(): Promise<void> {
+    async syncChanges(): Promise<ConflictedFile[] | undefined> {
         const token = await this.gitLabService.getToken();
         if (!token) {
             throw new Error("GitLab token not found. Please authenticate first.");
@@ -364,10 +372,15 @@ export class SCMManager {
 
                 // Pull any remote changes first
                 // console.log("Pulling remote changes...");
-                await this.gitService.pull(workspacePath, auth, {
+                const pullResult = await this.gitService.pull(workspacePath, auth, {
                     name: authorName,
                     email: authorEmail,
                 });
+
+                if (pullResult.hadConflicts) {
+                    // Return conflict information to caller
+                    return pullResult.conflicts;
+                }
 
                 // Push changes
                 // console.log("Pushing changes...");
@@ -377,6 +390,17 @@ export class SCMManager {
                 // console.log("No changes to sync");
             }
         } catch (error) {
+            if (error instanceof git.Errors.MergeConflictError) {
+                const workspacePath = this.getWorkspacePath();
+                // Extract conflict information from error
+                const conflictFiles = (error.data as any).conflictPaths.map((filepath: string) => ({
+                    filepath,
+                    ourVersion: `${workspacePath}/.git/OUR_${filepath}`,
+                    theirVersion: `${workspacePath}/.git/THEIR_${filepath}`,
+                    commonAncestor: `${workspacePath}/.git/BASE_${filepath}`,
+                }));
+                return conflictFiles;
+            }
             console.error("Sync error:", error);
             throw new Error(
                 `Failed to sync changes: ${
@@ -553,5 +577,26 @@ export class SCMManager {
                 }`
             );
         }
+    }
+
+    // Add new method to complete merge
+    async completeMerge(resolvedFiles: string[]): Promise<void> {
+        const workspacePath = this.getWorkspacePath();
+
+        // Add resolved files
+        await Promise.all(resolvedFiles.map((file) => this.gitService.add(workspacePath, file)));
+
+        // Commit the merge
+        const user = await this.gitLabService.getCurrentUser();
+        await this.gitService.commit(workspacePath, "Merge conflict resolution", {
+            name: user.name || user.username,
+            email: user.email || `${user.username}@users.noreply.gitlab.com`,
+        });
+    }
+
+    private async handleConflictResolution(conflicts: ConflictedFile[]): Promise<void> {
+        // Implement your conflict resolution UI here
+        // This would show a diff view and allow users to resolve conflicts
+        // After resolution, call completeMerge() with resolved file paths
     }
 }
