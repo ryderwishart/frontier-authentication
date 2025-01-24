@@ -146,6 +146,7 @@ export class GitService {
         auth: { username: string; password: string },
         author?: { name: string; email: string }
     ): Promise<{ hadConflicts: boolean; conflicts: ConflictedFile[] }> {
+        console.log("RYDER: Pulling changes in .pull()...");
         let hadConflicts = false;
         const conflicts: ConflictedFile[] = [];
 
@@ -157,64 +158,96 @@ export class GitService {
             },
             async (progress) => {
                 try {
-                    // Ensure author is configured before pulling
                     if (author) {
                         await this.configureAuthor(dir, author.name, author.email);
                     }
 
-                    const result = await git.pull({
-                        fs,
-                        http,
-                        dir,
-                        onAuth: () => auth,
-                        onProgress: (event) => {
-                            if (event.phase) {
-                                progress.report({
-                                    message: event.phase,
-                                    increment: 20,
-                                });
+                    console.log("RYDER: About to pull with config:", { dir, auth });
+
+                    try {
+                        await git.pull({
+                            fs,
+                            http,
+                            dir,
+                            onAuth: () => auth,
+                            onProgress: (event) => {
+                                if (event.phase) {
+                                    progress.report({
+                                        message: event.phase,
+                                        increment: 20,
+                                    });
+                                }
+                            },
+                            fastForwardOnly: false,
+                        });
+
+                        // Check for merge conflicts after pull
+                        const status = await this.getStatus(dir);
+                        console.log("RYDER: Status after pull:", status);
+
+                        if (status && Array.isArray(status)) {
+                            const conflictedFiles = status
+                                .filter(
+                                    ([_, head, workdir, stage]) =>
+                                        stage === 2 || (head === 2 && workdir === 1)
+                                )
+                                .map(([filepath]) => ({
+                                    filepath,
+                                    ours: `${dir}/.git/OUR_${filepath}`,
+                                    theirs: `${dir}/.git/THEIR_${filepath}`,
+                                    base: `${dir}/.git/BASE_${filepath}`,
+                                }));
+
+                            conflicts.push(...conflictedFiles);
+                            hadConflicts = conflicts.length > 0;
+
+                            console.log("RYDER: Conflict detection result:", {
+                                hadConflicts,
+                                conflicts,
+                                statusLength: status.length,
+                                conflictedFiles,
+                            });
+                        }
+                    } catch (pullError) {
+                        console.log("RYDER: Pull error:", pullError);
+
+                        if (pullError instanceof git.Errors.MergeConflictError) {
+                            console.log("RYDER: Merge conflict error data:", pullError.data);
+
+                            const paths =
+                                pullError.data?.filepaths || pullError.data?.filepaths || [];
+                            if (Array.isArray(paths)) {
+                                for (const filepath of paths) {
+                                    try {
+                                        const versions = await this.getConflictVersions(
+                                            dir,
+                                            filepath
+                                        );
+                                        conflicts.push({
+                                            filepath,
+                                            ...versions,
+                                        });
+                                    } catch (err) {
+                                        console.error(
+                                            `Failed to get versions for ${filepath}:`,
+                                            err
+                                        );
+                                    }
+                                }
+                                hadConflicts = true;
                             }
-                        },
-                        fastForwardOnly: false,
-                    });
-
-                    // Check for merge conflicts
-                    const status = await this.getStatus(dir);
-                    conflicts.push(
-                        ...status
-                            .filter(
-                                ([_, head, workdir, stage]) =>
-                                    stage === 2 || (head === 2 && workdir === 1)
-                            )
-                            .map(([filepath]) => ({
-                                filepath,
-                                ourVersion: `${dir}/.git/OUR_${filepath}`,
-                                theirVersion: `${dir}/git/THEIR_${filepath}`,
-                                commonAncestor: `${dir}/.git/BASE_${filepath}`,
-                            }))
-                    );
-
-                    hadConflicts = conflicts.length > 0;
-                } catch (error) {
-                    if (error instanceof git.Errors.MergeConflictError) {
-                        // Parse conflict information
-                        const conflictFiles = (error.data as any).conflictPaths;
-                        conflicts.push(
-                            ...conflictFiles.map((filepath: string) => ({
-                                filepath,
-                                ourVersion: `${dir}/.git/OUR_${filepath}`,
-                                theirVersion: `${dir}/.git/THEIR_${filepath}`,
-                                commonAncestor: `${dir}/.git/BASE_${filepath}`,
-                            }))
-                        );
-                        hadConflicts = true;
-                    } else {
-                        throw error;
+                        } else {
+                            throw pullError;
+                        }
                     }
+                } catch (error) {
+                    console.error("Pull operation error:", error);
+                    throw error;
                 }
             }
         );
 
+        console.log("RYDER: Pull operation completed:", { hadConflicts, conflicts });
         return { hadConflicts, conflicts };
     }
 
@@ -344,12 +377,87 @@ export class GitService {
         await this.setConfig(dir, "user.name", name);
         await this.setConfig(dir, "user.email", email);
     }
+
+    async getConflictVersions(
+        dir: string,
+        filepath: string
+    ): Promise<{
+        ours: string;
+        theirs: string;
+        base: string;
+    }> {
+        try {
+            // Get the status matrix for the file
+            const status = await git.statusMatrix({ fs, dir, filepaths: [filepath] });
+            const fileStatus = status.find(([path]) => path === filepath);
+
+            if (!fileStatus) {
+                throw new Error(`File ${filepath} not found in git status`);
+            }
+
+            // Read the current working copy (ours)
+            const workingCopyUri = vscode.Uri.file(path.join(dir, filepath));
+            const oursContent = await vscode.workspace.fs.readFile(workingCopyUri);
+
+            // Try to get the base and their versions from the object store
+            let baseContent = new Uint8Array();
+            let theirsContent = new Uint8Array();
+
+            try {
+                // Get the commit refs for merge
+                const HEAD = await git.resolveRef({ fs, dir, ref: "HEAD" });
+                const MERGE_HEAD = await git.resolveRef({ fs, dir, ref: "MERGE_HEAD" });
+
+                if (HEAD && MERGE_HEAD) {
+                    // Get the merge base
+                    const mergeBase = await git.findMergeBase({
+                        fs,
+                        dir,
+                        oids: [HEAD, MERGE_HEAD],
+                    });
+
+                    if (mergeBase.length > 0) {
+                        // Read base version
+                        const baseTree = await git.readTree({ fs, dir, oid: mergeBase[0] });
+                        const baseEntry = baseTree.tree.find((entry) => entry.path === filepath);
+                        if (baseEntry) {
+                            const baseBlob = await git.readBlob({ fs, dir, oid: baseEntry.oid });
+                            baseContent = baseBlob.blob;
+                        }
+
+                        // Read their version
+                        const theirTree = await git.readTree({ fs, dir, oid: MERGE_HEAD });
+                        const theirEntry = theirTree.tree.find((entry) => entry.path === filepath);
+                        if (theirEntry) {
+                            const theirBlob = await git.readBlob({ fs, dir, oid: theirEntry.oid });
+                            theirsContent = theirBlob.blob;
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("Error reading merge versions:", err);
+            }
+
+            return {
+                base: new TextDecoder().decode(baseContent),
+                ours: new TextDecoder().decode(oursContent),
+                theirs: new TextDecoder().decode(theirsContent),
+            };
+        } catch (error) {
+            console.error(`Error getting conflict versions for ${filepath}:`, error);
+            return {
+                base: "",
+                ours: "",
+                theirs: "",
+            };
+        }
+    }
 }
 
 // Add new type definitions
 export interface ConflictedFile {
     filepath: string;
-    ourVersion: string;
-    theirVersion: string;
-    commonAncestor: string;
+    ours: string; // The actual content, not a path
+    theirs: string; // The actual content, not a path
+    base: string; // The actual content, not a path
 }

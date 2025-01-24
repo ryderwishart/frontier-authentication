@@ -7,6 +7,7 @@ import { registerGitLabCommands } from "./commands/gitlabCommands";
 import { registerSCMCommands } from "./commands/scmCommands";
 import { initialState, StateManager } from "./state";
 import { AuthState } from "./types/state";
+import { ConflictedFile } from "./git/GitService";
 
 export interface FrontierAPI {
     authProvider: FrontierAuthProvider;
@@ -45,6 +46,11 @@ export interface FrontierAPI {
         username: string;
     }>;
     getLlmEndpoint: () => Promise<string | undefined>;
+    syncChanges: () => Promise<{
+        hasConflicts: boolean;
+        conflicts?: Array<ConflictedFile>;
+    }>;
+    completeMerge: (resolvedFiles: string[]) => Promise<void>;
 }
 
 let authenticationProvider: FrontierAuthProvider;
@@ -183,6 +189,16 @@ export async function activate(context: vscode.ExtensionContext) {
         getLlmEndpoint: async () => {
             return API_ENDPOINT;
         },
+        syncChanges: async () =>
+            vscode.commands.executeCommand("frontier.syncChanges") as Promise<{
+                hasConflicts: boolean;
+                conflicts?: Array<ConflictedFile>;
+            }>,
+        completeMerge: async (resolvedFiles: string[]) =>
+            vscode.commands.executeCommand(
+                "frontier.completeMerge",
+                resolvedFiles
+            ) as Promise<void>,
     };
 
     return frontierAPI;

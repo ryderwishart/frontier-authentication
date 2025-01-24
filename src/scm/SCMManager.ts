@@ -62,9 +62,8 @@ export class SCMManager {
         );
 
         this.context.subscriptions.push(
-            vscode.commands.registerCommand(
-                "frontier.resolveConflicts",
-                (conflicts: ConflictedFile[]) => this.handleConflictResolution(conflicts)
+            vscode.commands.registerCommand("frontier.completeMerge", (resolvedFiles: string[]) =>
+                this.completeMerge(resolvedFiles)
             )
         );
     }
@@ -322,20 +321,21 @@ export class SCMManager {
         });
     }
 
-    async syncChanges(): Promise<ConflictedFile[] | undefined> {
-        const token = await this.gitLabService.getToken();
-        if (!token) {
-            throw new Error("GitLab token not found. Please authenticate first.");
-        }
-
-        const auth = {
-            username: "oauth2",
-            password: token,
-        };
-
+    async syncChanges(): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
+        console.log("RYDER: calling sync changes");
         try {
+            const token = await this.gitLabService.getToken();
+            if (!token) {
+                throw new Error("GitLab token not found. Please authenticate first.");
+            }
+
+            const auth = {
+                username: "oauth2",
+                password: token,
+            };
+
             const workspacePath = this.getWorkspacePath();
-            // console.log("Syncing changes in workspace:", workspacePath);
+            console.log("Syncing changes in workspace:", workspacePath);
 
             // Verify that this is a git repository
             try {
@@ -349,6 +349,11 @@ export class SCMManager {
 
             // Get current user info for commit author details
             const user = await this.gitLabService.getCurrentUser();
+            if (!user) {
+                console.error("Failed to get current user");
+                throw new Error("Could not get user information from GitLab");
+            }
+
             const authorName = user.name || user.username;
             const authorEmail = user.email || `${user.username}@users.noreply.gitlab.com`;
 
@@ -362,8 +367,9 @@ export class SCMManager {
             const status = await this.gitService.getStatus(workspacePath);
             const hasChanges = status.some(([, , worktreeStatus]) => worktreeStatus !== 0);
 
+            console.log("RYDER: Status check:", { status, hasChanges });
             if (hasChanges) {
-                // console.log("Changes detected, committing...");
+                console.log("Changes detected, committing...");
                 // Commit changes
                 await this.gitService.commit(workspacePath, "Auto-sync changes", {
                     name: authorName,
@@ -371,36 +377,76 @@ export class SCMManager {
                 });
 
                 // Pull any remote changes first
-                // console.log("Pulling remote changes...");
+                console.log("Pulling remote changes...");
                 const pullResult = await this.gitService.pull(workspacePath, auth, {
                     name: authorName,
                     email: authorEmail,
                 });
 
+                console.log("RYDER: Pull result:", pullResult);
+
                 if (pullResult.hadConflicts) {
-                    // Return conflict information to caller
-                    return pullResult.conflicts;
+                    console.log("RYDER: Conflicts detected during pull:", pullResult.conflicts);
+                    // Get the actual content for each conflicted file
+                    const conflicts = await Promise.all(
+                        pullResult.conflicts.map(async (conflict: ConflictedFile) => {
+                            const versions = await this.gitService.getConflictVersions(
+                                workspacePath,
+                                conflict.filepath
+                            );
+                            return {
+                                filepath: conflict.filepath,
+                                ...versions,
+                            };
+                        })
+                    );
+                    return {
+                        hasConflicts: true,
+                        conflicts,
+                    };
                 }
 
                 // Push changes
-                // console.log("Pushing changes...");
+                console.log("Pushing changes...");
                 await this.gitService.push(workspacePath, auth);
-                // console.log("Sync completed successfully");
+                console.log("Sync completed successfully");
+                return { hasConflicts: false };
             } else {
-                // console.log("No changes to sync");
+                console.log("No changes to sync");
+                return { hasConflicts: false };
             }
         } catch (error) {
+            console.log("RYDER: Error in syncChanges:", {
+                error,
+                type: error?.constructor?.name,
+                message: error instanceof Error ? error.message : String(error),
+                stack: error instanceof Error ? error.stack : undefined,
+            });
+
             if (error instanceof git.Errors.MergeConflictError) {
                 const workspacePath = this.getWorkspacePath();
-                // Extract conflict information from error
-                const conflictFiles = (error.data as any).conflictPaths.map((filepath: string) => ({
-                    filepath,
-                    ourVersion: `${workspacePath}/.git/OUR_${filepath}`,
-                    theirVersion: `${workspacePath}/.git/THEIR_${filepath}`,
-                    commonAncestor: `${workspacePath}/.git/BASE_${filepath}`,
-                }));
-                return conflictFiles;
+                const conflictPaths = error.data?.filepaths || [];
+
+                // Get the actual content for each conflicted file
+                const conflicts = await Promise.all(
+                    conflictPaths.map(async (filepath: string) => {
+                        const versions = await this.gitService.getConflictVersions(
+                            workspacePath,
+                            filepath
+                        );
+                        return {
+                            filepath,
+                            ...versions,
+                        };
+                    })
+                );
+
+                return {
+                    hasConflicts: true,
+                    conflicts,
+                };
             }
+
             console.error("Sync error:", error);
             throw new Error(
                 `Failed to sync changes: ${
@@ -592,11 +638,5 @@ export class SCMManager {
             name: user.name || user.username,
             email: user.email || `${user.username}@users.noreply.gitlab.com`,
         });
-    }
-
-    private async handleConflictResolution(conflicts: ConflictedFile[]): Promise<void> {
-        // Implement your conflict resolution UI here
-        // This would show a diff view and allow users to resolve conflicts
-        // After resolution, call completeMerge() with resolved file paths
     }
 }
