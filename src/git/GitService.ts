@@ -387,59 +387,42 @@ export class GitService {
         base: string;
     }> {
         try {
-            // Get the status matrix for the file
-            const status = await git.statusMatrix({ fs, dir, filepaths: [filepath] });
-            const fileStatus = status.find(([path]) => path === filepath);
-
-            if (!fileStatus) {
-                throw new Error(`File ${filepath} not found in git status`);
-            }
-
-            // Read the current working copy (ours)
+            // Get the current working copy (ours)
             const workingCopyUri = vscode.Uri.file(path.join(dir, filepath));
             const oursContent = await vscode.workspace.fs.readFile(workingCopyUri);
 
-            // Try to get the base and their versions from the object store
-            let baseContent = new Uint8Array();
+            // Get the remote content (theirs)
             let theirsContent = new Uint8Array();
-
             try {
-                // Get the commit refs for merge
-                const HEAD = await git.resolveRef({ fs, dir, ref: "HEAD" });
-                const MERGE_HEAD = await git.resolveRef({ fs, dir, ref: "MERGE_HEAD" });
+                // Get the current branch name
+                const currentBranch = await git.currentBranch({ fs, dir });
 
-                if (HEAD && MERGE_HEAD) {
-                    // Get the merge base
-                    const mergeBase = await git.findMergeBase({
-                        fs,
-                        dir,
-                        oids: [HEAD, MERGE_HEAD],
-                    });
+                // Get the remote ref (e.g., 'refs/remotes/origin/main')
+                const remoteRef = `refs/remotes/origin/${currentBranch}`;
 
-                    if (mergeBase.length > 0) {
-                        // Read base version
-                        const baseTree = await git.readTree({ fs, dir, oid: mergeBase[0] });
-                        const baseEntry = baseTree.tree.find((entry) => entry.path === filepath);
-                        if (baseEntry) {
-                            const baseBlob = await git.readBlob({ fs, dir, oid: baseEntry.oid });
-                            baseContent = baseBlob.blob;
-                        }
+                // Get the remote commit
+                const remoteOid = await git.resolveRef({ fs, dir, ref: remoteRef });
 
-                        // Read their version
-                        const theirTree = await git.readTree({ fs, dir, oid: MERGE_HEAD });
-                        const theirEntry = theirTree.tree.find((entry) => entry.path === filepath);
-                        if (theirEntry) {
-                            const theirBlob = await git.readBlob({ fs, dir, oid: theirEntry.oid });
-                            theirsContent = theirBlob.blob;
-                        }
+                if (remoteOid) {
+                    try {
+                        // Read the file from the remote commit
+                        const { blob } = await git.readBlob({
+                            fs,
+                            dir,
+                            oid: remoteOid,
+                            filepath,
+                        });
+                        theirsContent = blob;
+                    } catch (err) {
+                        console.error(`Error reading remote file content: ${err}`);
                     }
                 }
             } catch (err) {
-                console.error("Error reading merge versions:", err);
+                console.error("Error getting remote content:", err);
             }
 
             return {
-                base: new TextDecoder().decode(baseContent),
+                base: "", // We don't need the base version for our conflict resolution
                 ours: new TextDecoder().decode(oursContent),
                 theirs: new TextDecoder().decode(theirsContent),
             };
