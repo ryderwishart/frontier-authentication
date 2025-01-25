@@ -4,6 +4,14 @@ import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
 
+interface PullResult {
+    hadConflicts: boolean;
+    needsMerge?: boolean;
+    localOid?: string;
+    remoteOid?: string;
+    conflicts?: ConflictedFile[];
+}
+
 export class GitService {
     constructor() {
         // No need to initialize filesystem anymore as we're using the real fs
@@ -144,111 +152,111 @@ export class GitService {
     async pull(
         dir: string,
         auth: { username: string; password: string },
-        author?: { name: string; email: string }
-    ): Promise<{ hadConflicts: boolean; conflicts: ConflictedFile[] }> {
+        author: { name: string; email: string }
+    ): Promise<PullResult> {
         console.log("RYDER: Pulling changes in .pull()...");
-        let hadConflicts = false;
-        const conflicts: ConflictedFile[] = [];
+        try {
+            // First fetch the changes
+            await git.fetch({
+                fs,
+                http,
+                dir,
+                ...auth,
+            });
 
-        await vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: "Pulling changes...",
-                cancellable: false,
-            },
-            async (progress) => {
-                try {
-                    if (author) {
-                        await this.configureAuthor(dir, author.name, author.email);
-                    }
+            const currentBranch = await git.currentBranch({ fs, dir });
+            if (!currentBranch) {
+                throw new Error("Not on any branch");
+            }
 
-                    console.log("RYDER: About to pull with config:", { dir, auth });
+            // Get remote ref and OIDs
+            const remoteRef = `refs/remotes/origin/${currentBranch}`;
+            const remoteOid = await git.resolveRef({ fs, dir, ref: remoteRef });
+            const localOid = await git.resolveRef({ fs, dir, ref: currentBranch });
 
-                    try {
-                        await git.pull({
-                            fs,
-                            http,
-                            dir,
-                            onAuth: () => auth,
-                            onProgress: (event) => {
-                                if (event.phase) {
-                                    progress.report({
-                                        message: event.phase,
-                                        increment: 20,
-                                    });
-                                }
-                            },
-                            fastForwardOnly: false,
-                        });
+            // Simple check: Are histories diverged?
+            const canFastForward = await git.isDescendent({
+                fs,
+                dir,
+                oid: remoteOid,
+                ancestor: localOid,
+            });
 
-                        // Check for merge conflicts after pull
-                        const status = await this.getStatus(dir);
-                        console.log("RYDER: Status after pull:", status);
+            // If we can fast-forward, do it
+            if (canFastForward) {
+                console.log("RYDER: No conflicts, fast-forwarding...");
+                await git.writeRef({
+                    fs,
+                    dir,
+                    ref: `refs/heads/${currentBranch}`,
+                    value: remoteOid,
+                    force: true,
+                });
+                await git.checkout({ fs, dir, ref: currentBranch, force: true });
+                return { hadConflicts: false };
+            }
 
-                        if (status && Array.isArray(status)) {
-                            const conflictedFiles = status
-                                .filter(
-                                    ([_, head, workdir, stage]) =>
-                                        stage === 2 || (head === 2 && workdir === 1)
-                                )
-                                .map(([filepath]) => ({
-                                    filepath,
-                                    ours: `${dir}/.git/OUR_${filepath}`,
-                                    theirs: `${dir}/.git/THEIR_${filepath}`,
-                                    base: `${dir}/.git/BASE_${filepath}`,
-                                }));
+            // Get modified files from status, excluding .git/* paths
+            const statusMatrix = await git.statusMatrix({ fs, dir });
+            const modifiedFiles = statusMatrix
+                .filter(
+                    ([filepath, head, workdir, stage]) =>
+                        // Only include files that are modified
+                        (workdir !== stage || head !== stage) &&
+                        // Exclude .git/* paths
+                        !filepath.startsWith(".git/")
+                )
+                .map(([filepath]) => filepath);
 
-                            conflicts.push(...conflictedFiles);
-                            hadConflicts = conflicts.length > 0;
+            console.log("RYDER: Modified files:", modifiedFiles);
 
-                            console.log("RYDER: Conflict detection result:", {
-                                hadConflicts,
-                                conflicts,
-                                statusLength: status.length,
-                                conflictedFiles,
-                            });
-                        }
-                    } catch (pullError) {
-                        console.log("RYDER: Pull error:", pullError);
+            // Create conflicts list from real file conflicts
+            const conflicts: ConflictedFile[] = [];
 
-                        if (pullError instanceof git.Errors.MergeConflictError) {
-                            console.log("RYDER: Merge conflict error data:", pullError.data);
-
-                            const paths =
-                                pullError.data?.filepaths || pullError.data?.filepaths || [];
-                            if (Array.isArray(paths)) {
-                                for (const filepath of paths) {
-                                    try {
-                                        const versions = await this.getConflictVersions(
-                                            dir,
-                                            filepath
-                                        );
-                                        conflicts.push({
-                                            filepath,
-                                            ...versions,
-                                        });
-                                    } catch (err) {
-                                        console.error(
-                                            `Failed to get versions for ${filepath}:`,
-                                            err
-                                        );
-                                    }
-                                }
-                                hadConflicts = true;
-                            }
-                        } else {
-                            throw pullError;
-                        }
-                    }
-                } catch (error) {
-                    console.error("Pull operation error:", error);
-                    throw error;
+            if (modifiedFiles.length > 0) {
+                for (const filepath of modifiedFiles) {
+                    conflicts.push({
+                        filepath,
+                        ours: await this.readFileContent(dir, filepath),
+                        theirs: await this.readRemoteContent(dir, filepath, remoteOid),
+                        base: "",
+                    });
                 }
             }
-        );
 
-        console.log("RYDER: Pull operation completed:", { hadConflicts, conflicts });
-        return { hadConflicts, conflicts };
+            // Return both merge status and any file conflicts
+            return {
+                hadConflicts: conflicts.length > 0,
+                needsMerge: !canFastForward,
+                localOid,
+                remoteOid,
+                conflicts: conflicts.length > 0 ? conflicts : undefined,
+            };
+        } catch (error) {
+            console.error("Pull operation error:", error);
+            throw error;
+        }
+    }
+
+    private async readFileContent(dir: string, filepath: string): Promise<string> {
+        const uri = vscode.Uri.file(path.join(dir, filepath));
+        const content = await vscode.workspace.fs.readFile(uri);
+        return new TextDecoder().decode(content);
+    }
+
+    private async readRemoteContent(dir: string, filepath: string, oid: string): Promise<string> {
+        try {
+            const { blob } = await git.readBlob({
+                fs,
+                dir,
+                oid,
+                filepath,
+            });
+            return new TextDecoder().decode(blob);
+        } catch (err) {
+            console.error(`Error reading remote content for ${filepath}:`, err);
+            return "";
+        }
     }
 
     async getStatus(dir: string): Promise<Array<[string, number, number, number]>> {
@@ -433,6 +441,81 @@ export class GitService {
                 ours: "",
                 theirs: "",
             };
+        }
+    }
+
+    async completeMerge(
+        dir: string,
+        auth: { username: string; password: string },
+        author: { name: string; email: string },
+        resolvedFiles: string[]
+    ): Promise<void> {
+        try {
+            const currentBranch = await git.currentBranch({ fs, dir });
+            if (!currentBranch) {
+                throw new Error("Not on any branch");
+            }
+
+            // Get the commits we're merging
+            const remoteRef = `refs/remotes/origin/${currentBranch}`;
+            const remoteOid = await git.resolveRef({ fs, dir, ref: remoteRef });
+            const localOid = await git.resolveRef({ fs, dir, ref: currentBranch });
+
+            // Add all resolved files
+            for (const file of resolvedFiles) {
+                await git.add({ fs, dir, filepath: file });
+            }
+
+            // Create merge commit
+            await git.commit({
+                fs,
+                dir,
+                message: `Merge branch 'origin/${currentBranch}'\n\nResolved files:\n${resolvedFiles.join("\n")}`,
+                author,
+                parent: [localOid, remoteOid],
+            });
+
+            // Push the merge commit
+            await git.push({
+                fs,
+                http,
+                dir,
+                ...auth,
+            });
+
+            console.log("RYDER: Merge completed and pushed successfully");
+        } catch (error) {
+            console.error("Error completing merge:", error);
+            throw error;
+        }
+    }
+
+    async syncChanges(
+        dir: string,
+        auth: { username: string; password: string },
+        author: { name: string; email: string }
+    ): Promise<void> {
+        try {
+            // First pull changes
+            const pullResult = await this.pull(dir, auth, author);
+
+            if (pullResult.needsMerge) {
+                if (pullResult.conflicts) {
+                    // If there are file conflicts, let the client handle them
+                    console.log("RYDER: File conflicts need manual resolution");
+                    throw new Error("File conflicts need manual resolution");
+                } else {
+                    // Automatic merge of divergent histories with no file conflicts
+                    console.log("RYDER: Performing automatic merge of divergent histories");
+                    await this.completeMerge(dir, auth, author, []);
+                }
+            }
+
+            // Push any local changes
+            await this.push(dir, auth);
+        } catch (error) {
+            console.error("Error syncing changes:", error);
+            throw error;
         }
     }
 }

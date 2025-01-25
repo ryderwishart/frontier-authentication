@@ -389,7 +389,7 @@ export class SCMManager {
                     console.log("RYDER: Conflicts detected during pull:", pullResult.conflicts);
                     // Get the actual content for each conflicted file
                     const conflicts = await Promise.all(
-                        pullResult.conflicts.map(async (conflict: ConflictedFile) => {
+                        (pullResult?.conflicts ?? []).map(async (conflict: ConflictedFile) => {
                             const versions = await this.gitService.getConflictVersions(
                                 workspacePath,
                                 conflict.filepath
