@@ -9,6 +9,8 @@ A VS Code extension that provides seamless authentication and GitLab integration
 - **Real-time Status**: Monitor authentication and server connection status
 - **Persistent Sessions**: Maintains your session across VS Code restarts
 - **Secure Token Storage**: Uses VS Code's built-in secret storage for credentials
+- **Git Sync**: Synchronize changes with remote repositories with conflict resolution support
+- **LLM**: Connect to LLM services for code generation, etc.
 
 ## Installation
 
@@ -122,9 +124,33 @@ For support, please:
 
 ## Release Notes
 
-### 1.0.0
+### 0.1.0 (Latest)
 
-- Initial release
+#### Major Features
+
+- **Enhanced Git Synchronization**
+    - Improved merge conflict resolution with diff3 strategy
+    - Streamlined conflict resolution process
+    - Added detailed conflict information handling
+    - Introduced new conflict management features
+
+#### Technical Improvements
+
+- **Git Operations**
+    - Refactored GitService push and pull methods for simplification
+    - Enhanced error handling and author configuration
+    - Added `syncChanges` and `completeMerge` methods to FrontierAPI
+    - Introduced `ConflictedFile` type for better conflict management
+
+#### Code Quality
+
+- Removed unnecessary console.log statements for improved performance
+- Streamlined code across SCM, Git, and GitLab services
+- Improved error handling for remote content access
+
+### 0.0.25
+
+- Initial conflict management features
 - Authentication system
 - GitLab project creation
 - Status monitoring
