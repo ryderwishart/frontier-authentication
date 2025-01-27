@@ -322,7 +322,6 @@ export class SCMManager {
     }
 
     async syncChanges(): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
-        console.log("RYDER: calling sync changes");
         try {
             const token = await this.gitLabService.getToken();
             if (!token) {
@@ -335,131 +334,31 @@ export class SCMManager {
             };
 
             const workspacePath = this.getWorkspacePath();
-            console.log("Syncing changes in workspace:", workspacePath);
-
-            // Verify that this is a git repository
-            try {
-                await this.gitService.getStatus(workspacePath);
-            } catch (error) {
-                console.error("Git status check failed:", error);
-                throw new Error(
-                    "Current workspace is not a git repository. Please initialize git or clone a repository first."
-                );
-            }
-
-            // Get current user info for commit author details
             const user = await this.gitLabService.getCurrentUser();
             if (!user) {
-                console.error("Failed to get current user");
                 throw new Error("Could not get user information from GitLab");
             }
 
-            const authorName = user.name || user.username;
-            const authorEmail = user.email || `${user.username}@users.noreply.gitlab.com`;
-
-            // Ensure git config is set
-            await this.gitService.configureAuthor(workspacePath, authorName, authorEmail);
-
-            // Add all changes
-            await this.gitService.addAll(workspacePath);
-
-            // Get status to check if there are changes to commit
-            const status = await this.gitService.getStatus(workspacePath);
-            const hasChanges = status.some(([, , worktreeStatus]) => worktreeStatus !== 0);
-
-            console.log("RYDER: Status check:", { status, hasChanges });
-            if (hasChanges) {
-                console.log("Changes detected, committing...");
-                // Commit changes
-                await this.gitService.commit(workspacePath, "Auto-sync changes", {
-                    name: authorName,
-                    email: authorEmail,
-                });
-
-                // Pull any remote changes first
-                console.log("Pulling remote changes...");
-                const pullResult = await this.gitService.pull(
-                    workspacePath,
-                    {
-                        username: "oauth2",
-                        password: token,
-                    },
-                    {
-                        name: authorName,
-                        email: authorEmail,
-                    }
-                );
-
-                console.log("RYDER: Pull result:", pullResult);
-
-                if (pullResult.hadConflicts) {
-                    console.log("RYDER: Conflicts detected during pull:", pullResult.conflicts);
-                    // Get the actual content for each conflicted file
-                    const conflicts = await Promise.all(
-                        (pullResult?.conflicts ?? []).map(async (conflict: ConflictedFile) => {
-                            const versions = await this.gitService.getConflictVersions(
-                                workspacePath,
-                                conflict.filepath
-                            );
-                            return {
-                                filepath: conflict.filepath,
-                                ...versions,
-                            };
-                        })
-                    );
-                    return {
-                        hasConflicts: true,
-                        conflicts,
-                    };
-                }
-
-                // Push changes
-                console.log("Pushing changes...");
-                await this.gitService.push(workspacePath, auth);
-                console.log("Sync completed successfully");
-                return { hasConflicts: false };
-            } else {
-                console.log("No changes to sync");
-                return { hasConflicts: false };
-            }
-        } catch (error) {
-            console.log("RYDER: Error in syncChanges:", {
-                error,
-                type: error?.constructor?.name,
-                message: error instanceof Error ? error.message : String(error),
-                stack: error instanceof Error ? error.stack : undefined,
+            // First try to pull - this will detect conflicts early
+            const pullResult = await this.gitService.pull(workspacePath, auth, {
+                name: user.name || user.username,
+                email: user.email || `${user.username}@users.noreply.gitlab.com`,
             });
 
-            if (error instanceof git.Errors.MergeConflictError) {
-                const workspacePath = this.getWorkspacePath();
-                const conflictPaths = error.data?.filepaths || [];
-
-                // Get the actual content for each conflicted file
-                const conflicts = await Promise.all(
-                    conflictPaths.map(async (filepath: string) => {
-                        const versions = await this.gitService.getConflictVersions(
-                            workspacePath,
-                            filepath
-                        );
-                        return {
-                            filepath,
-                            ...versions,
-                        };
-                    })
-                );
-
+            // If we have conflicts, return them immediately
+            if (pullResult.hadConflicts && pullResult.conflicts) {
                 return {
                     hasConflicts: true,
-                    conflicts,
+                    conflicts: pullResult.conflicts,
                 };
             }
 
+            // No conflicts during pull, try to push any local changes
+            await this.gitService.push(workspacePath, auth);
+            return { hasConflicts: false };
+        } catch (error) {
             console.error("Sync error:", error);
-            throw new Error(
-                `Failed to sync changes: ${
-                    error instanceof Error ? error.message : "Unknown error"
-                }`
-            );
+            throw error;
         }
     }
 
@@ -634,16 +533,33 @@ export class SCMManager {
 
     // Add new method to complete merge
     async completeMerge(resolvedFiles: string[]): Promise<void> {
-        const workspacePath = this.getWorkspacePath();
+        try {
+            const token = await this.gitLabService.getToken();
+            if (!token) {
+                throw new Error("GitLab token not found. Please authenticate first.");
+            }
 
-        // Add resolved files
-        await Promise.all(resolvedFiles.map((file) => this.gitService.add(workspacePath, file)));
+            const workspacePath = this.getWorkspacePath();
+            const user = await this.gitLabService.getCurrentUser();
+            if (!user) {
+                throw new Error("Could not get user information from GitLab");
+            }
 
-        // Commit the merge
-        const user = await this.gitLabService.getCurrentUser();
-        await this.gitService.commit(workspacePath, "Merge conflict resolution", {
-            name: user.name || user.username,
-            email: user.email || `${user.username}@users.noreply.gitlab.com`,
-        });
+            await this.gitService.completeMerge(
+                workspacePath,
+                {
+                    username: "oauth2",
+                    password: token,
+                },
+                {
+                    name: user.name || user.username,
+                    email: user.email || `${user.username}@users.noreply.gitlab.com`,
+                },
+                resolvedFiles
+            );
+        } catch (error) {
+            console.error("Complete merge error:", error);
+            throw error;
+        }
     }
 }

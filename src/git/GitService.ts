@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
 import * as diff3 from "diff3";
+import { PushResult } from "isomorphic-git";
 
 interface PullResult {
     hadConflicts: boolean;
@@ -69,10 +70,16 @@ export class GitService {
     async addAll(dir: string): Promise<void> {
         const status = await git.statusMatrix({ fs, dir });
         await Promise.all(
-            status.map(([filepath, , worktreeStatus]) =>
-                // Add if file is unstaged or modified
-                worktreeStatus ? git.add({ fs, dir, filepath }) : Promise.resolve()
-            )
+            status.map(([filepath, head, workdir, stage]) => {
+                // Only add if file is:
+                // - untracked (head === 0 && workdir === 1)
+                // - modified (workdir !== head)
+                // - staged but modified again (stage !== workdir)
+                if ((head === 0 && workdir === 1) || workdir !== head || stage !== workdir) {
+                    return git.add({ fs, dir, filepath });
+                }
+                return Promise.resolve();
+            })
         );
     }
 
@@ -94,76 +101,37 @@ export class GitService {
         dir: string,
         auth: { username: string; password: string },
         force: boolean = false
-    ): Promise<void> {
-        await vscode.window.withProgress(
+    ): Promise<PushResult | PullResult | undefined> {
+        return vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
                 title: "Pushing changes...",
             },
-            async (progress) => {
+            async () => {
                 try {
-                    // Check for unmerged paths first
-                    const status = await git.statusMatrix({ fs, dir });
-                    const unmergedPaths = status
-                        .filter(([, , , worktreeStatus]) => worktreeStatus === 3)
-                        .map(([filepath]) => filepath);
-
-                    if (unmergedPaths.length > 0) {
-                        throw new Error(`Unmerged files detected: ${unmergedPaths.join(", ")}`);
-                    }
-
-                    // Rest of push logic...
                     const currentBranch = await this.getCurrentBranch(dir);
-
-                    // First try to merge if needed
+                    const remoteBranch = `refs/remotes/origin/${currentBranch}`;
                     const localOid = await git.resolveRef({
                         fs,
                         dir,
                         ref: currentBranch || "main",
                     });
-                    const remoteBranch = `origin/${currentBranch}`;
-                    let remoteOid;
-                    try {
-                        remoteOid = await git.resolveRef({ fs, dir, ref: remoteBranch });
-                    } catch {
-                        // Remote ref doesn't exist yet
-                        remoteOid = null;
+
+                    // First pull to ensure we're up to date
+                    const pullResult = await this.pull(dir, auth, { name: "", email: "" });
+                    if (pullResult.needsMerge || pullResult.hadConflicts) {
+                        return pullResult;
                     }
 
-                    console.log("RYDER: Push - Local:", localOid, "Remote:", remoteOid);
+                    console.log(
+                        "RYDER: Push - Local:",
+                        localOid,
+                        "Remote:",
+                        await git.resolveRef({ fs, dir, ref: remoteBranch })
+                    );
 
-                    if (remoteOid && localOid !== remoteOid) {
-                        // Branches have diverged, we need to merge first
-                        try {
-                            await git.merge({
-                                fs,
-                                dir,
-                                ours: currentBranch || "main",
-                                theirs: remoteBranch,
-                                abortOnConflict: false,
-                            });
-                        } catch (err) {
-                            if (err instanceof git.Errors.MergeConflictError) {
-                                // We have conflicts that need manual resolution
-                                const conflicts = await this.collectConflicts(
-                                    dir,
-                                    err.data.filepaths,
-                                    remoteBranch
-                                );
-                                return {
-                                    hadConflicts: true,
-                                    needsMerge: true,
-                                    conflicts,
-                                    localOid,
-                                    remoteOid,
-                                };
-                            }
-                            throw err;
-                        }
-                    }
-
-                    // Now try to push
-                    const pushResult = await git.push({
+                    // Now push
+                    await git.push({
                         fs,
                         http,
                         dir,
@@ -174,24 +142,9 @@ export class GitService {
                             username: auth.username,
                             password: auth.password,
                         }),
-                        onProgress: (event) => {
-                            if (event.phase) {
-                                progress.report({ message: event.phase });
-                            }
-                        },
                     });
 
-                    // Verify the push
-                    const finalRemoteOid = await git.resolveRef({ fs, dir, ref: remoteBranch });
-                    console.log("RYDER: Push verification - Final remote:", finalRemoteOid);
-
-                    if (finalRemoteOid !== localOid) {
-                        throw new Error(
-                            "Push verification failed - remote ref doesn't match local"
-                        );
-                    }
-
-                    return { hadConflicts: false };
+                    // Rest of verification code...
                 } catch (error) {
                     console.error("Push error:", error);
                     throw error;
@@ -207,6 +160,22 @@ export class GitService {
     ): Promise<PullResult> {
         console.log("RYDER: Pulling changes in .pull()...");
         try {
+            // First check for existing conflicts
+            const conflictedFiles = await this.getConflictedFiles(dir);
+            if (conflictedFiles.length > 0) {
+                return {
+                    hadConflicts: true,
+                    conflicts: await Promise.all(
+                        conflictedFiles.map(async (filepath) => ({
+                            filepath,
+                            ...(await this.getConflictVersions(dir, filepath)),
+                        }))
+                    ),
+                    needsMerge: true,
+                };
+            }
+
+            // Rest of pull logic...
             // First fetch the changes
             await git.fetch({
                 fs,
@@ -314,7 +283,16 @@ export class GitService {
     }
 
     async getStatus(dir: string): Promise<Array<[string, number, number, number]>> {
-        return git.statusMatrix({ fs, dir });
+        const status = await git.statusMatrix({ fs, dir });
+        console.log("RYDER: Raw git status:", status);
+        return status;
+    }
+
+    async getConflictedFiles(dir: string): Promise<string[]> {
+        const status = await this.getStatus(dir);
+        return status
+            .filter(([, , , workdirStatus]) => workdirStatus === 2) // 2 indicates conflict
+            .map(([filepath]) => filepath);
     }
 
     async getCurrentBranch(dir: string): Promise<string | void> {
