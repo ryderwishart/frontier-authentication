@@ -3,6 +3,7 @@ import http from "isomorphic-git/http/web";
 import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
+import * as diff3 from "diff3";
 
 interface PullResult {
     hadConflicts: boolean;
@@ -98,52 +99,102 @@ export class GitService {
             {
                 location: vscode.ProgressLocation.Notification,
                 title: "Pushing changes...",
-                cancellable: false,
             },
             async (progress) => {
                 try {
-                    // Ensure we're on main branch
-                    // TODO: Make branch configurable
-                    const currentBranch = await this.getCurrentBranch(dir);
-                    if (currentBranch !== "main") {
-                        await git.branch({ fs, dir, ref: "main" });
-                        await git.checkout({ fs, dir, ref: "main" });
+                    // Check for unmerged paths first
+                    const status = await git.statusMatrix({ fs, dir });
+                    const unmergedPaths = status
+                        .filter(([, , , worktreeStatus]) => worktreeStatus === 3)
+                        .map(([filepath]) => filepath);
+
+                    if (unmergedPaths.length > 0) {
+                        throw new Error(`Unmerged files detected: ${unmergedPaths.join(", ")}`);
                     }
 
-                    const pushOptions = {
+                    // Rest of push logic...
+                    const currentBranch = await this.getCurrentBranch(dir);
+
+                    // First try to merge if needed
+                    const localOid = await git.resolveRef({
+                        fs,
+                        dir,
+                        ref: currentBranch || "main",
+                    });
+                    const remoteBranch = `origin/${currentBranch}`;
+                    let remoteOid;
+                    try {
+                        remoteOid = await git.resolveRef({ fs, dir, ref: remoteBranch });
+                    } catch {
+                        // Remote ref doesn't exist yet
+                        remoteOid = null;
+                    }
+
+                    console.log("RYDER: Push - Local:", localOid, "Remote:", remoteOid);
+
+                    if (remoteOid && localOid !== remoteOid) {
+                        // Branches have diverged, we need to merge first
+                        try {
+                            await git.merge({
+                                fs,
+                                dir,
+                                ours: currentBranch || "main",
+                                theirs: remoteBranch,
+                                abortOnConflict: false,
+                            });
+                        } catch (err) {
+                            if (err instanceof git.Errors.MergeConflictError) {
+                                // We have conflicts that need manual resolution
+                                const conflicts = await this.collectConflicts(
+                                    dir,
+                                    err.data.filepaths,
+                                    remoteBranch
+                                );
+                                return {
+                                    hadConflicts: true,
+                                    needsMerge: true,
+                                    conflicts,
+                                    localOid,
+                                    remoteOid,
+                                };
+                            }
+                            throw err;
+                        }
+                    }
+
+                    // Now try to push
+                    const pushResult = await git.push({
                         fs,
                         http,
                         dir,
                         remote: "origin",
-                        ref: "main",
-                        force: force,
-                        onAuth: () => auth,
-                        onProgress: (event: { phase?: string }) => {
+                        ref: currentBranch || "main",
+                        force,
+                        onAuth: () => ({
+                            username: auth.username,
+                            password: auth.password,
+                        }),
+                        onProgress: (event) => {
                             if (event.phase) {
-                                progress.report({
-                                    message: event.phase,
-                                    increment: 20,
-                                });
+                                progress.report({ message: event.phase });
                             }
                         },
-                    };
+                    });
 
-                    try {
-                        // Try normal push first
-                        await git.push(pushOptions);
-                    } catch (pushError) {
-                        // console.log("Initial push failed, trying with force");
-                        // If normal push fails, try with force again
-                        await git.push({
-                            ...pushOptions,
-                            force: true,
-                        });
+                    // Verify the push
+                    const finalRemoteOid = await git.resolveRef({ fs, dir, ref: remoteBranch });
+                    console.log("RYDER: Push verification - Final remote:", finalRemoteOid);
+
+                    if (finalRemoteOid !== localOid) {
+                        throw new Error(
+                            "Push verification failed - remote ref doesn't match local"
+                        );
                     }
+
+                    return { hadConflicts: false };
                 } catch (error) {
                     console.error("Push error:", error);
-                    throw new Error(
-                        `Failed to push changes: ${error instanceof Error ? error.message : "Unknown error"}`
-                    );
+                    throw error;
                 }
             }
         );
@@ -161,7 +212,10 @@ export class GitService {
                 fs,
                 http,
                 dir,
-                ...auth,
+                onAuth: () => ({
+                    username: auth.username,
+                    password: auth.password,
+                }),
             });
 
             const currentBranch = await git.currentBranch({ fs, dir });
@@ -219,7 +273,7 @@ export class GitService {
                         filepath,
                         ours: await this.readFileContent(dir, filepath),
                         theirs: await this.readRemoteContent(dir, filepath, remoteOid),
-                        base: "",
+                        base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
                     });
                 }
             }
@@ -444,6 +498,19 @@ export class GitService {
         }
     }
 
+    /**
+     * Notes:
+     * We trust that the client has resolved the files in the working tree before calling completeMerge.
+     * We stage those resolved files.
+     * We create a proper two-parent commit that merges both the local and remote branches.
+     * We push that merge commit up to the remote.
+     * This ensures Git sees a true merge, retaining both branches' histories.
+     *
+     * @param dir - The directory of the git repository
+     * @param auth - The authentication object
+     * @param author - The author object
+     * @param resolvedFiles - The list of files (relative paths) that have been resolved
+     */
     async completeMerge(
         dir: string,
         auth: { username: string; password: string },
@@ -456,31 +523,35 @@ export class GitService {
                 throw new Error("Not on any branch");
             }
 
-            // Get the commits we're merging
-            const remoteRef = `refs/remotes/origin/${currentBranch}`;
-            const remoteOid = await git.resolveRef({ fs, dir, ref: remoteRef });
-            const localOid = await git.resolveRef({ fs, dir, ref: currentBranch });
+            const remoteBranch = `origin/${currentBranch}`;
 
-            // Add all resolved files
+            // Stage all previously-conflicting files, now resolved in the working tree
             for (const file of resolvedFiles) {
                 await git.add({ fs, dir, filepath: file });
             }
 
-            // Create merge commit
+            // Create the merge commit. We specify the parent commits explicitly
+            // for a proper two-parent merge in Git history:
+            const localOid = await git.resolveRef({ fs, dir, ref: currentBranch });
+            const remoteOid = await git.resolveRef({ fs, dir, ref: remoteBranch });
+
             await git.commit({
                 fs,
                 dir,
-                message: `Merge branch 'origin/${currentBranch}'\n\nResolved files:\n${resolvedFiles.join("\n")}`,
+                message: `Merge branch '${remoteBranch}' into ${currentBranch}\n\nResolved conflicts:\n${resolvedFiles.join("\n")}`,
                 author,
                 parent: [localOid, remoteOid],
             });
 
-            // Push the merge commit
+            console.log("RYDER: Local merge commit created. Now pushing...");
+
+            // Push the merge commit to remote
             await git.push({
                 fs,
                 http,
                 dir,
                 ...auth,
+                ref: currentBranch,
             });
 
             console.log("RYDER: Merge completed and pushed successfully");
@@ -518,6 +589,60 @@ export class GitService {
             throw error;
         }
     }
+
+    private async collectConflicts(
+        dir: string,
+        conflictPaths: string[],
+        remoteBranch: string
+    ): Promise<ConflictedFile[]> {
+        const localOid = await git.resolveRef({
+            fs,
+            dir,
+            ref: (await git.currentBranch({ fs, dir })) || "main",
+        });
+        const remoteOid = await git.resolveRef({ fs, dir, ref: remoteBranch });
+
+        return Promise.all(
+            conflictPaths.map(async (filepath) => ({
+                filepath,
+                ours: await this.readFileContent(dir, filepath),
+                theirs: await this.readRemoteContent(dir, filepath, remoteOid),
+                base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
+            }))
+        );
+    }
+
+    private async getBaseVersion(
+        dir: string,
+        filepath: string,
+        localOid: string,
+        remoteOid: string
+    ): Promise<string> {
+        try {
+            // Find common ancestor
+            const mergeBase = await git.findMergeBase({
+                fs,
+                dir,
+                oids: [localOid, remoteOid],
+            });
+
+            if (!mergeBase) {
+                return "";
+            }
+
+            // Get file content at merge base
+            const { blob } = await git.readBlob({
+                fs,
+                dir,
+                oid: mergeBase[0],
+                filepath,
+            });
+
+            return new TextDecoder().decode(blob);
+        } catch {
+            return "";
+        }
+    }
 }
 
 // Add new type definitions
@@ -527,3 +652,13 @@ export interface ConflictedFile {
     theirs: string; // The actual content, not a path
     base: string; // The actual content, not a path
 }
+
+// function mergeText(ours: string, theirs: string, base: string): string {
+//     // Implement real 3-way merge using a library like diff3
+//     // Or use isomorphic-git's mergeFile
+//     const result = diff3.default(ours, base, theirs);
+//     if (result.conflict) {
+//         throw new Error(`Conflict in file: ${filepath}`);
+//     }
+//     return result.result;
+// }

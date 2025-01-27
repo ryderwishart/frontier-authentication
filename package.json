@@ -129,6 +129,8 @@
         "webpack-cli": "^5.1.4"
     },
     "dependencies": {
+        "@types/diff3": "^0.0.2",
+        "diff3": "^0.0.4",
         "isomorphic-git": "^1.25.3",
         "node-fetch": "^2.7.0"
     }

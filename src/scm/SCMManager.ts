@@ -378,10 +378,17 @@ export class SCMManager {
 
                 // Pull any remote changes first
                 console.log("Pulling remote changes...");
-                const pullResult = await this.gitService.pull(workspacePath, auth, {
-                    name: authorName,
-                    email: authorEmail,
-                });
+                const pullResult = await this.gitService.pull(
+                    workspacePath,
+                    {
+                        username: "oauth2",
+                        password: token,
+                    },
+                    {
+                        name: authorName,
+                        email: authorEmail,
+                    }
+                );
 
                 console.log("RYDER: Pull result:", pullResult);
 
