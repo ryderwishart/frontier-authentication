@@ -339,22 +339,23 @@ export class SCMManager {
                 throw new Error("Could not get user information from GitLab");
             }
 
-            // First try to pull - this will detect conflicts early
-            const pullResult = await this.gitService.pull(workspacePath, auth, {
+            const author = {
                 name: user.name || user.username,
                 email: user.email || `${user.username}@users.noreply.gitlab.com`,
-            });
+            };
 
-            // If we have conflicts, return them immediately
-            if (pullResult.hadConflicts && pullResult.conflicts) {
+            // Try to sync and get result
+            const syncResult = await this.gitService.syncChanges(workspacePath, auth, author);
+
+            // If we have conflicts, return them to client
+            if (syncResult.hadConflicts && syncResult.conflicts) {
                 return {
                     hasConflicts: true,
-                    conflicts: pullResult.conflicts,
+                    conflicts: syncResult.conflicts,
                 };
             }
 
-            // No conflicts during pull, try to push any local changes
-            await this.gitService.push(workspacePath, auth);
+            // Everything synced successfully
             return { hasConflicts: false };
         } catch (error) {
             console.error("Sync error:", error);
@@ -501,14 +502,10 @@ export class SCMManager {
                 await this.gitService.addRemote(workspacePath, "origin", project.url);
 
                 // Push to remote with force option if specified
-                await this.gitService.push(
-                    workspacePath,
-                    {
-                        username: "oauth2",
-                        password: gitlabToken,
-                    },
-                    options.force
-                );
+                await this.gitService.push(workspacePath, {
+                    username: "oauth2",
+                    password: gitlabToken,
+                });
 
                 vscode.window.showInformationMessage(
                     `Workspace published successfully to ${project.url}!`
@@ -533,33 +530,27 @@ export class SCMManager {
 
     // Add new method to complete merge
     async completeMerge(resolvedFiles: string[]): Promise<void> {
-        try {
-            const token = await this.gitLabService.getToken();
-            if (!token) {
-                throw new Error("GitLab token not found. Please authenticate first.");
-            }
-
-            const workspacePath = this.getWorkspacePath();
-            const user = await this.gitLabService.getCurrentUser();
-            if (!user) {
-                throw new Error("Could not get user information from GitLab");
-            }
-
-            await this.gitService.completeMerge(
-                workspacePath,
-                {
-                    username: "oauth2",
-                    password: token,
-                },
-                {
-                    name: user.name || user.username,
-                    email: user.email || `${user.username}@users.noreply.gitlab.com`,
-                },
-                resolvedFiles
-            );
-        } catch (error) {
-            console.error("Complete merge error:", error);
-            throw error;
+        const token = await this.gitLabService.getToken();
+        if (!token) {
+            throw new Error("GitLab token not found");
         }
+
+        const auth = {
+            username: "oauth2",
+            password: token,
+        };
+
+        const user = await this.gitLabService.getCurrentUser();
+        if (!user) {
+            throw new Error("Could not get user information");
+        }
+
+        const author = {
+            name: user.name || user.username,
+            email: user.email || `${user.username}@users.noreply.gitlab.com`,
+        };
+
+        const workspacePath = this.getWorkspacePath();
+        await this.gitService.completeMerge(workspacePath, auth, author, resolvedFiles);
     }
 }

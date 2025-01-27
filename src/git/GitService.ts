@@ -97,25 +97,31 @@ export class GitService {
         return sha;
     }
 
-    async push(
-        dir: string,
-        auth: { username: string; password: string },
-        force: boolean = false
-    ): Promise<void> {
-        const currentBranch = await git.currentBranch({ fs, dir });
-        if (!currentBranch) {
-            throw new Error("Not on any branch");
-        }
+    async push(dir: string, auth: { username: string; password: string }): Promise<PushResult> {
+        try {
+            // Configure author before pushing
+            await this.configureAuthor(dir, "oauth2", auth.password);
 
-        await git.push({
-            fs,
-            http,
-            dir,
-            remote: "origin",
-            ref: currentBranch,
-            force,
-            onAuth: () => auth,
-        });
+            const currentBranch = await git.currentBranch({ fs, dir });
+            if (!currentBranch) {
+                throw new Error("Not on any branch");
+            }
+
+            return git.push({
+                fs,
+                http,
+                dir,
+                remote: "origin",
+                ref: currentBranch,
+                onAuth: () => ({
+                    username: auth.username,
+                    password: auth.password,
+                }),
+            });
+        } catch (error) {
+            console.error("Push error:", error);
+            throw error;
+        }
     }
 
     async pull(
@@ -411,6 +417,9 @@ export class GitService {
             throw new Error("Not on any branch");
         }
 
+        // Configure author before committing
+        await this.configureAuthor(dir, author.name, author.email);
+
         // Stage all resolved files
         for (const file of resolvedFiles) {
             await git.add({ fs, dir, filepath: file });
@@ -428,11 +437,16 @@ export class GitService {
             fs,
             dir,
             message: `Merge branch 'origin/${currentBranch}'\n\nResolved conflicts:\n${resolvedFiles.join("\n")}`,
-            author,
+            author: {
+                name: author.name,
+                email: author.email,
+                timestamp: Math.floor(Date.now() / 1000),
+                timezoneOffset: new Date().getTimezoneOffset(),
+            },
             parent: [localOid, remoteOid],
         });
 
-        // Push the merge commit
+        // Push the merge commit with auth
         await this.push(dir, auth);
     }
 
@@ -440,25 +454,93 @@ export class GitService {
         dir: string,
         auth: { username: string; password: string },
         author: { name: string; email: string }
-    ): Promise<void> {
+    ): Promise<PullResult> {
         try {
-            // First pull changes
-            const pullResult = await this.pull(dir, auth, author);
+            // 1. Stage any local changes first
+            await this.addAll(dir);
 
-            if (pullResult.needsMerge) {
-                if (pullResult.conflicts) {
-                    // If there are file conflicts, let the client handle them
-                    console.log("RYDER: File conflicts need manual resolution");
-                    throw new Error("File conflicts need manual resolution");
-                } else {
-                    // Automatic merge of divergent histories with no file conflicts
-                    console.log("RYDER: Performing automatic merge of divergent histories");
-                    await this.completeMerge(dir, auth, author, []);
-                }
+            // 2. Create a commit if we have staged changes
+            const status = await git.statusMatrix({ fs, dir });
+            const hasChanges = status.some(
+                ([_, head, workdir, stage]) => stage !== head || workdir !== head
+            );
+
+            if (hasChanges) {
+                await this.commit(dir, "Local changes", author);
             }
 
-            // Push any local changes
-            await this.push(dir, auth);
+            // 3. Fetch remote changes
+            await git.fetch({
+                fs,
+                http,
+                dir,
+                onAuth: () => auth,
+            });
+
+            const currentBranch = await git.currentBranch({ fs, dir });
+            if (!currentBranch) {
+                throw new Error("Not on any branch");
+            }
+
+            // Get remote ref and OIDs
+            const remoteRef = `refs/remotes/origin/${currentBranch}`;
+            const remoteOid = await git.resolveRef({ fs, dir, ref: remoteRef });
+            const localOid = await git.resolveRef({ fs, dir, ref: currentBranch });
+
+            // Can we fast-forward?
+            const canFastForward = await git.isDescendent({
+                fs,
+                dir,
+                oid: remoteOid,
+                ancestor: localOid,
+            });
+
+            // If we can fast-forward, do it and push
+            if (canFastForward) {
+                await git.writeRef({
+                    fs,
+                    dir,
+                    ref: `refs/heads/${currentBranch}`,
+                    value: remoteOid,
+                    force: true,
+                });
+                await git.checkout({ fs, dir, ref: currentBranch });
+                await this.push(dir, auth);
+                return { hadConflicts: false };
+            }
+
+            // Non-fast-forward case: check for conflicts
+            const modifiedFiles = status
+                .filter(([filepath, head]) => head === 1) // Only existing files
+                .map(([filepath]) => filepath);
+
+            if (modifiedFiles.length > 0) {
+                const conflicts = await Promise.all(
+                    modifiedFiles.map(async (filepath) => ({
+                        filepath,
+                        ours: await this.readFileContent(dir, filepath),
+                        theirs: await this.readRemoteContent(dir, filepath, remoteOid),
+                        base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
+                    }))
+                );
+
+                // Return conflicts to let client handle resolution
+                return {
+                    hadConflicts: true,
+                    needsMerge: true,
+                    localOid,
+                    remoteOid,
+                    conflicts,
+                };
+            }
+
+            // No conflicts but needs merge
+            return {
+                hadConflicts: false,
+                needsMerge: true,
+                localOid,
+                remoteOid,
+            };
         } catch (error) {
             console.error("Error syncing changes:", error);
             throw error;
