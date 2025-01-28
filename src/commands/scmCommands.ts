@@ -3,6 +3,14 @@ import { SCMManager } from "../scm/SCMManager";
 import { GitLabService } from "../gitlab/GitLabService";
 import { FrontierAuthProvider } from "../auth/AuthenticationProvider";
 
+export interface PublishWorkspaceOptions {
+    name: string;
+    description?: string;
+    visibility: "private" | "public";
+    groupId: string;
+    force?: boolean;
+}
+
 export function registerSCMCommands(
     context: vscode.ExtensionContext,
     authProvider: FrontierAuthProvider

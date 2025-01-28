@@ -3,6 +3,7 @@ import * as path from "path";
 import { ConflictedFile, GitService } from "../git/GitService";
 import { GitLabService } from "../gitlab/GitLabService";
 import * as git from "isomorphic-git";
+import { PublishWorkspaceOptions } from "../commands/scmCommands";
 
 export class SCMManager {
     private scmProvider: vscode.SourceControl;
@@ -246,7 +247,7 @@ export class SCMManager {
                 await this.gitService.addRemote(workspacePath, "origin", remoteUrl);
             }
 
-            // console.log("SCM initialized successfully");
+            console.log("SCM initialized successfully");
         } catch (error) {
             console.error("SCM initialization error:", error);
             throw new Error(
@@ -502,10 +503,14 @@ export class SCMManager {
                 await this.gitService.addRemote(workspacePath, "origin", project.url);
 
                 // Push to remote with force option if specified
-                await this.gitService.push(workspacePath, {
-                    username: "oauth2",
-                    password: gitlabToken,
-                });
+                await this.gitService.push(
+                    workspacePath,
+                    {
+                        username: "oauth2",
+                        password: gitlabToken,
+                    },
+                    options.force
+                );
 
                 vscode.window.showInformationMessage(
                     `Workspace published successfully to ${project.url}!`

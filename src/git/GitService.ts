@@ -97,7 +97,11 @@ export class GitService {
         return sha;
     }
 
-    async push(dir: string, auth: { username: string; password: string }): Promise<PushResult> {
+    async push(
+        dir: string,
+        auth: { username: string; password: string },
+        force: boolean = false
+    ): Promise<PushResult> {
         try {
             // Configure author before pushing
             await this.configureAuthor(dir, "oauth2", auth.password);
@@ -113,6 +117,7 @@ export class GitService {
                 dir,
                 remote: "origin",
                 ref: currentBranch,
+                force,
                 onAuth: () => ({
                     username: auth.username,
                     password: auth.password,
@@ -264,7 +269,7 @@ export class GitService {
             // Explicitly create and checkout main branch
             await git.branch({ fs, dir, ref: "main", checkout: true });
 
-            // console.log("Git repository initialized at:", dir);
+            console.log("Git repository initialized at:", dir);
         } catch (error) {
             console.error("Init error:", error);
             throw new Error(
@@ -276,13 +281,13 @@ export class GitService {
     async addRemote(dir: string, name: string, url: string): Promise<void> {
         try {
             await git.addRemote({ fs, dir, remote: name, url });
-            // console.log("Added remote:", name, url);
+            console.log("Added remote:", name, url);
         } catch (error) {
             // If remote already exists, try to update it
             if (error instanceof Error && error.message.includes("already exists")) {
                 await git.deleteRemote({ fs, dir, remote: name });
                 await git.addRemote({ fs, dir, remote: name, url });
-                // console.log("Updated existing remote:", name, url);
+                console.log("Updated existing remote:", name, url);
             } else {
                 console.error("Add remote error:", error);
                 throw new Error(
@@ -575,24 +580,33 @@ export class GitService {
         localOid: string,
         remoteOid: string
     ): Promise<string> {
-        const mergeBase = await git.findMergeBase({
-            fs,
-            dir,
-            oids: [localOid, remoteOid],
-        });
+        try {
+            const mergeBase = await git.findMergeBase({
+                fs,
+                dir,
+                oids: [localOid, remoteOid],
+            });
 
-        if (!mergeBase?.[0]) {
-            return "";
+            if (!mergeBase?.[0]) {
+                return "";
+            }
+
+            try {
+                const { blob } = await git.readBlob({
+                    fs,
+                    dir,
+                    oid: mergeBase[0],
+                    filepath,
+                });
+                return new TextDecoder().decode(blob);
+            } catch (error) {
+                // File doesn't exist in base version - this is normal for new files
+                return "";
+            }
+        } catch (error) {
+            console.error("Error getting base version:", error);
+            return ""; // Return empty string for any errors
         }
-
-        const { blob } = await git.readBlob({
-            fs,
-            dir,
-            oid: mergeBase[0],
-            filepath,
-        });
-
-        return new TextDecoder().decode(blob);
     }
 
     // Helper methods
