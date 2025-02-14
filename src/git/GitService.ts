@@ -71,6 +71,12 @@ export class GitService {
         const status = await git.statusMatrix({ fs, dir });
         await Promise.all(
             status.map(([filepath, head, workdir, stage]) => {
+                // Handle deleted files first
+                if (head === 1 && workdir === 0) {
+                    console.log(`Staging deletion for: ${filepath}`);
+                    return git.remove({ fs, dir, filepath });
+                }
+                // Then handle additions and modifications as before
                 // Only add if file is:
                 // - untracked (head === 0 && workdir === 1)
                 // - modified (workdir !== head)
@@ -417,42 +423,56 @@ export class GitService {
         author: { name: string; email: string },
         resolvedFiles: string[]
     ): Promise<void> {
-        const currentBranch = await git.currentBranch({ fs, dir });
-        if (!currentBranch) {
-            throw new Error("Not on any branch");
+        try {
+            const currentBranch = await git.currentBranch({ fs, dir });
+            if (!currentBranch) {
+                throw new Error("Not on any branch");
+            }
+
+            // Configure author before committing
+            await this.configureAuthor(dir, author.name, author.email);
+
+            // Stage all resolved files
+            for (const file of resolvedFiles) {
+                await git.add({ fs, dir, filepath: file });
+            }
+
+            // Create merge commit with both parents
+            const localOid = await git.resolveRef({ fs, dir, ref: currentBranch });
+            const remoteOid = await git.resolveRef({
+                fs,
+                dir,
+                ref: `refs/remotes/origin/${currentBranch}`,
+            });
+
+            await git.commit({
+                fs,
+                dir,
+                message: `Merge branch 'origin/${currentBranch}'\n\nResolved conflicts:\n${resolvedFiles.join("\n")}`,
+                author: {
+                    name: author.name,
+                    email: author.email,
+                    timestamp: Math.floor(Date.now() / 1000),
+                    timezoneOffset: new Date().getTimezoneOffset(),
+                },
+                parent: [localOid, remoteOid],
+            });
+
+            // Try to push, if it fails with non-fast-forward, try force push
+            try {
+                await this.push(dir, auth);
+            } catch (error) {
+                if (error instanceof Error && error.message?.includes("failed to update ref")) {
+                    // Try force push as a fallback
+                    await this.push(dir, auth, true);
+                } else {
+                    throw error;
+                }
+            }
+        } catch (error) {
+            console.error("Complete merge error:", error);
+            throw error;
         }
-
-        // Configure author before committing
-        await this.configureAuthor(dir, author.name, author.email);
-
-        // Stage all resolved files
-        for (const file of resolvedFiles) {
-            await git.add({ fs, dir, filepath: file });
-        }
-
-        // Create merge commit with both parents
-        const localOid = await git.resolveRef({ fs, dir, ref: currentBranch });
-        const remoteOid = await git.resolveRef({
-            fs,
-            dir,
-            ref: `refs/remotes/origin/${currentBranch}`,
-        });
-
-        await git.commit({
-            fs,
-            dir,
-            message: `Merge branch 'origin/${currentBranch}'\n\nResolved conflicts:\n${resolvedFiles.join("\n")}`,
-            author: {
-                name: author.name,
-                email: author.email,
-                timestamp: Math.floor(Date.now() / 1000),
-                timezoneOffset: new Date().getTimezoneOffset(),
-            },
-            parent: [localOid, remoteOid],
-        });
-
-        // Push the merge commit with auth
-        await this.push(dir, auth);
     }
 
     async syncChanges(
@@ -461,13 +481,24 @@ export class GitService {
         author: { name: string; email: string }
     ): Promise<PullResult> {
         try {
-            // 1. Stage any local changes first
+            // 1. Stage any local changes first, including deletions
+            const status = await git.statusMatrix({ fs, dir });
+
+            // Handle deletions first
+            await Promise.all(
+                status
+                    .filter(([_, head, workdir]) => head === 1 && workdir === 0)
+                    .map(([filepath]) => git.remove({ fs, dir, filepath }))
+            );
+
+            // Then handle other changes
             await this.addAll(dir);
 
             // 2. Create a commit if we have staged changes
-            const status = await git.statusMatrix({ fs, dir });
             const hasChanges = status.some(
-                ([_, head, workdir, stage]) => stage !== head || workdir !== head
+                ([_, head, workdir, stage]) =>
+                    // Include both modifications and deletions
+                    stage !== head || workdir !== head || (head === 1 && workdir === 0)
             );
 
             if (hasChanges) {
@@ -521,21 +552,48 @@ export class GitService {
 
             if (modifiedFiles.length > 0) {
                 const conflicts = await Promise.all(
-                    modifiedFiles.map(async (filepath) => ({
-                        filepath,
-                        ours: await this.readFileContent(dir, filepath),
-                        theirs: await this.readRemoteContent(dir, filepath, remoteOid),
-                        base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
-                    }))
+                    modifiedFiles.map(async (filepath) => {
+                        try {
+                            // Check if file exists locally
+                            const fileUri = vscode.Uri.file(path.join(dir, filepath));
+                            let ours = "";
+                            try {
+                                const content = await vscode.workspace.fs.readFile(fileUri);
+                                ours = new TextDecoder().decode(content);
+                            } catch (e) {
+                                // File doesn't exist locally (intentionally deleted)
+                                console.log(`File ${filepath} doesn't exist locally`);
+                            }
+
+                            return {
+                                filepath,
+                                ours,
+                                theirs: await this.readRemoteContent(dir, filepath, remoteOid),
+                                base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
+                            };
+                        } catch (error) {
+                            console.error(`Error processing file ${filepath}:`, error);
+                            // Return empty content for problematic files
+                            return {
+                                filepath,
+                                ours: "",
+                                theirs: "",
+                                base: "",
+                            };
+                        }
+                    })
                 );
+
+                // Filter out any files that failed to process
+                const validConflicts = conflicts.filter((c) => c.ours !== "" || c.theirs !== "");
 
                 // Return conflicts to let client handle resolution
                 return {
-                    hadConflicts: true,
+                    hadConflicts: validConflicts.length > 0,
                     needsMerge: true,
                     localOid,
                     remoteOid,
-                    conflicts,
+                    conflicts: validConflicts,
                 };
             }
 
@@ -557,21 +615,41 @@ export class GitService {
         conflictPaths: string[],
         remoteBranch: string
     ): Promise<ConflictedFile[]> {
-        const localOid = await git.resolveRef({
-            fs,
-            dir,
-            ref: (await git.currentBranch({ fs, dir })) || "main",
-        });
-        const remoteOid = await git.resolveRef({ fs, dir, ref: remoteBranch });
+        try {
+            const localOid = await git.resolveRef({
+                fs,
+                dir,
+                ref: (await git.currentBranch({ fs, dir })) || "main",
+            });
+            const remoteOid = await git.resolveRef({ fs, dir, ref: remoteBranch });
 
-        return Promise.all(
-            conflictPaths.map(async (filepath) => ({
-                filepath,
-                ours: await this.readFileContent(dir, filepath),
-                theirs: await this.readRemoteContent(dir, filepath, remoteOid),
-                base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
-            }))
-        );
+            const conflicts = await Promise.all(
+                conflictPaths.map(async (filepath) => {
+                    try {
+                        return {
+                            filepath,
+                            ours: await this.readFileContent(dir, filepath),
+                            theirs: await this.readRemoteContent(dir, filepath, remoteOid),
+                            base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
+                        };
+                    } catch (error) {
+                        console.error(`Error processing conflict for ${filepath}:`, error);
+                        return {
+                            filepath,
+                            ours: "",
+                            theirs: "",
+                            base: "",
+                        };
+                    }
+                })
+            );
+
+            // Filter out any files that failed to process
+            return conflicts.filter((c) => c.ours !== "" || c.theirs !== "");
+        } catch (error) {
+            console.error("Error collecting conflicts:", error);
+            return [];
+        }
     }
 
     private async getBaseVersion(
@@ -601,6 +679,7 @@ export class GitService {
                 return new TextDecoder().decode(blob);
             } catch (error) {
                 // File doesn't exist in base version - this is normal for new files
+                console.log(`File ${filepath} doesn't exist in base version`);
                 return "";
             }
         } catch (error) {
@@ -617,13 +696,19 @@ export class GitService {
     }
 
     private async readRemoteContent(dir: string, filepath: string, oid: string): Promise<string> {
-        const { blob } = await git.readBlob({
-            fs,
-            dir,
-            oid,
-            filepath,
-        });
-        return new TextDecoder().decode(blob);
+        try {
+            const { blob } = await git.readBlob({
+                fs,
+                dir,
+                oid,
+                filepath,
+            });
+            return new TextDecoder().decode(blob);
+        } catch (error) {
+            // File doesn't exist in remote version
+            console.log(`File ${filepath} doesn't exist in remote version`);
+            return "";
+        }
     }
 }
 
