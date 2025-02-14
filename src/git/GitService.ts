@@ -182,24 +182,48 @@ export class GitService {
 
             // Get modified files that would conflict
             const status = await git.statusMatrix({ fs, dir });
-            const modifiedFiles = status
-                .filter(([filepath, head, workdir, stage]) => {
-                    // Only include files that:
-                    // 1. Exist in both local and remote (head === 1)
-                    // 2. Have local modifications (workdir !== stage || head !== stage)
-                    return head === 1 && (workdir !== stage || head !== stage);
-                })
-                .map(([filepath]) => filepath);
+            const modifiedFiles = this.getModifiedFiles(status);
 
             // If we have potentially conflicting files, get their versions
             if (modifiedFiles.length > 0) {
                 const conflicts = await Promise.all(
-                    modifiedFiles.map(async (filepath) => ({
-                        filepath,
-                        ours: await this.readFileContent(dir, filepath),
-                        theirs: await this.readRemoteContent(dir, filepath, remoteOid),
-                        base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
-                    }))
+                    modifiedFiles.map(async (filepath) => {
+                        try {
+                            // Get all versions of the file
+                            const ours = await this.readFileContent(dir, filepath).catch(() => "");
+                            const theirs = await this.readRemoteContent(
+                                dir,
+                                filepath,
+                                remoteOid
+                            ).catch(() => "");
+                            const base = await this.getBaseVersion(
+                                dir,
+                                filepath,
+                                localOid,
+                                remoteOid
+                            ).catch(() => "");
+
+                            // Only consider it a conflict if the content actually differs
+                            // and at least one version exists
+                            if ((ours || theirs) && ours !== theirs) {
+                                return {
+                                    filepath,
+                                    ours,
+                                    theirs,
+                                    base,
+                                };
+                            }
+                            return null;
+                        } catch (error) {
+                            console.error(`Error processing file ${filepath}:`, error);
+                            return null;
+                        }
+                    })
+                );
+
+                // Filter out null entries and files that aren't actually conflicts
+                const validConflicts = conflicts.filter(
+                    (conflict): conflict is ConflictedFile => conflict !== null
                 );
 
                 return {
@@ -207,7 +231,7 @@ export class GitService {
                     needsMerge: true,
                     localOid,
                     remoteOid,
-                    conflicts,
+                    conflicts: validConflicts,
                 };
             }
 
@@ -546,46 +570,48 @@ export class GitService {
             }
 
             // Non-fast-forward case: check for conflicts
-            const modifiedFiles = status
-                .filter(([filepath, head]) => head === 1) // Only existing files
-                .map(([filepath]) => filepath);
+            const modifiedFiles = this.getModifiedFiles(status);
 
             if (modifiedFiles.length > 0) {
                 const conflicts = await Promise.all(
                     modifiedFiles.map(async (filepath) => {
                         try {
-                            // Check if file exists locally
-                            const fileUri = vscode.Uri.file(path.join(dir, filepath));
-                            let ours = "";
-                            try {
-                                const content = await vscode.workspace.fs.readFile(fileUri);
-                                ours = new TextDecoder().decode(content);
-                            } catch (e) {
-                                // File doesn't exist locally (intentionally deleted)
-                                console.log(`File ${filepath} doesn't exist locally`);
-                            }
-
-                            return {
+                            // Get all versions of the file
+                            const ours = await this.readFileContent(dir, filepath).catch(() => "");
+                            const theirs = await this.readRemoteContent(
+                                dir,
                                 filepath,
-                                ours,
-                                theirs: await this.readRemoteContent(dir, filepath, remoteOid),
-                                base: await this.getBaseVersion(dir, filepath, localOid, remoteOid),
-                            };
+                                remoteOid
+                            ).catch(() => "");
+                            const base = await this.getBaseVersion(
+                                dir,
+                                filepath,
+                                localOid,
+                                remoteOid
+                            ).catch(() => "");
+
+                            // Only consider it a conflict if the content actually differs
+                            // and at least one version exists
+                            if ((ours || theirs) && ours !== theirs) {
+                                return {
+                                    filepath,
+                                    ours,
+                                    theirs,
+                                    base,
+                                };
+                            }
+                            return null;
                         } catch (error) {
                             console.error(`Error processing file ${filepath}:`, error);
-                            // Return empty content for problematic files
-                            return {
-                                filepath,
-                                ours: "",
-                                theirs: "",
-                                base: "",
-                            };
+                            return null;
                         }
                     })
                 );
 
-                // Filter out any files that failed to process
-                const validConflicts = conflicts.filter((c) => c.ours !== "" || c.theirs !== "");
+                // Filter out null entries and files that aren't actually conflicts
+                const validConflicts = conflicts.filter(
+                    (conflict): conflict is ConflictedFile => conflict !== null
+                );
 
                 // Return conflicts to let client handle resolution
                 return {
@@ -709,6 +735,25 @@ export class GitService {
             console.log(`File ${filepath} doesn't exist in remote version`);
             return "";
         }
+    }
+
+    // Helper method to identify actually modified files from status matrix
+    private getModifiedFiles(status: Array<[string, number, number, number]>): string[] {
+        return status
+            .filter(([_, head, workdir, stage]) => {
+                // File is modified if:
+                // 1. It's untracked (head === 0 && workdir === 1), or
+                // 2. Working dir differs from HEAD (workdir !== head), or
+                // 3. Staged content differs from working dir (stage !== workdir), or
+                // 4. File is deleted (head === 1 && workdir === 0)
+                return (
+                    (head === 0 && workdir === 1) ||
+                    workdir !== head ||
+                    stage !== workdir ||
+                    (head === 1 && workdir === 0)
+                );
+            })
+            .map(([filepath]) => filepath);
     }
 }
 
