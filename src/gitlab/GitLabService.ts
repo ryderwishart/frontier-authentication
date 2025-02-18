@@ -192,27 +192,43 @@ export class GitLabService {
         }
 
         try {
-            const params = new URLSearchParams({
-                min_access_level: "20",
-            }).toString();
+            const allGroups: Array<{ id: string; name: string; path: string }> = [];
+            let currentPage = 1;
+            let hasNextPage = true;
 
-            const response = await fetch(`${this.gitlabBaseUrl}/api/v4/groups?${params}`, {
-                headers: {
-                    Authorization: `Bearer ${this.gitlabToken}`,
-                    "Content-Type": "application/json",
-                },
-            });
+            while (hasNextPage) {
+                const params = new URLSearchParams({
+                    min_access_level: "20",
+                    page: currentPage.toString(),
+                    per_page: "100",
+                }).toString();
 
-            if (!response.ok) {
-                throw new Error(`Failed to list groups: ${response.statusText}`);
+                const response = await fetch(`${this.gitlabBaseUrl}/api/v4/groups?${params}`, {
+                    headers: {
+                        Authorization: `Bearer ${this.gitlabToken}`,
+                        "Content-Type": "application/json",
+                    },
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to list groups: ${response.statusText}`);
+                }
+
+                const groups = await response.json();
+                allGroups.push(
+                    ...groups.map((group: any) => ({
+                        id: group.id.toString(),
+                        name: group.name,
+                        path: group.path,
+                    }))
+                );
+
+                const nextPage = response.headers.get("X-Next-Page");
+                hasNextPage = !!nextPage;
+                currentPage++;
             }
 
-            const groups = await response.json();
-            return groups.map((group: any) => ({
-                id: group.id.toString(),
-                name: group.name,
-                path: group.path,
-            }));
+            return allGroups;
         } catch (error) {
             console.error("Failed to list groups:", error);
             return [];
@@ -233,30 +249,46 @@ export class GitLabService {
         }
 
         try {
-            const queryParams = new URLSearchParams({
-                ...(options.owned !== undefined && { owned: options.owned.toString() }),
-                ...(options.membership !== undefined && {
-                    membership: options.membership.toString(),
-                }),
-                ...(options.search && { search: options.search }),
-                ...(options.orderBy && { order_by: options.orderBy }),
-                ...(options.sort && { sort: options.sort }),
-                per_page: "100", // Adjust as needed
-            });
+            const allProjects: GitLabProject[] = [];
+            let currentPage = 1;
+            let hasNextPage = true;
 
-            const response = await fetch(`${this.gitlabBaseUrl}/api/v4/projects?${queryParams}`, {
-                headers: {
-                    Authorization: `Bearer ${this.gitlabToken}`,
-                    "Content-Type": "application/json",
-                },
-            });
+            while (hasNextPage) {
+                const queryParams = new URLSearchParams({
+                    ...(options.owned !== undefined && { owned: options.owned.toString() }),
+                    ...(options.membership !== undefined && {
+                        membership: options.membership.toString(),
+                    }),
+                    ...(options.search && { search: options.search }),
+                    ...(options.orderBy && { order_by: options.orderBy }),
+                    ...(options.sort && { sort: options.sort }),
+                    page: currentPage.toString(),
+                    per_page: "100",
+                });
 
-            if (!response.ok) {
-                throw new Error(`Failed to list projects: ${response.statusText}`);
+                const response = await fetch(
+                    `${this.gitlabBaseUrl}/api/v4/projects?${queryParams}`,
+                    {
+                        headers: {
+                            Authorization: `Bearer ${this.gitlabToken}`,
+                            "Content-Type": "application/json",
+                        },
+                    }
+                );
+
+                if (!response.ok) {
+                    throw new Error(`Failed to list projects: ${response.statusText}`);
+                }
+
+                const projects = (await response.json()) as GitLabProject[];
+                allProjects.push(...projects);
+
+                const nextPage = response.headers.get("X-Next-Page");
+                hasNextPage = !!nextPage;
+                currentPage++;
             }
 
-            const projects = (await response.json()) as GitLabProject[];
-            return projects;
+            return allProjects;
         } catch (error) {
             console.error("Error listing projects:", error);
             throw new Error(
