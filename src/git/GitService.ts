@@ -69,24 +69,40 @@ export class GitService {
 
     async addAll(dir: string): Promise<void> {
         const status = await git.statusMatrix({ fs, dir });
-        await Promise.all(
-            status.map(([filepath, head, workdir, stage]) => {
-                // Handle deleted files first
-                if (head === 1 && workdir === 0) {
-                    console.log(`Staging deletion for: ${filepath}`);
-                    return git.remove({ fs, dir, filepath });
-                }
-                // Then handle additions and modifications as before
-                // Only add if file is:
-                // - untracked (head === 0 && workdir === 1)
-                // - modified (workdir !== head)
-                // - staged but modified again (stage !== workdir)
-                if ((head === 0 && workdir === 1) || workdir !== head || stage !== workdir) {
-                    return git.add({ fs, dir, filepath });
-                }
-                return Promise.resolve();
-            })
+        console.log(
+            "Status in addAll:",
+            status.map((s) => `${s[0]}: head=${s[1]}, workdir=${s[2]}, stage=${s[3]}`)
         );
+
+        // First, handle deletions
+        const deletedFiles = status
+            .filter(([_, head, workdir]) => head === 1 && workdir === 0)
+            .map(([filepath]) => filepath);
+
+        console.log("Staging deletions:", deletedFiles);
+
+        for (const filepath of deletedFiles) {
+            await git.remove({ fs, dir, filepath });
+        }
+
+        // Then handle actual modifications and new files
+        const modifiedFiles = status
+            .filter(([_, head, workdir, stage]) => {
+                // Only stage if:
+                // - untracked (head === 0 && workdir === 1)
+                // - modified (head === 1 && workdir === 1 && head !== workdir)
+                return (
+                    (head === 0 && workdir === 1) || // New file
+                    (head === 1 && workdir === 1 && stage !== workdir) // This checks if working dir differs from staged
+                ); // Modified file
+            })
+            .map(([filepath]) => filepath);
+
+        console.log("Staging modifications:", modifiedFiles);
+
+        for (const filepath of modifiedFiles) {
+            await git.add({ fs, dir, filepath });
+        }
     }
 
     async commit(
@@ -448,16 +464,21 @@ export class GitService {
         resolvedFiles: string[]
     ): Promise<void> {
         try {
+            console.log("=== Starting completeMerge ===");
+            console.log(`Resolved files: ${resolvedFiles.join(", ")}`);
+
             const currentBranch = await git.currentBranch({ fs, dir });
             if (!currentBranch) {
                 throw new Error("Not on any branch");
             }
+            console.log(`Current branch: ${currentBranch}`);
 
             // Configure author before committing
             await this.configureAuthor(dir, author.name, author.email);
 
-            // Stage all resolved files
+            // Stage only the resolved files, not everything
             for (const file of resolvedFiles) {
+                console.log(`Staging resolved file: ${file}`);
                 await git.add({ fs, dir, filepath: file });
             }
 
@@ -468,11 +489,15 @@ export class GitService {
                 dir,
                 ref: `refs/remotes/origin/${currentBranch}`,
             });
+            console.log(`Local OID: ${localOid}, Remote OID: ${remoteOid}`);
 
-            await git.commit({
+            const commitMessage = `Merge branch 'origin/${currentBranch}'\n\nResolved conflicts:\n${resolvedFiles.join("\n")}`;
+            console.log(`Creating merge commit with message: ${commitMessage}`);
+
+            const commitSha = await git.commit({
                 fs,
                 dir,
-                message: `Merge branch 'origin/${currentBranch}'\n\nResolved conflicts:\n${resolvedFiles.join("\n")}`,
+                message: commitMessage,
                 author: {
                     name: author.name,
                     email: author.email,
@@ -481,18 +506,25 @@ export class GitService {
                 },
                 parent: [localOid, remoteOid],
             });
+            console.log(`Created merge commit: ${commitSha}`);
 
             // Try to push, if it fails with non-fast-forward, try force push
             try {
+                console.log("Pushing merge commit to remote");
                 await this.push(dir, auth);
+                console.log("Push completed successfully");
             } catch (error) {
                 if (error instanceof Error && error.message?.includes("failed to update ref")) {
+                    console.log("Push failed, attempting force push");
                     // Try force push as a fallback
                     await this.push(dir, auth, true);
+                    console.log("Force push completed");
                 } else {
+                    console.error("Push failed with error:", error);
                     throw error;
                 }
             }
+            console.log("=== completeMerge completed successfully ===");
         } catch (error) {
             console.error("Complete merge error:", error);
             throw error;
@@ -505,47 +537,83 @@ export class GitService {
         author: { name: string; email: string }
     ): Promise<PullResult> {
         try {
-            // 1. Stage any local changes first, including deletions
+            console.log("=== Starting syncChanges ===");
+
+            // 1. Get the current status of the repository
             const status = await git.statusMatrix({ fs, dir });
 
-            // Handle deletions first
-            await Promise.all(
-                status
-                    .filter(([_, head, workdir]) => head === 1 && workdir === 0)
-                    .map(([filepath]) => git.remove({ fs, dir, filepath }))
+            // Log the status for debugging
+            console.log(
+                "Git status before sync:",
+                status.map((s) => `${s[0]}: head=${s[1]}, workdir=${s[2]}, stage=${s[3]}`)
             );
 
-            // Then handle other changes
-            await this.addAll(dir);
+            // Only stage files that are actually modified by the user
+            // This is more selective than the previous approach
+            const actuallyModifiedFiles = status
+                .filter(([_, head, workdir, stage]) => {
+                    // Only consider files that have been modified in the working directory
+                    // compared to HEAD, or are new files
+                    return (
+                        (head === 0 && workdir === 1) || // New file
+                        (head === 1 && workdir === 1 && stage !== workdir)
+                    ); // Modified file
+                })
+                .map(([filepath]) => filepath);
 
-            // 2. Create a commit if we have staged changes
-            const hasChanges = status.some(
-                ([_, head, workdir, stage]) =>
-                    // Include both modifications and deletions
-                    stage !== head || workdir !== head || (head === 1 && workdir === 0)
-            );
+            console.log("Actually modified files:", actuallyModifiedFiles);
+
+            // Only stage the files that are actually modified
+            for (const filepath of actuallyModifiedFiles) {
+                console.log(`Staging modified file: ${filepath}`);
+                await git.add({ fs, dir, filepath });
+            }
+
+            // Handle deletions separately and explicitly
+            const deletedFiles = status
+                .filter(([_, head, workdir]) => head === 1 && workdir === 0)
+                .map(([filepath]) => filepath);
+
+            console.log("Deleted files:", deletedFiles);
+
+            for (const filepath of deletedFiles) {
+                console.log(`Staging deletion: ${filepath}`);
+                await git.remove({ fs, dir, filepath });
+            }
+
+            // 2. Create a commit only if we have actual user changes
+            const hasChanges = actuallyModifiedFiles.length > 0 || deletedFiles.length > 0;
 
             if (hasChanges) {
-                await this.commit(dir, "Local changes", author);
+                const commitMessage = `Local changes: ${actuallyModifiedFiles.length} modified, ${deletedFiles.length} deleted`;
+                console.log("Creating commit with message:", commitMessage);
+                const commitSha = await this.commit(dir, commitMessage, author);
+                console.log(`Created commit: ${commitSha}`);
+            } else {
+                console.log("No local changes to commit");
             }
 
             // 3. Fetch remote changes
+            console.log("Fetching remote changes...");
             await git.fetch({
                 fs,
                 http,
                 dir,
                 onAuth: () => auth,
             });
+            console.log("Fetch completed");
 
             const currentBranch = await git.currentBranch({ fs, dir });
             if (!currentBranch) {
                 throw new Error("Not on any branch");
             }
+            console.log(`Current branch: ${currentBranch}`);
 
             // Get remote ref and OIDs
             const remoteRef = `refs/remotes/origin/${currentBranch}`;
             const remoteOid = await git.resolveRef({ fs, dir, ref: remoteRef });
             const localOid = await git.resolveRef({ fs, dir, ref: currentBranch });
+            console.log(`Local OID: ${localOid}, Remote OID: ${remoteOid}`);
 
             // Can we fast-forward?
             const canFastForward = await git.isDescendent({
@@ -554,9 +622,11 @@ export class GitService {
                 oid: remoteOid,
                 ancestor: localOid,
             });
+            console.log(`Can fast-forward? ${canFastForward}`);
 
             // If we can fast-forward, do it and push
             if (canFastForward) {
+                console.log("Fast-forwarding local branch to remote");
                 await git.writeRef({
                     fs,
                     dir,
@@ -565,14 +635,27 @@ export class GitService {
                     force: true,
                 });
                 await git.checkout({ fs, dir, ref: currentBranch });
-                await this.push(dir, auth);
+
+                // Only push if we had local changes
+                if (hasChanges) {
+                    console.log("Pushing local changes to remote");
+                    await this.push(dir, auth);
+                    console.log("Push completed");
+                } else {
+                    console.log("No local changes to push");
+                }
+                console.log("=== syncChanges completed (fast-forward) ===");
                 return { hadConflicts: false };
             }
 
+            console.log("Cannot fast-forward, checking for conflicts");
+
             // Non-fast-forward case: check for conflicts
             const modifiedFiles = this.getModifiedFiles(status);
+            console.log("Files that might have conflicts:", modifiedFiles);
 
             if (modifiedFiles.length > 0) {
+                console.log("Checking for conflicts in modified files");
                 const conflicts = await Promise.all(
                     modifiedFiles.map(async (filepath) => {
                         try {
@@ -593,6 +676,7 @@ export class GitService {
                             // Only consider it a conflict if the content actually differs
                             // and at least one version exists
                             if ((ours || theirs) && ours !== theirs) {
+                                console.log(`Conflict detected in file: ${filepath}`);
                                 return {
                                     filepath,
                                     ours,
@@ -600,6 +684,7 @@ export class GitService {
                                     base,
                                 };
                             }
+                            console.log(`No conflict in file: ${filepath}`);
                             return null;
                         } catch (error) {
                             console.error(`Error processing file ${filepath}:`, error);
@@ -613,7 +698,10 @@ export class GitService {
                     (conflict): conflict is ConflictedFile => conflict !== null
                 );
 
+                console.log(`Found ${validConflicts.length} conflicts that need resolution`);
+
                 // Return conflicts to let client handle resolution
+                console.log("=== syncChanges completed (with conflicts) ===");
                 return {
                     hadConflicts: validConflicts.length > 0,
                     needsMerge: true,
@@ -623,6 +711,8 @@ export class GitService {
                 };
             }
 
+            console.log("No conflicts found, but merge is needed");
+            console.log("=== syncChanges completed (needs merge) ===");
             // No conflicts but needs merge
             return {
                 hadConflicts: false,
@@ -743,14 +833,12 @@ export class GitService {
             .filter(([_, head, workdir, stage]) => {
                 // File is modified if:
                 // 1. It's untracked (head === 0 && workdir === 1), or
-                // 2. Working dir differs from HEAD (workdir !== head), or
-                // 3. Staged content differs from working dir (stage !== workdir), or
-                // 4. File is deleted (head === 1 && workdir === 0)
+                // 2. Working dir differs from HEAD (head === 1 && workdir === 1 && workdir !== head), or
+                // 3. File is deleted (head === 1 && workdir === 0)
                 return (
-                    (head === 0 && workdir === 1) ||
-                    workdir !== head ||
-                    stage !== workdir ||
-                    (head === 1 && workdir === 0)
+                    (head === 0 && workdir === 1) || // New file
+                    (head === 1 && workdir === 1 && workdir !== head) || // Modified file
+                    (head === 1 && workdir === 0) // Deleted file
                 );
             })
             .map(([filepath]) => filepath);
