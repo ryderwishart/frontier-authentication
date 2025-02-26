@@ -38,7 +38,13 @@ export class GitService {
     ): Promise<SyncResult> {
         try {
             console.log("=== Starting syncChanges ===");
+            //! Housekeeping checks
+            const currentBranch = await git.currentBranch({ fs, dir });
+            if (!currentBranch) {
+                throw new Error("Not on any branch");
+            }
 
+            //! We want to make sure we don't lose any local changes that aren't staged yet
             // 1. Check if working copy is dirty
             const isDirty = await this.isWorkingCopyDirty(dir);
             console.log(`Working copy is ${isDirty ? "dirty" : "clean"}`);
@@ -50,6 +56,12 @@ export class GitService {
                 await this.commit(dir, "Local changes", author);
             }
 
+            //! At this point, if there is no network connection, just throw a vscode warning message saying that we can't sync changes while offline
+            if (!(await this.isOnline())) {
+                return { hadConflicts: false };
+            }
+
+            //! We want to make sure we don't lose any remote changes
             // 3. Fetch remote changes
             console.log("Fetching remote changes");
             await git.fetch({
