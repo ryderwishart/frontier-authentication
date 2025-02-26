@@ -448,7 +448,7 @@ export class GitService {
             // Push the merge commit
             console.log("Pushing merge commit");
             try {
-                await this.push(dir, auth);
+                await this.push(dir, auth); // note: I don't know if this is ever going to work the first time without force
             } catch (pushError) {
                 // If push fails due to non-fast-forward, try force push
                 if (
@@ -457,7 +457,7 @@ export class GitService {
                         pushError.message.includes("failed to push"))
                 ) {
                     console.log("Push failed, attempting force push");
-                    await this.push(dir, auth);
+                    await this.push(dir, auth, { force: true });
                 } else {
                     throw pushError;
                 }
@@ -528,53 +528,55 @@ export class GitService {
         auth: { username: string; password: string },
         pushOptions?: { force?: boolean }
     ): Promise<void> {
-        try {
-            // First attempt to push
-            await git.push({
-                fs,
-                http,
-                dir,
-                remote: "origin",
-                onAuth: () => auth,
-            });
-        } catch (error) {
-            console.log("Initial push failed, trying to fetch latest changes and retry");
+        // try {
+        //     // First attempt to push
+        //     await git.push({ // NOTE: I feel like this will always fail
+        //         fs,
+        //         http,
+        //         dir,
+        //         remote: "origin",
+        //         onAuth: () => auth,
+        //         ...(pushOptions && { force: pushOptions.force }),
+        //     });
+        // } catch (error) {
+        //     console.log("Initial push failed, trying to fetch latest changes and retry");
 
-            // If push fails, fetch latest changes
-            await git.fetch({
-                fs,
-                http,
-                dir,
-                onAuth: () => auth,
-            });
+        // If push fails, fetch latest changes
+        await git.fetch({
+            fs,
+            http,
+            dir,
+            onAuth: () => auth,
+        });
 
-            // Pull the latest changes
-            const currentBranch = await git.currentBranch({ fs, dir });
-            if (!currentBranch) {
-                throw new Error("Not on any branch");
-            }
-
-            await git.pull({
-                fs,
-                http,
-                dir,
-                ref: currentBranch,
-                onAuth: () => auth,
-                author: {
-                    name: "Automatic Merger",
-                    email: "auto@example.com",
-                },
-            });
-
-            // Try pushing again
-            await git.push({
-                fs,
-                http,
-                dir,
-                remote: "origin",
-                onAuth: () => auth,
-            });
+        // Pull the latest changes
+        const currentBranch = await git.currentBranch({ fs, dir });
+        if (!currentBranch) {
+            throw new Error("Not on any branch");
         }
+
+        await git.pull({
+            fs,
+            http,
+            dir,
+            ref: currentBranch,
+            onAuth: () => auth,
+            author: {
+                name: "Automatic Merger",
+                email: "auto@example.com",
+            },
+        });
+
+        // Try pushing again
+        await git.push({
+            fs,
+            http,
+            dir,
+            remote: "origin",
+            onAuth: () => auth,
+            ...(pushOptions && { force: pushOptions.force }),
+        });
+        // }
     }
 
     // ========== UTILITY METHODS ==========
