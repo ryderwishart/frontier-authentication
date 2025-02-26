@@ -68,7 +68,7 @@ export class GitService {
             const localHead = await git.resolveRef({ fs, dir, ref: currentBranch });
             const remoteRef = `refs/remotes/origin/${currentBranch}`;
             let remoteHead;
-            
+
             try {
                 remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
             } catch (error) {
@@ -84,49 +84,49 @@ export class GitService {
                 return { hadConflicts: false };
             }
 
-            // Check if remote changes can be fast-forwarded
-            const canFastForward = await git.isDescendent({
-                fs,
-                dir,
-                oid: remoteHead,
-                ancestor: localHead,
-            });
+            // // Check if remote changes can be fast-forwarded
+            // const canFastForward = await git.isDescendent({
+            //     fs,
+            //     dir,
+            //     oid: remoteHead,
+            //     ancestor: localHead,
+            // }); // FIXME: sometimes it says we can fast forward, but we have commits with content that conflict with the remote, and so we should not fast forward, but rather find the conflicts
 
-            if (canFastForward) {
-                // Simple case: just update our ref to match remote
-                console.log("Fast-forwarding local to match remote");
-                
-                // First checkout so we're not on the ref we're trying to update
-                await git.checkout({ fs, dir, ref: currentBranch, force: true });
-                
-                // Then update the ref safely
-                await git.writeRef({
-                    fs,
-                    dir,
-                    ref: `refs/heads/${currentBranch}`,
-                    value: remoteHead,
-                    force: true,
-                });
-                
-                // And checkout again to update working directory
-                await git.checkout({ fs, dir, ref: currentBranch });
-                return { hadConflicts: false };
-            }
+            // if (canFastForward) {
+            //     // Simple case: just update our ref to match remote
+            //     console.log("Fast-forwarding local to match remote");
 
-            // Check if our changes can be fast-forwarded
-            const remoteCanFastForward = await git.isDescendent({
-                fs,
-                dir,
-                oid: localHead,
-                ancestor: remoteHead,
-            });
+            //     // First checkout so we're not on the ref we're trying to update
+            //     await git.checkout({ fs, dir, ref: currentBranch, force: true });
 
-            if (remoteCanFastForward) {
-                // Simple case: just push our changes
-                console.log("Local is ahead, pushing changes");
-                await this.push(dir, auth);
-                return { hadConflicts: false };
-            }
+            //     // Then update the ref safely
+            //     await git.writeRef({
+            //         fs,
+            //         dir,
+            //         ref: `refs/heads/${currentBranch}`,
+            //         value: remoteHead,
+            //         force: true,
+            //     });
+
+            //     // And checkout again to update working directory
+            //     await git.checkout({ fs, dir, ref: currentBranch });
+            //     return { hadConflicts: false };
+            // }
+
+            // // Check if our changes can be fast-forwarded
+            // const remoteCanFastForward = await git.isDescendent({
+            //     fs,
+            //     dir,
+            //     oid: localHead,
+            //     ancestor: remoteHead,
+            // });
+
+            // if (remoteCanFastForward) {
+            //     // Simple case: just push our changes
+            //     console.log("Local is ahead, pushing changes");
+            //     await this.push(dir, auth);
+            //     return { hadConflicts: false };
+            // }
 
             // We have divergent histories - need to check for conflicts
             console.log("Divergent histories, checking for conflicts");
@@ -142,10 +142,10 @@ export class GitService {
 
             // Divergent but no conflicts - create a merge commit
             console.log("No conflicts found, creating merge commit");
-            
+
             // First make sure we have the correct index state
             await git.checkout({ fs, dir, ref: currentBranch, force: true });
-            
+
             // Now create a merge commit with both parents
             try {
                 const mergeCommitSha = await git.commit({
@@ -164,21 +164,21 @@ export class GitService {
             } catch (error) {
                 // If commit fails, we might need to do a manual merge
                 console.log("Commit failed, attempting manual merge:", error);
-                
+
                 // Run a reset to make sure we're in a clean state
                 await git.checkout({ fs, dir, ref: currentBranch, force: true });
-                
+
                 // Perform a merge operation
                 const baseOid = await git.findMergeBase({
                     fs,
                     dir,
                     oids: [localHead, remoteHead],
                 });
-                
+
                 if (!baseOid || baseOid.length === 0) {
                     throw new Error("Cannot find a merge base between local and remote");
                 }
-                
+
                 await git.merge({
                     fs,
                     dir,
@@ -198,11 +198,13 @@ export class GitService {
                 await this.push(dir, auth);
             } catch (pushError) {
                 // If push fails with non-fast-forward error, try to force push
-                if (pushError instanceof Error && 
-                    (pushError.message.includes("non-fast-forward") || 
-                     pushError.message.includes("failed to push"))) {
+                if (
+                    pushError instanceof Error &&
+                    (pushError.message.includes("non-fast-forward") ||
+                        pushError.message.includes("failed to push"))
+                ) {
                     console.log("Push failed, attempting force push");
-                    await this.push(dir, auth, true);
+                    await this.push(dir, auth);
                 } else {
                     throw pushError;
                 }
@@ -217,21 +219,44 @@ export class GitService {
     }
 
     /**
+     * Helper functions to identify file status from git status matrix
+     * Each entry in status matrix is [filepath, head, workdir, stage]
+     * - head: file exists in HEAD commit (1) or not (0)
+     * - workdir: file is absent (0), identical to HEAD (1), or different from HEAD (2)
+     * - stage: file is absent (0), identical to HEAD (1), identical to WORKDIR (2), or different from WORKDIR (3)
+     */
+    private fileStatus = {
+        isNew: ([_, head, workdir]: [string, number, number, number]): boolean =>
+            head === 0 && workdir === 1,
+
+        isModified: ([_, head, workdir, stage]: [string, number, number, number]): boolean =>
+            (head === 1 && workdir === 2) || // Modified compared to HEAD
+            (head === 1 && workdir === 1 && workdir !== stage), // Same as HEAD but different in stage
+
+        isDeleted: ([_, head, workdir]: [string, number, number, number]): boolean =>
+            head === 1 && workdir === 0,
+
+        hasStageChanges: ([_, head, _workdir, stage]: [string, number, number, number]): boolean =>
+            stage !== head,
+
+        hasWorkdirChanges: ([_, head, workdir]: [string, number, number, number]): boolean =>
+            workdir !== head,
+
+        isAnyChange: ([_, head, workdir, stage]: [string, number, number, number]): boolean =>
+            this.fileStatus.isNew([_, head, workdir, stage]) ||
+            this.fileStatus.isModified([_, head, workdir, stage]) ||
+            this.fileStatus.isDeleted([_, head, workdir, stage]) ||
+            this.fileStatus.hasStageChanges([_, head, workdir, stage]) ||
+            this.fileStatus.hasWorkdirChanges([_, head, workdir, stage]),
+    };
+
+    /**
      * Check if the working copy has any changes
      */
     private async isWorkingCopyDirty(dir: string): Promise<boolean> {
         const status = await git.statusMatrix({ fs, dir });
-        return status.some(([_, head, workdir, stage]) => {
-            // File is modified if:
-            // 1. New file (head=0, workdir=1)
-            // 2. Modified file (head=1, workdir=1, workdir≠stage)
-            // 3. Deleted file (head=1, workdir=0)
-            return (
-                (head === 0 && workdir === 1) || // New file
-                (head === 1 && workdir === 1 && workdir !== stage) || // Modified file
-                (head === 1 && workdir === 0) // Deleted file
-            );
-        });
+        console.log("Status:", JSON.stringify(status));
+        return status.some((entry) => this.fileStatus.isAnyChange(entry));
     }
 
     /**
@@ -242,35 +267,44 @@ export class GitService {
         localHead: string,
         remoteHead: string
     ): Promise<ConflictedFile[]> {
+        console.log("=== Starting simplified findConflicts ===");
         try {
-            // Get modified files in the working directory
-            const status = await git.statusMatrix({ fs, dir });
-            const modifiedFiles = status
-                .filter(([_, head, workdir, stage]) => {
-                    return (
-                        (head === 0 && workdir === 1) || // New file
-                        (head === 1 && workdir === 1 && workdir !== stage) || // Modified file
-                        (head === 1 && workdir === 0) // Deleted file
-                    );
-                })
-                .map(([filepath]) => filepath);
+            // Get all files from local HEAD
+            const localFiles = await git.listFiles({ fs, dir, ref: localHead });
+            console.log(`Found ${localFiles.length} files in local HEAD`);
 
-            // Check each modified file for conflicts
+            // Get all files from remote HEAD
+            const remoteFiles = await git.listFiles({ fs, dir, ref: remoteHead });
+            console.log(`Found ${remoteFiles.length} files in remote HEAD`);
+
+            // Combine all unique filepaths
+            const allFilepaths = new Set([...localFiles, ...remoteFiles]);
+            console.log(`Total unique files to check: ${allFilepaths.size}`);
+
+            // Track identical and different files
+            const identicalFiles: string[] = [];
+            const differentFiles: string[] = [];
             const conflicts: ConflictedFile[] = [];
-            for (const filepath of modifiedFiles) {
+
+            // Compare each file
+            for (const filepath of allFilepaths) {
                 // Get local version
-                let ours: string;
+                let localContent: string;
                 try {
-                    const fileUri = vscode.Uri.file(path.join(dir, filepath));
-                    const fileContent = await vscode.workspace.fs.readFile(fileUri);
-                    ours = new TextDecoder().decode(fileContent);
+                    const { blob } = await git.readBlob({
+                        fs,
+                        dir,
+                        oid: localHead,
+                        filepath,
+                    });
+                    localContent = new TextDecoder().decode(blob);
                 } catch (error) {
-                    console.log("Error reading (our) file:", JSON.stringify(error));
-                    ours = ""; // File might be deleted locally
+                    console.log(`File ${filepath} doesn't exist in local HEAD`);
+                    localContent = ""; // File doesn't exist in local
                 }
 
                 // Get remote version
-                let theirs: string;
+                let remoteContent: string;
                 try {
                     const { blob } = await git.readBlob({
                         fs,
@@ -278,16 +312,15 @@ export class GitService {
                         oid: remoteHead,
                         filepath,
                     });
-                    theirs = new TextDecoder().decode(blob);
+                    remoteContent = new TextDecoder().decode(blob);
                 } catch (error) {
-                    console.log("Error reading (their) blob:", JSON.stringify(error));
-                    theirs = ""; // File might not exist in remote
+                    console.log(`File ${filepath} doesn't exist in remote HEAD`);
+                    remoteContent = ""; // File doesn't exist in remote
                 }
 
                 // Get base version (common ancestor)
-                let base: string;
+                let baseContent = "";
                 try {
-                    // FIXME: does this sometimes return a base way back in the history, even if there is a newer common one?
                     const mergeBase = await git.findMergeBase({
                         fs,
                         dir,
@@ -302,31 +335,39 @@ export class GitService {
                                 oid: mergeBase[0],
                                 filepath,
                             });
-                            base = new TextDecoder().decode(blob);
+                            baseContent = new TextDecoder().decode(blob);
                         } catch (error) {
-                            base = ""; // File might not exist in base
+                            // File doesn't exist in base
                         }
-                    } else {
-                        base = "";
                     }
                 } catch (error) {
-                    base = "";
+                    // Couldn't find merge base
                 }
 
-                // Check if there's an actual conflict
-                if ((ours || theirs) && ours !== theirs) {
+                // Compare the contents
+                if (localContent === remoteContent) {
+                    identicalFiles.push(filepath);
+                } else {
+                    differentFiles.push(filepath);
+
+                    // Add to conflicts list
                     conflicts.push({
                         filepath,
-                        ours,
-                        theirs,
-                        base,
+                        ours: localContent,
+                        theirs: remoteContent,
+                        base: baseContent,
                     });
                 }
             }
 
+            // Log results
+            console.log("=== File comparison results ===");
+            console.log(`Identical files (${identicalFiles.length}): ${identicalFiles.join(", ")}`);
+            console.log(`Different files (${differentFiles.length}): ${differentFiles.join(", ")}`);
+
             return conflicts;
         } catch (error) {
-            console.error("Error finding conflicts:", error);
+            console.error("Error comparing files:", error);
             return [];
         }
     }
@@ -381,15 +422,15 @@ export class GitService {
                 });
             } catch (commitError) {
                 console.error("Error creating merge commit:", commitError);
-                
+
                 // Try a different approach - force checkout and then commit
                 await git.checkout({ fs, dir, ref: currentBranch, force: true });
-                
+
                 // Re-stage the resolved files
                 for (const filepath of resolvedFiles) {
                     await git.add({ fs, dir, filepath });
                 }
-                
+
                 // Create a regular commit instead of a merge commit
                 await git.commit({
                     fs,
@@ -410,11 +451,13 @@ export class GitService {
                 await this.push(dir, auth);
             } catch (pushError) {
                 // If push fails due to non-fast-forward, try force push
-                if (pushError instanceof Error && 
-                    (pushError.message.includes("non-fast-forward") || 
-                     pushError.message.includes("failed to push"))) {
+                if (
+                    pushError instanceof Error &&
+                    (pushError.message.includes("non-fast-forward") ||
+                        pushError.message.includes("failed to push"))
+                ) {
                     console.log("Push failed, attempting force push");
-                    await this.push(dir, auth, true);
+                    await this.push(dir, auth);
                 } else {
                     throw pushError;
                 }
@@ -435,7 +478,7 @@ export class GitService {
 
         // Handle deletions
         const deletedFiles = status
-            .filter(([_, head, workdir]) => head === 1 && workdir === 0)
+            .filter((entry) => this.fileStatus.isDeleted(entry))
             .map(([filepath]) => filepath);
 
         for (const filepath of deletedFiles) {
@@ -444,12 +487,11 @@ export class GitService {
 
         // Handle modifications and additions
         const modifiedFiles = status
-            .filter(([_, head, workdir, stage]) => {
-                return (
-                    (head === 0 && workdir === 1) || // New file
-                    (head === 1 && workdir === 1 && stage !== workdir) // Modified file
-                );
-            })
+            .filter(
+                (entry) =>
+                    this.fileStatus.isNew(entry) ||
+                    (this.fileStatus.hasWorkdirChanges(entry) && !this.fileStatus.isDeleted(entry))
+            )
             .map(([filepath]) => filepath);
 
         for (const filepath of modifiedFiles) {
@@ -479,27 +521,60 @@ export class GitService {
     }
 
     /**
-     * Push changes to the remote repository
+     * Push changes to remote with retry logic
      */
     async push(
         dir: string,
         auth: { username: string; password: string },
-        force: boolean = false
-    ): Promise<any> {
-        const currentBranch = await git.currentBranch({ fs, dir });
-        if (!currentBranch) {
-            throw new Error("Not on any branch");
-        }
+        pushOptions?: { force?: boolean }
+    ): Promise<void> {
+        try {
+            // First attempt to push
+            await git.push({
+                fs,
+                http,
+                dir,
+                remote: "origin",
+                onAuth: () => auth,
+            });
+        } catch (error) {
+            console.log("Initial push failed, trying to fetch latest changes and retry");
 
-        return git.push({
-            fs,
-            http,
-            dir,
-            remote: "origin",
-            ref: currentBranch,
-            force,
-            onAuth: () => auth,
-        });
+            // If push fails, fetch latest changes
+            await git.fetch({
+                fs,
+                http,
+                dir,
+                onAuth: () => auth,
+            });
+
+            // Pull the latest changes
+            const currentBranch = await git.currentBranch({ fs, dir });
+            if (!currentBranch) {
+                throw new Error("Not on any branch");
+            }
+
+            await git.pull({
+                fs,
+                http,
+                dir,
+                ref: currentBranch,
+                onAuth: () => auth,
+                author: {
+                    name: "Automatic Merger",
+                    email: "auto@example.com",
+                },
+            });
+
+            // Try pushing again
+            await git.push({
+                fs,
+                http,
+                dir,
+                remote: "origin",
+                onAuth: () => auth,
+            });
+        }
     }
 
     // ========== UTILITY METHODS ==========

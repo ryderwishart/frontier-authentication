@@ -509,7 +509,7 @@ export class SCMManager {
                         username: "oauth2",
                         password: gitlabToken,
                     },
-                    options.force
+                    { force: options.force }
                 );
 
                 vscode.window.showInformationMessage(
