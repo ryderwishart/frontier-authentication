@@ -531,7 +531,7 @@ export class GitService {
                 console.log("Successfully pushed merge commit");
             } catch (pushError) {
                 console.error("Error pushing merge commit:", pushError);
-                
+
                 // Before attempting force push, check if remote has changed
                 await git.fetch({
                     fs,
@@ -539,17 +539,21 @@ export class GitService {
                     dir,
                     onAuth: () => auth,
                 });
-                
-                const currentRemoteHead = await git.resolveRef({
-                    fs,
-                    dir,
-                    ref: remoteRef,
-                }).catch(() => null);
-                
+
+                const currentRemoteHead = await git
+                    .resolveRef({
+                        fs,
+                        dir,
+                        ref: remoteRef,
+                    })
+                    .catch(() => null);
+
                 // If remote has changed or we can't determine, try to pull first
                 if (currentRemoteHead !== remoteHead) {
-                    console.log("Remote has changed since we started merging, attempting to pull first");
-                    
+                    console.log(
+                        "Remote has changed since we started merging, attempting to pull first"
+                    );
+
                     try {
                         // Try to pull changes
                         await git.pull({
@@ -564,7 +568,7 @@ export class GitService {
                             },
                             fastForwardOnly: false,
                         });
-                        
+
                         // Try pushing again after pull
                         await git.push({
                             fs,
@@ -577,12 +581,12 @@ export class GitService {
                         console.log("Push successful after pulling latest changes");
                     } catch (pullPushError) {
                         console.error("Error after pull and push attempt:", pullPushError);
-                        
+
                         // As a last resort, try force push but with a warning to the user
                         vscode.window.showWarningMessage(
                             "Attempting to force push your changes. This might overwrite recent remote changes."
                         );
-                        
+
                         await git.push({
                             fs,
                             http,
