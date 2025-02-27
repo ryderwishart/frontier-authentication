@@ -469,18 +469,23 @@ export class GitService {
                 await git.add({ fs, dir, filepath });
             }
 
-            // Create a merge commit
+            // Get the current state before creating the merge commit
             const localHead = await git.resolveRef({ fs, dir, ref: currentBranch });
-            const remoteHead = await git.resolveRef({
-                fs,
-                dir,
-                ref: `refs/remotes/origin/${currentBranch}`,
-            });
+            const remoteRef = this.getRemoteRef(currentBranch);
+            const remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
 
+            // Fetch latest changes to ensure we have the most recent remote state
+            await git.fetch({
+                fs,
+                http,
+                dir,
+                onAuth: () => auth,
+            });
             const commitMessage = `Merge branch 'origin/${currentBranch}'`;
             console.log(`Creating merge commit with message: ${commitMessage}`);
 
             try {
+                // Create a merge commit with the two parents
                 await git.commit({
                     fs,
                     dir,
@@ -496,11 +501,8 @@ export class GitService {
             } catch (commitError) {
                 console.error("Error creating merge commit:", commitError);
 
-                // Try a different approach - create a regular commit with the already staged changes
-                // DO NOT force checkout as it would discard the conflict resolutions
+                // Create a regular commit instead
                 console.log("Attempting to create a regular commit with the resolved changes");
-
-                // Create a regular commit instead of a merge commit
                 await git.commit({
                     fs,
                     dir,
@@ -511,45 +513,101 @@ export class GitService {
                         timestamp: Math.floor(Date.now() / 1000),
                         timezoneOffset: new Date().getTimezoneOffset(),
                     },
-                    // No parent array specified - this creates a regular commit on top of HEAD
                 });
             }
 
-            // Push the merge commit
+            // Push the merge commit with a more robust approach
             console.log("Pushing merge commit");
             try {
+                // Try normal push first
+                await git.push({
+                    fs,
+                    http,
+                    dir,
+                    remote: "origin",
+                    ref: currentBranch,
+                    onAuth: () => auth,
+                });
+                console.log("Successfully pushed merge commit");
+            } catch (pushError) {
+                console.error("Error pushing merge commit:", pushError);
+                
+                // Before attempting force push, check if remote has changed
                 await git.fetch({
                     fs,
                     http,
                     dir,
                     onAuth: () => auth,
                 });
-
-                // Pull the latest changes
-                const currentBranch = await git.currentBranch({ fs, dir });
-                if (!currentBranch) {
-                    throw new Error("Not on any branch");
-                }
-
-                await git.pull({
+                
+                const currentRemoteHead = await git.resolveRef({
                     fs,
-                    http,
                     dir,
-                    ref: currentBranch,
-                    onAuth: () => auth,
-                    author: {
-                        name: author.name,
-                        email: author.email,
-                    },
-                });
-
-                // note: We have to force push here because isomorphic-git doesn't support merges with conflicts
-                // but we are already handling the conflicts in the client, and so the working copy is ready to push
-                await this.sync(dir, auth, { force: true });
-            } catch (pushError) {
-                // If push fails due to non-fast-forward, try force push
-                console.error("Force push failed in completeMerge:", pushError);
-                throw pushError;
+                    ref: remoteRef,
+                }).catch(() => null);
+                
+                // If remote has changed or we can't determine, try to pull first
+                if (currentRemoteHead !== remoteHead) {
+                    console.log("Remote has changed since we started merging, attempting to pull first");
+                    
+                    try {
+                        // Try to pull changes
+                        await git.pull({
+                            fs,
+                            http,
+                            dir,
+                            ref: currentBranch,
+                            onAuth: () => auth,
+                            author: {
+                                name: author.name,
+                                email: author.email,
+                            },
+                            fastForwardOnly: false,
+                        });
+                        
+                        // Try pushing again after pull
+                        await git.push({
+                            fs,
+                            http,
+                            dir,
+                            remote: "origin",
+                            ref: currentBranch,
+                            onAuth: () => auth,
+                        });
+                        console.log("Push successful after pulling latest changes");
+                    } catch (pullPushError) {
+                        console.error("Error after pull and push attempt:", pullPushError);
+                        
+                        // As a last resort, try force push but with a warning to the user
+                        vscode.window.showWarningMessage(
+                            "Attempting to force push your changes. This might overwrite recent remote changes."
+                        );
+                        
+                        await git.push({
+                            fs,
+                            http,
+                            dir,
+                            remote: "origin",
+                            ref: currentBranch,
+                            force: true,
+                            onAuth: () => auth,
+                        });
+                        console.log("Force push successful as last resort");
+                    }
+                } else {
+                    // If remote hasn't changed, force push is safer
+                    console.log("Remote hasn't changed, attempting force push");
+                    await git.push({
+                        fs,
+                        http,
+                        dir,
+                        remote: "origin",
+                        ref: currentBranch,
+                        force: true,
+                        onAuth: () => auth,
+                    });
+                    console.log("Force push successful");
+                }
             }
 
             console.log("=== completeMerge completed successfully ===");
