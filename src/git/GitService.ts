@@ -17,6 +17,12 @@ export interface SyncResult {
     conflicts?: ConflictedFile[];
 }
 
+export enum RemoteBranchStatus {
+    FOUND,
+    NOT_FOUND,
+    ERROR,
+}
+
 export class GitService {
     constructor() {
         // No initialization needed
@@ -74,7 +80,7 @@ export class GitService {
 
             // Get the local and remote HEADs (i.e., the commit hashes)
             const localHead = await git.resolveRef({ fs, dir, ref: currentBranch });
-            const remoteRef = `origin/${currentBranch}`;
+            const remoteRef = `refs/remotes/origin/${currentBranch}`;
             let remoteHead;
 
             //! Housekeeping checks
@@ -109,6 +115,7 @@ export class GitService {
 
             console.log("Attempting fast-forward");
             try {
+                // Fast-forward just updates local HEAD to match remote, no pushing needed
                 await git.fastForward({
                     fs,
                     http,
@@ -116,6 +123,68 @@ export class GitService {
                     ref: currentBranch,
                     onAuth: () => auth,
                 });
+
+                // Check if we still have local changes that need to be pushed
+                const statusAfterFastForward = await git.statusMatrix({ fs, dir });
+                const hasUnpushedChanges = statusAfterFastForward.some((entry) =>
+                    this.fileStatus.isAnyChange(entry)
+                );
+
+                if (hasUnpushedChanges) {
+                    console.log("Fast-forward successful, but we still have local changes to push");
+                    // Push our changes to remote
+                    try {
+                        await git.push({
+                            fs,
+                            http,
+                            dir,
+                            remote: "origin",
+                            ref: currentBranch,
+                            onAuth: () => auth,
+                        });
+                        console.log("Successfully pushed local changes after fast-forward");
+
+                        // Verify the push was successful by fetching and comparing remote HEAD
+                        await git.fetch({
+                            fs,
+                            http,
+                            dir,
+                            onAuth: () => auth,
+                        });
+
+                        const updatedLocalHead = await this.resolveReference(dir, currentBranch);
+                        const updatedRemoteHead = await this.resolveRemoteReference(
+                            dir,
+                            currentBranch
+                        );
+
+                        if (updatedLocalHead !== updatedRemoteHead) {
+                            console.warn(
+                                "Push verification failed: Local and remote HEADs don't match after push"
+                            );
+                            console.log(
+                                `Local HEAD: ${updatedLocalHead}, Remote HEAD: ${updatedRemoteHead}`
+                            );
+                            vscode.window.showWarningMessage(
+                                "Your changes may not have been fully synced to the remote repository."
+                            );
+                        } else {
+                            console.log(
+                                "Push verification successful: Local and remote are in sync"
+                            );
+                        }
+                    } catch (pushError) {
+                        console.error("Error pushing changes after fast-forward:", pushError);
+                        vscode.window.showErrorMessage(
+                            "Failed to push changes to remote. Your local changes are saved but not synced to the cloud."
+                        );
+                        // We still return success since the local state is good
+                    }
+                } else {
+                    // Since we fast-forwarded successfully and have no local changes, we're now in sync with remote
+                    console.log("Fast-forward successful, we're in sync with remote");
+                }
+
                 return { hadConflicts: false };
             } catch (error) {
                 console.log("Fast-forward failed, identifying conflicts");
@@ -228,40 +297,97 @@ export class GitService {
             // 5. Sync changes
             console.log("Syncing changes to remote");
             try {
-                // if we get here, we have tried pull --ff and it failed
-                // we have also checked to see if there are any conflicts
-                // but we know now there are no conflicts, so we can just pull and push
-                // so we can just call sync, but ...
-                // WHY do we end up here? Isn't this what fast-forward is for?
-                // await this.sync(dir, auth);
-                // if fast forward can't work here, then we need to make a merge commit
-                // by calling this.completeMerge, and only adding files changed on local or remote but not both (since none have changed on both)
+                // If working copy is clean and histories have diverged,
+                // we can safely reset to remote state instead of trying to merge
+                console.log("Checking if working copy is clean");
+                const isDirty = await this.isWorkingCopyDirty(dir); // this is redundant here, but it's a sanity check so we don't force checkout remote and lose something
+                console.log("Working copy dirty status:", isDirty);
 
-                // we are here because in the past we were force pushing
-                await this.mergeAllChanges(
-                    dir,
-                    auth,
-                    author,
-                    filePathsChangedOnLocal,
-                    filePathsChangedOnRemote,
-                    localHead,
-                    remoteHead
-                );
-            } catch (pushError) {
-                // If push fails with non-fast-forward error, try to force push
+                if (!isDirty) {
+                    // NOTE: once we get here, we CAN fast forward, because we know the remote branch exists, there are changes on it, and no changes or potential conflicts on the local
+                    console.log(
+                        "Working copy is clean, attempting fast-forward/reset to remote state"
+                    );
+                    // Try pulling (this might fail with merge conflicts)
+                    console.log("Attempting to pull changes");
+                    await git.fastForward({
+                        fs,
+                        http,
+                        dir,
+                        ref: currentBranch,
+                        onAuth: () => auth,
+                    });
+
+                    await git.push({
+                        fs,
+                        http,
+                        dir,
+                        remote: "origin",
+                        onAuth: () => auth,
+                    });
+
+                    console.log("Successfully reset to remote state, no push needed");
+                    // No need to push since we just adopted remote changes
+                    return { hadConflicts: false };
+                }
+            } catch (pullError) {
+                console.log("Pull failed:", pullError);
+                // If pull fails with merge not supported, and working copy is clean,
+                // we can reset to remote state
+                // FIXME: can we remove this?
                 if (
-                    pushError instanceof Error &&
-                    (pushError.message.includes("non-fast-forward") ||
-                        pushError.message.includes("failed to push"))
+                    pullError instanceof Error &&
+                    pullError.message.includes("Merges with conflicts are not supported")
                 ) {
-                    console.log("Push failed, attempting force push");
-                    await this.sync(dir, auth, { force: true });
+                    console.log("Merge conflicts detected, checking if we can safely reset");
+                    const isDirty = await this.isWorkingCopyDirty(dir);
+                    console.log("Working copy dirty status:", isDirty);
+
+                    if (!isDirty) {
+                        console.log("Working copy clean, resetting to remote state");
+                        // Reset to remote state
+                        await git.fetch({
+                            fs,
+                            http,
+                            dir,
+                            ref: currentBranch,
+                            remote: "origin",
+                            onAuth: () => auth,
+                        });
+
+                        await git.checkout({
+                            fs,
+                            dir,
+                            ref: currentBranch,
+                            force: true,
+                            remote: "origin",
+                        });
+
+                        console.log("Successfully reset to remote state, no push needed");
+                        // No need to push since we just adopted remote changes
+                        return { hadConflicts: false };
+                    } else {
+                        console.log("Working copy is dirty, cannot auto-resolve conflicts");
+                        // If working copy is dirty, we can't automatically resolve
+                        throw pullError;
+                    }
                 } else {
-                    throw pushError;
+                    console.log("Pull failed with unexpected error");
+                    throw pullError;
                 }
             }
 
-            console.log("=== syncChanges completed successfully ===");
+            // Try pushing
+            console.log("Attempting to push changes");
+            await git.push({
+                fs,
+                http,
+                dir,
+                remote: "origin",
+                onAuth: () => auth,
+            });
+            console.log("Push successful");
+            console.log("=== Sync completed successfully ===");
             return { hadConflicts: false };
         } catch (error) {
             console.error("Error syncing changes:", error);
@@ -317,264 +443,6 @@ export class GitService {
         return status.some((entry) => this.fileStatus.isAnyChange(entry));
     }
 
-    // /**
-    //  * Find conflicts between local and remote branches using Git's merge-base
-    //  * and diff algorithms to efficiently identify potential conflicts
-    //  */
-    // private async findConflicts(
-    //     dir: string,
-    //     localHead: string,
-    //     remoteHead: string
-    // ): Promise<{ conflicts: ConflictedFile[]; changesOnRemote: string[] }> {
-    //     console.log("=== Starting optimized findConflicts ===");
-
-    //     try {
-    //         // Find the common ancestor (merge base) of the two branches
-    //         const mergeBaseResult = await git.findMergeBase({
-    //             fs,
-    //             dir,
-    //             oids: [localHead, remoteHead],
-    //         });
-
-    //         if (!mergeBaseResult || mergeBaseResult.length === 0) {
-    //             console.log("No common ancestor found between branches");
-    //             // If no common ancestor, we need to compare all files
-    //             return {
-    //                 conflicts: await this.findConflictsByFullComparison(dir, localHead, remoteHead),
-    //                 changesOnRemote: [],
-    //             };
-    //         }
-
-    //         const mergeBase = mergeBaseResult[0];
-    //         console.log(`Found merge base: ${mergeBase}`);
-
-    //         // Get files changed between merge-base and local
-    //         const localChanges = await this.getChangedFiles(dir, mergeBase, localHead);
-    //         console.log(`Files changed in local: ${JSON.stringify(localChanges)}`);
-
-    //         // Get files changed between merge-base and remote
-    //         const remoteChanges = await this.getChangedFiles(dir, mergeBase, remoteHead);
-    //         console.log(`Files changed in remote: ${JSON.stringify(remoteChanges)}`);
-
-    //         // Find files changed in both branches (potential conflicts)
-    //         const potentialConflicts = localChanges.filter((local) =>
-    //             remoteChanges.some((remote) => remote.path === local.path)
-    //         );
-
-    //         console.log(`Potential conflict files: ${JSON.stringify(potentialConflicts)}`);
-
-    //         // // For each potential conflict, load the content and check if there's an actual conflict
-    //         // const conflicts: ConflictedFile[] = [];
-
-    //         // for (const file of potentialConflicts) {
-    //         //     const filepath = file.path;
-    //         //     console.log("RYDER:", { filepath });
-    //         //     // Get base version
-    //         //     let baseContent = "";
-    //         //     try {
-    //         //         const { blob } = await git.readBlob({
-    //         //             fs,
-    //         //             dir,
-    //         //             oid: mergeBase,
-    //         //             filepath,
-    //         //         });
-    //         //         baseContent = new TextDecoder().decode(blob);
-    //         //     } catch (error) {
-    //         //         // File might not exist in base
-    //         //     }
-
-    //         //     // Get local version
-    //         //     let localContent: string;
-    //         //     try {
-    //         //         const { blob } = await git.readBlob({
-    //         //             fs,
-    //         //             dir,
-    //         //             oid: localHead,
-    //         //             filepath,
-    //         //         });
-    //         //         localContent = new TextDecoder().decode(blob);
-    //         //     } catch (error) {
-    //         //         console.log(`File ${filepath} doesn't exist in local HEAD`);
-    //         //         localContent = ""; // File doesn't exist in local
-    //         //     }
-
-    //         //     // Get remote version
-    //         //     let remoteContent: string;
-    //         //     try {
-    //         //         const { blob } = await git.readBlob({
-    //         //             fs,
-    //         //             dir,
-    //         //             oid: remoteHead,
-    //         //             filepath,
-    //         //         });
-    //         //         remoteContent = new TextDecoder().decode(blob);
-    //         //     } catch (error) {
-    //         //         console.log(`File ${filepath} doesn't exist in remote HEAD`);
-    //         //         remoteContent = ""; // File doesn't exist in remote
-    //         //     }
-
-    //         //     console.log("RYDER:", {
-    //         //         localContent: localContent.slice(0, 500),
-    //         //         remoteContent: remoteContent.slice(0, 500),
-    //         //     });
-
-    //         //     // If content is different, we have a conflict
-    //         //     if (localContent !== remoteContent) {
-    //         //         conflicts.push({
-    //         //             filepath,
-    //         //             ours: localContent,
-    //         //             theirs: remoteContent,
-    //         //             base: baseContent,
-    //         //         });
-    //         //     }
-    //         // }
-
-    //         console.log(`Actual conflicts found: ${conflicts.length}`);
-    //         return { conflicts, remoteChanges };
-    //     } catch (error) {
-    //         console.error("Error finding conflicts:", error);
-    //         // Fall back to full comparison if the optimized approach fails
-    //         return {
-    //             conflicts: await this.findConflictsByFullComparison(dir, localHead, remoteHead),
-    //             changesOnRemote: [],
-    //         };
-    //     }
-    // }
-
-    // /**
-    //  * Get files that changed between two commits
-    //  */
-    // private async getChangedFiles(
-    //     dir: string,
-    //     fromOid: string, // merge base head
-    //     toOid: string // local or remote head
-    // ): Promise<Array<{ path: string; type: string }>> {
-    //     try {
-    //         const statusMatrix = await git.statusMatrix({
-    //             fs,
-    //             dir,
-    //             ref: toOid,
-    //         });
-
-    //         return statusMatrix
-    //             .filter((entry) => this.fileStatus.isAnyChange(entry))
-    //             .map(([filepath, head, workdir, stage]) => {
-    //                 let type = "modified";
-    //                 if (this.fileStatus.isNew([filepath, head, workdir, stage])) {
-    //                     type = "added";
-    //                 } else if (this.fileStatus.isDeleted([filepath, head, workdir, stage])) {
-    //                     type = "deleted";
-    //                 }
-    //                 return { path: filepath, type };
-    //             });
-    //     } catch (error) {
-    //         console.error(`Error getting changed files between ${fromOid} and ${toOid}:`, error);
-    //         return [];
-    //     }
-    // }
-
-    // /**
-    //  * Fall back method that compares all files (current implementation)
-    //  */
-    // private async findConflictsByFullComparison(
-    //     dir: string,
-    //     localHead: string,
-    //     remoteHead: string
-    // ): Promise<ConflictedFile[]> {
-    //     console.log("=== Falling back to full file comparison ===");
-
-    //     try {
-    //         // Get all files from local HEAD
-    //         const localFiles = await git.listFiles({ fs, dir, ref: localHead });
-    //         console.log(`Found ${localFiles.length} files in local HEAD`);
-
-    //         // Get all files from remote HEAD
-    //         const remoteFiles = await git.listFiles({ fs, dir, ref: remoteHead });
-    //         console.log(`Found ${remoteFiles.length} files in remote HEAD`);
-
-    //         // Combine all unique filepaths
-    //         const allFilepaths = new Set([...localFiles, ...remoteFiles]);
-    //         console.log(`Total unique files to check: ${allFilepaths.size}`);
-
-    //         // Track conflicts
-    //         const conflicts: ConflictedFile[] = [];
-
-    //         // Compare each file
-    //         for (const filepath of allFilepaths) {
-    //             // Get local version
-    //             let localContent: string;
-    //             try {
-    //                 const { blob } = await git.readBlob({
-    //                     fs,
-    //                     dir,
-    //                     oid: localHead,
-    //                     filepath,
-    //                 });
-    //                 localContent = new TextDecoder().decode(blob);
-    //             } catch (error) {
-    //                 console.log(`File ${filepath} doesn't exist in local HEAD`);
-    //                 localContent = ""; // File doesn't exist in local
-    //             }
-
-    //             // Get remote version
-    //             let remoteContent: string;
-    //             try {
-    //                 const { blob } = await git.readBlob({
-    //                     fs,
-    //                     dir,
-    //                     oid: remoteHead,
-    //                     filepath,
-    //                 });
-    //                 remoteContent = new TextDecoder().decode(blob);
-    //             } catch (error) {
-    //                 console.log(`File ${filepath} doesn't exist in remote HEAD`);
-    //                 remoteContent = ""; // File doesn't exist in remote
-    //             }
-
-    //             // Get base version (common ancestor)
-    //             let baseContent = "";
-    //             try {
-    //                 const mergeBase = await git.findMergeBase({
-    //                     fs,
-    //                     dir,
-    //                     oids: [localHead, remoteHead],
-    //                 });
-
-    //                 if (mergeBase && mergeBase.length > 0) {
-    //                     try {
-    //                         const { blob } = await git.readBlob({
-    //                             fs,
-    //                             dir,
-    //                             oid: mergeBase[0],
-    //                             filepath,
-    //                         });
-    //                         baseContent = new TextDecoder().decode(blob);
-    //                     } catch (error) {
-    //                         // File doesn't exist in base
-    //                     }
-    //                 }
-    //             } catch (error) {
-    //                 // Couldn't find merge base
-    //             }
-
-    //             // Compare the contents
-    //             if (localContent !== remoteContent) {
-    //                 // Add to conflicts list
-    //                 conflicts.push({
-    //                     filepath,
-    //                     ours: localContent,
-    //                     theirs: remoteContent,
-    //                 });
-    //             }
-    //         }
-
-    //         return conflicts;
-    //     } catch (error) {
-    //         console.error("Error comparing files:", error);
-    //         return [];
-    //     }
-    // }
-
     /**
      * Complete a merge after conflicts have been resolved
      */
@@ -628,25 +496,22 @@ export class GitService {
             } catch (commitError) {
                 console.error("Error creating merge commit:", commitError);
 
-                // Try a different approach - force checkout and then commit
-                await git.checkout({ fs, dir, ref: currentBranch, force: true });
-
-                // Re-stage the resolved files
-                for (const filepath of resolvedFiles) {
-                    await git.add({ fs, dir, filepath });
-                }
+                // Try a different approach - create a regular commit with the already staged changes
+                // DO NOT force checkout as it would discard the conflict resolutions
+                console.log("Attempting to create a regular commit with the resolved changes");
 
                 // Create a regular commit instead of a merge commit
                 await git.commit({
                     fs,
                     dir,
-                    message: `Resolved conflicts with origin/${currentBranch}`,
+                    message: `Resolved conflicts with ${this.getShortRemoteRef(currentBranch)}`,
                     author: {
                         name: author.name,
                         email: author.email,
                         timestamp: Math.floor(Date.now() / 1000),
                         timezoneOffset: new Date().getTimezoneOffset(),
                     },
+                    // No parent array specified - this creates a regular commit on top of HEAD
                 });
             }
 
@@ -1171,6 +1036,21 @@ export class GitService {
         return git.getConfig({ fs, dir, path });
     }
 
+    async push(
+        dir: string,
+        auth: { username: string; password: string },
+        options?: { force?: boolean }
+    ): Promise<void> {
+        await git.push({
+            fs,
+            http,
+            dir,
+            remote: "origin",
+            onAuth: () => auth,
+            ...(options && { force: options.force }),
+        });
+    }
+
     async isOnline(): Promise<boolean> {
         try {
             // Check internet connectivity by making HEAD requests and checking response codes
@@ -1202,5 +1082,154 @@ export class GitService {
         } catch (error) {
             return false;
         }
+    }
+
+    /**
+     * Helper method to get the short reference to a remote branch
+     * @param branch The branch name
+     * @returns The short reference to the remote branch
+     */
+    private getShortRemoteRef(branch: string): string {
+        return `origin/${branch}`;
+    }
+
+    /**
+     * Helper method to get the full reference to a remote branch
+     * @param branch The branch name
+     * @returns The full reference to the remote branch
+     */
+    private getRemoteRef(branch: string): string {
+        return `refs/remotes/origin/${branch}`;
+    }
+
+    /**
+     * Helper method to resolve a reference to a commit hash
+     * @param dir The repository directory
+     * @param ref The reference to resolve
+     * @returns The commit hash
+     */
+    private async resolveReference(dir: string, ref: string): Promise<string> {
+        return git.resolveRef({ fs, dir, ref });
+    }
+
+    /**
+     * Helper method to resolve a remote branch reference to a commit hash
+     * @param dir The repository directory
+     * @param branch The branch name
+     * @returns The commit hash of the remote branch
+     */
+    private async resolveRemoteReference(dir: string, branch: string): Promise<string> {
+        return this.resolveReference(dir, this.getRemoteRef(branch));
+    }
+
+    async fastForward(
+        dir: string,
+        currentBranch: string,
+        auth: { username: string; password: string }
+    ): Promise<boolean> {
+        try {
+            // Fetch the latest changes from the remote
+            await git.fetch({
+                fs,
+                http,
+                dir,
+                onAuth: () => auth,
+            });
+
+            // Get the current commit
+            const currentCommit = await git.resolveRef({
+                fs,
+                dir,
+                ref: currentBranch,
+            });
+
+            // Get the remote commit
+            const remoteRef = this.getRemoteRef(currentBranch);
+            const remoteCommit = await git.resolveRef({
+                fs,
+                dir,
+                ref: remoteRef,
+            });
+
+            // Fast-forward just updates local HEAD to match remote, no pushing needed
+            await git.fastForward({
+                fs,
+                http,
+                dir,
+                ref: currentBranch,
+                onAuth: () => auth,
+            });
+
+            return true;
+        } catch (error) {
+            console.log("Fast-forward failed, identifying conflicts");
+            return false;
+        }
+    }
+
+    async getRemoteBranchStatus(
+        dir: string,
+        currentBranch: string,
+        auth: { username: string; password: string }
+    ): Promise<RemoteBranchStatus> {
+        try {
+            // Fetch the latest changes from the remote
+            await git.fetch({
+                fs,
+                http,
+                dir,
+                onAuth: () => auth,
+            });
+
+            // Check if the remote branch exists
+            try {
+                await git.resolveRef({
+                    fs,
+                    dir,
+                    ref: this.getRemoteRef(currentBranch),
+                });
+            } catch (error) {
+                // Remote branch doesn't exist
+                return RemoteBranchStatus.NOT_FOUND;
+            }
+
+            return RemoteBranchStatus.FOUND;
+        } catch (error) {
+            console.error("Error getting remote branch status:", error);
+            return RemoteBranchStatus.ERROR;
+        }
+    }
+
+    async mergeRemote(
+        dir: string,
+        currentBranch: string,
+        auth: { username: string; password: string }
+    ): Promise<boolean> {
+        try {
+            // Merge the remote branch into the current branch
+            await git.merge({
+                fs,
+                dir,
+                ours: currentBranch,
+                theirs: this.getRemoteRef(currentBranch),
+                author: {
+                    name: "Genesis",
+                    email: "genesis@example.com",
+                },
+                message: `Merge branch '${this.getShortRemoteRef(currentBranch)}' into ${currentBranch}`,
+            });
+            return true;
+        } catch (error) {
+            console.error("Error merging remote branch:", error);
+            return false;
+        }
+    }
+
+    async checkoutRemote(dir: string, currentBranch: string): Promise<void> {
+        await git.checkout({
+            fs,
+            dir,
+            ref: this.getShortRemoteRef(currentBranch),
+        });
     }
 }
