@@ -322,7 +322,25 @@ export class SCMManager {
         });
     }
 
+    private syncStatusBarItem: vscode.StatusBarItem | undefined;
+    
     async syncChanges(): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
+        // Create or show the status bar item
+        if (!this.syncStatusBarItem) {
+            this.syncStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+        }
+        
+        // Start animation
+        let animationFrame = 0;
+        const animationFrames = ['$(cloud-upload)', '$(cloud)', '$(cloud-download)'];
+        const animationInterval = setInterval(() => {
+            if (this.syncStatusBarItem) {
+                this.syncStatusBarItem.text = `${animationFrames[animationFrame]} Syncing...`;
+                this.syncStatusBarItem.show();
+                animationFrame = (animationFrame + 1) % animationFrames.length;
+            }
+        }, 500);
+        
         try {
             const token = await this.gitLabService.getToken();
             if (!token) {
@@ -361,6 +379,18 @@ export class SCMManager {
         } catch (error) {
             console.error("Sync error:", error);
             throw error;
+        } finally {
+            // Stop animation and update status
+            clearInterval(animationInterval);
+            if (this.syncStatusBarItem) {
+                this.syncStatusBarItem.text = `$(cloud) Synced`;
+                // Hide after a short delay
+                setTimeout(() => {
+                    if (this.syncStatusBarItem) {
+                        this.syncStatusBarItem.hide();
+                    }
+                }, 3000);
+            }
         }
     }
 
