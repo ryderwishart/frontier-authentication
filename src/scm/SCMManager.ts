@@ -4,6 +4,7 @@ import { ConflictedFile, GitService } from "../git/GitService";
 import { GitLabService } from "../gitlab/GitLabService";
 import * as git from "isomorphic-git";
 import { PublishWorkspaceOptions } from "../commands/scmCommands";
+import { StateManager } from "../state";
 
 export class SCMManager {
     private scmProvider: vscode.SourceControl;
@@ -16,10 +17,13 @@ export class SCMManager {
     private autoSyncInterval: NodeJS.Timeout | undefined;
     private gitIgnorePatterns: string[] = [];
     private readonly context: vscode.ExtensionContext;
+    private stateManager: StateManager;
+    private syncStatusBarItem: vscode.StatusBarItem | undefined;
 
     constructor(gitLabService: GitLabService, context: vscode.ExtensionContext) {
         this.context = context;
-        this.gitService = new GitService();
+        this.stateManager = StateManager.getInstance();
+        this.gitService = new GitService(this.stateManager);
         this.gitLabService = gitLabService;
 
         // We'll initialize the SCM provider when we have a workspace
@@ -322,17 +326,18 @@ export class SCMManager {
         });
     }
 
-    private syncStatusBarItem: vscode.StatusBarItem | undefined;
-    
     async syncChanges(): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
         // Create or show the status bar item
         if (!this.syncStatusBarItem) {
-            this.syncStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+            this.syncStatusBarItem = vscode.window.createStatusBarItem(
+                vscode.StatusBarAlignment.Right,
+                100
+            );
         }
-        
+
         // Start animation
         let animationFrame = 0;
-        const animationFrames = ['$(cloud-upload)', '$(cloud)', '$(cloud-download)'];
+        const animationFrames = ["$(cloud-upload)", "$(cloud)", "$(cloud-download)"];
         const animationInterval = setInterval(() => {
             if (this.syncStatusBarItem) {
                 this.syncStatusBarItem.text = `${animationFrames[animationFrame]} Syncing...`;
@@ -340,7 +345,7 @@ export class SCMManager {
                 animationFrame = (animationFrame + 1) % animationFrames.length;
             }
         }, 500);
-        
+
         try {
             const token = await this.gitLabService.getToken();
             if (!token) {

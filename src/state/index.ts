@@ -10,6 +10,10 @@ export const initialState: GlobalState = {
         gitlabCredentials: undefined,
         lastSyncTimestamp: undefined,
     },
+    syncLock: {
+        isLocked: false,
+        timestamp: 0,
+    },
 };
 
 export class StateManager {
@@ -78,6 +82,50 @@ export class StateManager {
 
     getGitLabInfo(): GitLabInfo | undefined {
         return this.state.auth.gitlabInfo;
+    }
+
+    // Sync lock methods
+    async acquireSyncLock(): Promise<boolean> {
+        // Check if lock is already held
+        if (this.state.syncLock?.isLocked) {
+            // Check if lock is stale (older than 5 minutes)
+            const now = Date.now();
+            const lockTime = this.state.syncLock.timestamp;
+            const fiveMinutesInMs = 5 * 60 * 1000;
+
+            if (now - lockTime > fiveMinutesInMs) {
+                // Lock is stale, force release it
+                console.log("Stale sync lock detected, releasing it");
+                await this.releaseSyncLock();
+            } else {
+                console.log("Sync already in progress, cannot acquire lock");
+                return false;
+            }
+        }
+
+        // Acquire the lock
+        this.state.syncLock = {
+            isLocked: true,
+            timestamp: Date.now(),
+        };
+        await this.persistState();
+        this.notifyStateChange();
+        console.log("Sync lock acquired");
+        return true;
+    }
+
+    async releaseSyncLock(): Promise<void> {
+        if (this.state.syncLock) {
+            this.state.syncLock.isLocked = false;
+            this.state.syncLock.timestamp = Date.now();
+            await this.persistState();
+            this.notifyStateChange();
+            console.log("Sync lock released");
+        }
+    }
+
+    isSyncLocked(): boolean {
+        return this.state.syncLock?.isLocked === true;
     }
 
     private readonly stateChangeEmitter = new vscode.EventEmitter<void>();
