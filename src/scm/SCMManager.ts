@@ -5,6 +5,7 @@ import { GitLabService } from "../gitlab/GitLabService";
 import * as git from "isomorphic-git";
 import { PublishWorkspaceOptions } from "../commands/scmCommands";
 import { StateManager } from "../state";
+import { ResolvedFile } from "../extension";
 
 export class SCMManager {
     private scmProvider: vscode.SourceControl;
@@ -67,8 +68,9 @@ export class SCMManager {
         );
 
         this.context.subscriptions.push(
-            vscode.commands.registerCommand("frontier.completeMerge", (resolvedFiles: string[]) =>
-                this.completeMerge(resolvedFiles)
+            vscode.commands.registerCommand(
+                "frontier.completeMerge",
+                (resolvedFiles: ResolvedFile[]) => this.completeMerge(resolvedFiles)
             )
         );
     }
@@ -569,7 +571,7 @@ export class SCMManager {
     }
 
     // Add new method to complete merge
-    async completeMerge(resolvedFiles: string[]): Promise<void> {
+    async completeMerge(resolvedFiles: ResolvedFile[]): Promise<void> {
         const token = await this.gitLabService.getToken();
         if (!token) {
             throw new Error("GitLab token not found");

@@ -50,7 +50,12 @@ export interface FrontierAPI {
         hasConflicts: boolean;
         conflicts?: Array<ConflictedFile>;
     }>;
-    completeMerge: (resolvedFiles: string[]) => Promise<void>;
+    completeMerge: (resolvedFiles: ResolvedFile[]) => Promise<void>;
+}
+
+export interface ResolvedFile {
+    filepath: string;
+    resolution: "deleted" | "created" | "modified";
 }
 
 let authenticationProvider: FrontierAuthProvider;
@@ -194,7 +199,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 hasConflicts: boolean;
                 conflicts?: Array<ConflictedFile>;
             }>,
-        completeMerge: async (resolvedFiles: string[]) =>
+        completeMerge: async (resolvedFiles: ResolvedFile[]) =>
             vscode.commands.executeCommand(
                 "frontier.completeMerge",
                 resolvedFiles

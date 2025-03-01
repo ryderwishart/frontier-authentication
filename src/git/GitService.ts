@@ -11,6 +11,8 @@ export interface ConflictedFile {
     ours: string;
     theirs: string;
     base: string;
+    isNew?: boolean;
+    isDeleted?: boolean;
 }
 
 export interface SyncResult {
@@ -57,7 +59,9 @@ export class GitService {
             }
 
             // 1. Commit local changes if needed
-            if (await this.isWorkingCopyDirty(dir)) {
+            const { isDirty, status: workingCopyStatusBeforeCommit } =
+                await this.getWorkingCopyState(dir);
+            if (isDirty) {
                 console.log("Working copy is dirty, committing local changes");
                 await this.addAll(dir);
                 await this.commit(dir, "Local changes", author);
@@ -86,6 +90,39 @@ export class GitService {
                 await git.push({ fs, http, dir, remote: "origin", onAuth: () => auth });
                 return { hadConflicts: false };
             }
+
+            const mergeBaseCommits = await git.findMergeBase({
+                fs,
+                dir,
+                oids: [localHead, remoteHead],
+            });
+
+            console.log("Merge base commits:", mergeBaseCommits);
+
+            // Get files changed in local HEAD
+            const localStatusMatrix = await git.statusMatrix({ fs, dir });
+            // Get files changed in remote HEAD
+            const remoteStatusMatrix = await git.statusMatrix({
+                fs,
+                dir,
+                ref: remoteRef,
+            });
+            const mergeBaseStatusMatrix =
+                mergeBaseCommits.length > 0
+                    ? await git.statusMatrix({
+                          fs,
+                          dir,
+                          ref: mergeBaseCommits[0],
+                      })
+                    : [];
+
+            console.log(
+                "workingCopyStatusBeforeCommit:",
+                JSON.stringify(workingCopyStatusBeforeCommit)
+            );
+            console.log("localStatusMatrix:", JSON.stringify(localStatusMatrix));
+            console.log("mergeBaseStatusMatrix:", JSON.stringify(mergeBaseStatusMatrix));
+            console.log("remoteStatusMatrix:", JSON.stringify(remoteStatusMatrix));
 
             // 6. If local and remote are identical, nothing to do
             if (localHead === remoteHead) {
@@ -122,67 +159,290 @@ export class GitService {
             // 8. If we get here, we have divergent histories - check for conflicts
             console.log("Fast-forward failed, need to handle conflicts");
 
-            // Get files changed in local HEAD
-            const localStatusMatrix = await git.statusMatrix({ fs, dir });
-            // Get files changed in remote HEAD
-            const remoteStatusMatrix = await git.statusMatrix({
-                fs,
-                dir,
-                ref: remoteRef,
-            });
+            // Convert status matrices to maps for easier lookup
+            const localStatusMap = new Map(
+                localStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
+            );
+            const remoteStatusMap = new Map(
+                remoteStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
+            );
+            const mergeBaseStatusMap = new Map(
+                mergeBaseStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
+            );
 
-            // Identify all files changed in either local or remote
-            const filePathsChangedOnLocal = localStatusMatrix
-                .filter((entry) => entry.includes(0) || entry.includes(2) || entry.includes(3))
-                .map((entry) => entry[0]);
-            const filePathsChangedOnRemote = remoteStatusMatrix
-                .filter((entry) => entry.includes(0) || entry.includes(2) || entry.includes(3))
-                .map((entry) => entry[0]);
+            // Get all unique filepaths across all three references
+            const allFilepaths = new Set([
+                ...localStatusMap.keys(),
+                ...remoteStatusMap.keys(),
+                ...mergeBaseStatusMap.keys(),
+            ]);
 
-            // Combine all changed files for comprehensive conflict detection
+            // Arrays to store categorized files
+            const filesAddedLocally: string[] = [];
+            const filesAddedOnRemote: string[] = [];
+            const filesDeletedLocally: string[] = [];
+            const filesDeletedOnRemote: string[] = [];
+            const filesModifiedAndTreatedAsPotentialConflict: string[] = [];
+
+            // Analyze each file's status across all references
+            for (const filepath of allFilepaths) {
+                const localStatus = localStatusMap.get(filepath);
+                const remoteStatus = remoteStatusMap.get(filepath);
+                const mergeBaseStatus = mergeBaseStatusMap.get(filepath);
+
+                // File exists in remote but not in local or merge base -> added on remote
+                if (
+                    remoteStatus &&
+                    remoteStatus[0] === 1 &&
+                    (!localStatus || localStatus[0] === 0) &&
+                    (!mergeBaseStatus || mergeBaseStatus[0] === 0)
+                ) {
+                    filesAddedOnRemote.push(filepath);
+                    continue;
+                }
+
+                // File exists in local but not in remote or merge base -> added locally
+                if (
+                    localStatus &&
+                    localStatus[0] === 1 &&
+                    (!remoteStatus || remoteStatus[0] === 0) &&
+                    (!mergeBaseStatus || mergeBaseStatus[0] === 0)
+                ) {
+                    filesAddedLocally.push(filepath);
+                    continue;
+                }
+
+                // File exists in merge base and local but not in remote -> deleted on remote
+                if (
+                    mergeBaseStatus &&
+                    mergeBaseStatus[0] === 1 &&
+                    localStatus &&
+                    localStatus[0] === 1 &&
+                    (!remoteStatus || remoteStatus[0] === 0)
+                ) {
+                    filesDeletedOnRemote.push(filepath);
+                    continue;
+                }
+
+                // File exists in merge base and remote but not in local -> deleted locally
+                if (
+                    mergeBaseStatus &&
+                    mergeBaseStatus[0] === 1 &&
+                    remoteStatus &&
+                    remoteStatus[0] === 1 &&
+                    (!localStatus || localStatus[0] === 0)
+                ) {
+                    filesDeletedLocally.push(filepath);
+                    continue;
+                }
+
+                // File exists in all three but has different content
+                if (
+                    localStatus &&
+                    localStatus[0] === 1 &&
+                    remoteStatus &&
+                    remoteStatus[0] === 1 &&
+                    mergeBaseStatus &&
+                    mergeBaseStatus[0] === 1
+                ) {
+                    const localModified = localStatus[1] === 2; // workdir different from HEAD
+                    const remoteModified = remoteStatus[1] === 2; // workdir different from HEAD
+
+                    // Treat all modified files as potential conflicts for simplicity
+                    if (localModified || remoteModified) {
+                        filesModifiedAndTreatedAsPotentialConflict.push(filepath);
+                    }
+                }
+            }
+
+            // Additional validation to ensure files are properly categorized
+            // Filter out files from filesDeletedLocally that are actually added on remote
+            // const updatedFilesDeletedLocally = filesDeletedLocally.filter(
+            //     (filepath) => !filesAddedOnRemote.includes(filepath)
+            // );
+
+            // // Reassign the array contents while preserving the original reference
+            // filesDeletedLocally.length = 0;
+            // filesDeletedLocally.push(...updatedFilesDeletedLocally);
+
+            console.log("Files added locally:", filesAddedLocally);
+            console.log("Files deleted locally:", filesDeletedLocally);
+            console.log("Files added on remote:", filesAddedOnRemote);
+            console.log("Files deleted on remote:", filesDeletedOnRemote);
+            console.log(
+                "Files modified and treated as potential conflict:",
+                filesModifiedAndTreatedAsPotentialConflict
+            );
+
+            // All changed files for comprehensive conflict detection
             const allChangedFilePaths = [
-                ...new Set([...filePathsChangedOnLocal, ...filePathsChangedOnRemote]),
+                ...new Set([
+                    ...filesAddedLocally,
+                    ...filesModifiedAndTreatedAsPotentialConflict,
+                    ...filesDeletedLocally,
+                    ...filesAddedOnRemote,
+                    ...filesDeletedOnRemote,
+                ]),
             ];
 
-            console.log("Files changed locally:", filePathsChangedOnLocal);
-            console.log("Files changed remotely:", filePathsChangedOnRemote);
             console.log("All changed files:", allChangedFilePaths);
 
-            // 9. Get all files changed in either branch
+            // 9. Get all files changed in either branch with enhanced conflict detection
             const conflicts = await Promise.all(
                 allChangedFilePaths.map(async (filepath) => {
                     let localContent = "";
                     let remoteContent = "";
+                    let baseContent = "";
+                    let isNew = false;
+                    let isDeleted = false;
+
+                    // More precise determination of file status
+                    const isAddedLocally = filesAddedLocally.includes(filepath);
+                    const isAddedRemotely = filesAddedOnRemote.includes(filepath);
+                    const isDeletedLocally = filesDeletedLocally.includes(filepath);
+                    const isDeletedRemotely = filesDeletedOnRemote.includes(filepath);
+
+                    // Determine if this is a new file (added on either side)
+                    isNew = isAddedLocally || isAddedRemotely;
+
+                    // Determine if this should be considered deleted
+                    // A file is truly deleted if:
+                    // 1. It's deleted locally and not modified remotely (user wants to delete)
+                    // 2. It's deleted remotely and not modified locally (remote deleted it)
+                    isDeleted =
+                        (isDeletedLocally && !isAddedRemotely) ||
+                        (isDeletedRemotely && !isAddedLocally);
+
+                    // Try to read local content if it exists in local HEAD
                     try {
-                        const { blob: lBlob } = await git.readBlob({
-                            fs,
-                            dir,
-                            oid: localHead,
-                            filepath,
-                        });
-                        localContent = new TextDecoder().decode(lBlob);
+                        if (!isDeletedLocally && !isAddedLocally) {
+                            const { blob: lBlob } = await git.readBlob({
+                                fs,
+                                dir,
+                                oid: localHead,
+                                filepath,
+                            });
+                            localContent = new TextDecoder().decode(lBlob);
+                        } else if (isAddedLocally) {
+                            // For locally added files, read from working directory
+                            try {
+                                const fileContent = await fs.promises.readFile(
+                                    path.join(dir, filepath),
+                                    "utf8"
+                                );
+                                localContent = fileContent;
+                            } catch (e) {
+                                console.log(`Error reading locally added file ${filepath}:`, e);
+                            }
+                        }
                     } catch (err) {
                         console.log(`File ${filepath} doesn't exist in local HEAD`);
                     }
+
+                    // Try to read remote content if it exists in remote HEAD
                     try {
-                        const { blob: rBlob } = await git.readBlob({
-                            fs,
-                            dir,
-                            oid: remoteHead,
-                            filepath,
-                        });
-                        remoteContent = new TextDecoder().decode(rBlob);
+                        if (!isDeletedRemotely && !isAddedRemotely) {
+                            const { blob: rBlob } = await git.readBlob({
+                                fs,
+                                dir,
+                                oid: remoteHead,
+                                filepath,
+                            });
+                            remoteContent = new TextDecoder().decode(rBlob);
+                        } else if (isAddedRemotely) {
+                            // For remotely added files, we need to read from remote HEAD
+                            try {
+                                const { blob: rBlob } = await git.readBlob({
+                                    fs,
+                                    dir,
+                                    oid: remoteHead,
+                                    filepath,
+                                });
+                                remoteContent = new TextDecoder().decode(rBlob);
+                            } catch (e) {
+                                console.log(`Error reading remotely added file ${filepath}:`, e);
+                            }
+                        }
                     } catch (err) {
                         console.log(`File ${filepath} doesn't exist in remote HEAD`);
                     }
 
-                    // Only report as conflict if contents differ
-                    if (localContent !== remoteContent) {
-                        return { filepath, ours: localContent, theirs: remoteContent, base: "" };
+                    // Try to read base content if available
+                    try {
+                        if (mergeBaseCommits.length > 0) {
+                            const { blob: bBlob } = await git.readBlob({
+                                fs,
+                                dir,
+                                oid: mergeBaseCommits[0],
+                                filepath,
+                            });
+                            baseContent = new TextDecoder().decode(bBlob);
+                        }
+                    } catch (err) {
+                        console.log(`File ${filepath} doesn't exist in merge base`);
+                    }
+
+                    // Special conflict cases handling
+                    let isConflict = false;
+
+                    // Case 1: File modified in both branches
+                    if (filesModifiedAndTreatedAsPotentialConflict.includes(filepath)) {
+                        isConflict = true;
+                    }
+                    // Case 2: Content differs between branches and at least one differs from base
+                    else if (
+                        localContent !== remoteContent &&
+                        (localContent !== baseContent || remoteContent !== baseContent)
+                    ) {
+                        isConflict = true;
+                    }
+                    // Case 3: Added in both branches with different content
+                    else if (isAddedLocally && isAddedRemotely && localContent !== remoteContent) {
+                        isConflict = true;
+                    }
+                    // Case 4: Modified locally but deleted remotely
+                    else if (
+                        !isDeletedLocally &&
+                        isDeletedRemotely &&
+                        localContent !== baseContent
+                    ) {
+                        isConflict = true;
+                    }
+                    // Case 5: Modified remotely but deleted locally
+                    else if (
+                        isDeletedLocally &&
+                        !isDeletedRemotely &&
+                        remoteContent !== baseContent
+                    ) {
+                        isConflict = true;
+                    }
+
+                    if (isConflict) {
+                        return {
+                            filepath,
+                            ours: localContent,
+                            theirs: remoteContent,
+                            base: baseContent,
+                            isNew,
+                            isDeleted,
+                        };
                     }
                     return null;
                 })
-            ).then((results) => results.filter((result) => result !== null));
+            ).then((results) =>
+                results.filter(
+                    (
+                        result
+                    ): result is {
+                        filepath: string;
+                        ours: string;
+                        theirs: string;
+                        base: string;
+                        isNew: boolean;
+                        isDeleted: boolean;
+                    } => result !== null
+                )
+            );
 
             console.log(`Found ${conflicts.length} conflicts that need resolution`);
             return { hadConflicts: true, conflicts };
@@ -230,7 +490,7 @@ export class GitService {
     /**
      * Check if the working copy has any changes
      */
-    private async isWorkingCopyDirty(dir: string): Promise<boolean> {
+    private async getWorkingCopyState(dir: string): Promise<{ isDirty: boolean; status: any[] }> {
         const status = await git.statusMatrix({ fs, dir });
         console.log(
             "Status before committing local changes:",
@@ -240,7 +500,7 @@ export class GitService {
                 )
             )
         );
-        return status.some((entry) => this.fileStatus.isAnyChange(entry));
+        return { isDirty: status.some((entry) => this.fileStatus.isAnyChange(entry)), status };
     }
 
     /**
@@ -250,7 +510,10 @@ export class GitService {
         dir: string,
         auth: { username: string; password: string },
         author: { name: string; email: string },
-        resolvedFiles: string[]
+        resolvedFiles: Array<{
+            filepath: string;
+            resolution: "deleted" | "created" | "modified";
+        }>
     ): Promise<void> {
         // Check if sync is already in progress
         if (this.stateManager.isSyncLocked()) {
@@ -269,17 +532,24 @@ export class GitService {
             console.log(
                 "=== Starting completeMerge because client called and passed resolved files ==="
             );
-            console.log(`Resolved files: ${resolvedFiles.join(", ")}`);
+            console.log(`Resolved files: ${resolvedFiles.map((f) => f.filepath).join(", ")}`);
 
             const currentBranch = await git.currentBranch({ fs, dir });
             if (!currentBranch) {
                 throw new Error("Not on any branch");
             }
 
-            // Stage the resolved files
-            for (const filepath of resolvedFiles) {
-                console.log(`Staging resolved file: ${filepath}`);
-                await git.add({ fs, dir, filepath });
+            // Stage the resolved files based on their resolution type
+            for (const { filepath, resolution } of resolvedFiles) {
+                console.log(`Processing resolved file: ${filepath} with resolution: ${resolution}`);
+
+                if (resolution === "deleted") {
+                    console.log(`Removing file from git: ${filepath}`);
+                    await git.remove({ fs, dir, filepath });
+                } else {
+                    console.log(`Adding file to git: ${filepath}`);
+                    await git.add({ fs, dir, filepath });
+                }
             }
 
             // Get the current state before creating the merge commit
@@ -1028,5 +1298,17 @@ export class GitService {
             dir,
             ref: this.getShortRemoteRef(currentBranch),
         });
+    }
+
+    // Add this helper method to the GitService class
+    private areStatusEntriesEqual(
+        entry1?: [string, number, number, number],
+        entry2?: [string, number, number, number]
+    ): boolean {
+        if (!entry1 || !entry2) {
+            return false;
+        }
+        // Compare HEAD status (index 1)
+        return entry1[1] === entry2[1];
     }
 }
