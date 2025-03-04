@@ -122,7 +122,7 @@ export class SCMManager {
         }
     }
 
-    async cloneExistingRepository(repoUrl: string): Promise<void> {
+    async cloneExistingRepository(repoUrl: string, cloneToPath?: string): Promise<void> {
         try {
             // Ensure GitLab service is initialized
             await this.gitLabService.initialize();
@@ -140,7 +140,7 @@ export class SCMManager {
             url.password = gitlabToken;
 
             // Get workspace path
-            const workspacePath = await this.promptForWorkspacePath(projectName);
+            const workspacePath = cloneToPath || await this.promptForWorkspacePath(projectName);
             if (!workspacePath) {
                 throw new Error("No workspace path selected");
             }
@@ -164,6 +164,7 @@ export class SCMManager {
     }
 
     private async promptForWorkspacePath(defaultName: string): Promise<string | undefined> {
+        vscode.window.showInformationMessage("Prompting for workspace path");
         // Use the default downloads directory or home directory
         const homeDir = process.env.HOME || process.env.USERPROFILE;
         const defaultUri = vscode.Uri.file(path.join(homeDir || "", defaultName));
@@ -191,7 +192,10 @@ export class SCMManager {
         return undefined;
     }
 
-    private async cloneRepository(repoUrl: string, workspacePath: string): Promise<void> {
+    private async cloneRepository(
+        repoUrl: string,
+        workspacePath: string // this is the path to the local directory where the repository will be cloned
+    ): Promise<void> {
         try {
             const url = new URL(repoUrl);
             const gitlabToken = await this.gitLabService.getToken();

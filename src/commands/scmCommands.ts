@@ -213,7 +213,7 @@ export function registerSCMCommands(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "frontier.cloneRepository",
-            async (repositoryUrl?: string) => {
+            async (repositoryUrl?: string, cloneToPath?: string) => {
                 try {
                     if (!repositoryUrl) {
                         repositoryUrl = await vscode.window.showInputBox({
@@ -231,7 +231,7 @@ export function registerSCMCommands(
                     }
 
                     if (repositoryUrl) {
-                        await scmManager.cloneExistingRepository(repositoryUrl);
+                        await scmManager.cloneExistingRepository(repositoryUrl, cloneToPath);
                     }
                     return true;
                 } catch (error) {

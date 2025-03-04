@@ -33,7 +33,7 @@ export interface FrontierAPI {
             owner: string;
         }>
     >;
-    cloneRepository: (repositoryUrl: string) => Promise<boolean>;
+    cloneRepository: (repositoryUrl: string, cloneToPath?: string) => Promise<boolean>;
     publishWorkspace: (options: {
         name: string;
         description?: string;
@@ -150,8 +150,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     owner: string;
                 }>
             >,
-        cloneRepository: async (repositoryUrl: string) =>
-            vscode.commands.executeCommand<boolean>("frontier.cloneRepository", repositoryUrl),
+        cloneRepository: async (repositoryUrl: string, cloneToPath?: string) =>
+            vscode.commands.executeCommand<boolean>("frontier.cloneRepository", repositoryUrl, cloneToPath),
         publishWorkspace: async (options: {
             name: string;
             description?: string;
