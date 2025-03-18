@@ -28,10 +28,6 @@ export interface AuthState {
 
 export interface GlobalState {
     auth: AuthState;
-    syncLock?: {
-        isLocked: boolean;
-        timestamp: number;
-    };
 }
 
 // Add some type guards for better type safety
