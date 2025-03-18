@@ -3,7 +3,7 @@ import http from "isomorphic-git/http/web";
 import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
-import * as diff3 from "diff3";
+
 import { StateManager } from "../state";
 
 export interface ConflictedFile {
@@ -247,9 +247,10 @@ export class GitService {
                 ) {
                     const localModified = localStatus[1] === 2; // workdir different from HEAD
                     const remoteModified = remoteStatus[1] === 2; // workdir different from HEAD
+                    const mergeBaseModified = mergeBaseStatus[1] === 2; // merge base different from HEAD
 
                     // Treat all modified files as potential conflicts for simplicity
-                    if (localModified || remoteModified) {
+                    if (localModified || remoteModified || mergeBaseModified) {
                         filesModifiedAndTreatedAsPotentialConflict.push(filepath);
                     }
                 }
