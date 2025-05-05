@@ -4,10 +4,48 @@ import * as vscode from "vscode";
 import { FrontierAuthProvider } from "./auth/AuthenticationProvider";
 import { registerCommands } from "./commands";
 import { registerGitLabCommands } from "./commands/gitlabCommands";
+import { registerProgressCommands } from "./commands/progressCommands";
 import { registerSCMCommands } from "./commands/scmCommands";
 import { initialState, StateManager } from "./state";
 import { AuthState } from "./types/state";
 import { ConflictedFile } from "./git/GitService";
+
+export interface ProjectProgressReport {
+    projectId: string; // Unique project identifier
+    timestamp: string; // ISO timestamp of report generation
+    reportId: string; // Unique report identifier
+
+    // Translation metrics
+    translationProgress: {
+        bookCompletionMap: Record<string, number>; // Book ID -> percentage complete
+        totalVerseCount: number; // Total verses in project
+        translatedVerseCount: number; // Verses with translations
+        validatedVerseCount: number; // Verses passing validation
+        wordsTranslated: number; // Total words translated
+    };
+
+    // Validation metrics
+    validationStatus: {
+        stage: "none" | "initial" | "community" | "expert" | "finished";
+        versesPerStage: Record<string, number>; // Stage -> verse count
+        lastValidationTimestamp: string; // ISO timestamp
+    };
+
+    // Activity metrics
+    activityMetrics: {
+        lastEditTimestamp: string; // ISO timestamp
+        editCountLast24Hours: number; // Edit count
+        editCountLastWeek: number; // Edit count
+        averageDailyEdits: number; // Avg edits per active day
+    };
+
+    // Quality indicators
+    qualityMetrics: {
+        spellcheckIssueCount: number; // Spelling issues
+        flaggedSegmentsCount: number; // Segments needing review
+        consistencyScore: number; // 0-100 score
+    };
+}
 
 export interface FrontierAPI {
     authProvider: FrontierAuthProvider;
@@ -51,6 +89,35 @@ export interface FrontierAPI {
         conflicts?: Array<ConflictedFile>;
     }>;
     completeMerge: (resolvedFiles: ResolvedFile[]) => Promise<void>;
+
+    // Project Progress Reporting API
+    submitProgressReport: (
+        report: ProjectProgressReport
+    ) => Promise<{ success: boolean; reportId: string }>;
+
+    getProgressReports: (options: {
+        projectIds?: string[]; // Filter by specific projects
+        startDate?: string; // Filter by date range
+        endDate?: string;
+        limit?: number; // Pagination
+        offset?: number;
+    }) => Promise<{
+        reports: ProjectProgressReport[];
+        totalCount: number;
+    }>;
+
+    getAggregatedProgress: () => Promise<{
+        projectCount: number;
+        activeProjectCount: number;
+        totalCompletionPercentage: number;
+        projectSummaries: Array<{
+            projectId: string;
+            projectName: string;
+            completionPercentage: number;
+            lastActivity: string;
+            stage: string;
+        }>;
+    }>;
 }
 
 export interface ResolvedFile {
@@ -81,6 +148,10 @@ export async function activate(context: vscode.ExtensionContext) {
     registerCommands(context, authenticationProvider);
     registerGitLabCommands(context, authenticationProvider);
     registerSCMCommands(context, authenticationProvider);
+    registerProgressCommands(context, authenticationProvider);
+
+    // Store API endpoint for use by other components
+    context.globalState.update("frontierApiEndpoint", API_ENDPOINT);
 
     // Create and register status bar item immediately
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -151,7 +222,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 }>
             >,
         cloneRepository: async (repositoryUrl: string, cloneToPath?: string) =>
-            vscode.commands.executeCommand<boolean>("frontier.cloneRepository", repositoryUrl, cloneToPath),
+            vscode.commands.executeCommand<boolean>(
+                "frontier.cloneRepository",
+                repositoryUrl,
+                cloneToPath
+            ),
         publishWorkspace: async (options: {
             name: string;
             description?: string;
@@ -204,6 +279,39 @@ export async function activate(context: vscode.ExtensionContext) {
                 "frontier.completeMerge",
                 resolvedFiles
             ) as Promise<void>,
+
+        // Project Progress Reporting API
+        submitProgressReport: async (report: ProjectProgressReport) =>
+            vscode.commands.executeCommand("frontier.submitProgressReport", report) as Promise<{
+                success: boolean;
+                reportId: string;
+            }>,
+
+        getProgressReports: async (options: {
+            projectIds?: string[];
+            startDate?: string;
+            endDate?: string;
+            limit?: number;
+            offset?: number;
+        }) =>
+            vscode.commands.executeCommand("frontier.getProgressReports", options) as Promise<{
+                reports: ProjectProgressReport[];
+                totalCount: number;
+            }>,
+
+        getAggregatedProgress: async () =>
+            vscode.commands.executeCommand("frontier.getAggregatedProgress") as Promise<{
+                projectCount: number;
+                activeProjectCount: number;
+                totalCompletionPercentage: number;
+                projectSummaries: Array<{
+                    projectId: string;
+                    projectName: string;
+                    completionPercentage: number;
+                    lastActivity: string;
+                    stage: string;
+                }>;
+            }>,
     };
 
     return frontierAPI;
