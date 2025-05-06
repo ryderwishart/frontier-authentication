@@ -840,7 +840,7 @@ export class ProgressDashboardView {
                                     </div>
                                 </div>
                                 <div class="project-completion">
-                                    \${completionPercentage}%
+                                    \${(Math.round(completionPercentage * 100) / 100).toFixed(2)}%
                                 </div>
                             \`;
                             
@@ -959,7 +959,7 @@ export class ProgressDashboardView {
                                 detailsHtml += 
                                     '<tr>' +
                                         '<td>' + fileName + '</td>' +
-                                        '<td>' + percentComplete + '%</td>' +
+                                        '<td>' + (Math.round(percentComplete * 100) / 100).toFixed(2) + '%</td>' +
                                         '<td>' +
                                             '<div class="file-progress-bar">' +
                                                 '<div class="file-progress-fill" style="width: ' + percentComplete + '%"></div>' +
@@ -1124,7 +1124,7 @@ export class ProgressDashboardView {
                                 const aggregateData = message.aggregateData;
                                 if (aggregateData) {
                                     totalProjects.textContent = aggregateData.projectCount || '0';
-                                    overallCompletion.textContent = \`\${Math.round(aggregateData.totalCompletionPercentage || 0)}%\`;
+                                    overallCompletion.textContent = \`\${(Math.round(aggregateData.totalCompletionPercentage * 100) / 100).toFixed(2)}%\`;
                                     
                                     // Store project data for pagination
                                     if (aggregateData.projectSummaries && aggregateData.projectSummaries.length) {

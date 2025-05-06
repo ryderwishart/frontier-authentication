@@ -345,9 +345,9 @@ export function registerProgressCommands(
 
                     translationProgress: {
                         bookCompletionMap: {
-                            GEN: 75,
-                            EXO: 45,
-                            LEV: 20,
+                            GEN: 75.42,
+                            EXO: 45.21,
+                            LEV: 20.78,
                         },
                         totalVerseCount: 5000,
                         translatedVerseCount: 2500,
@@ -467,8 +467,8 @@ export function registerProgressCommands(
                 // Get book completion input
                 const bookInput = await vscode.window.showInputBox({
                     prompt: "Enter book codes and completion percentages",
-                    placeHolder: "GEN:75,EXO:45,LEV:20",
-                    value: "GEN:75,EXO:45,LEV:20",
+                    placeHolder: "GEN:75.42,EXO:45.21,LEV:20.78",
+                    value: "GEN:75.42,EXO:45.21,LEV:20.78",
                 });
 
                 if (!bookInput) {
