@@ -127,8 +127,8 @@ export interface ResolvedFile {
 
 let authenticationProvider: FrontierAuthProvider;
 
-const API_ENDPOINT = "https://api.frontierrnd.com/api/v1";
-// const API_ENDPOINT = 'http://localhost:8000/api/v1';
+// const API_ENDPOINT = "https://api.frontierrnd.com/api/v1";
+const API_ENDPOINT = "http://localhost:8000/api/v1";
 
 // FIXME: let's gracefully handle offline (block login, for instance)
 // TODO: let's display status for the user - cloud sync available, AI online, etc.
@@ -157,13 +157,25 @@ export async function activate(context: vscode.ExtensionContext) {
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     context.subscriptions.push(statusBarItem);
 
+    // Create progress status bar item
+    const progressStatusBarItem = vscode.window.createStatusBarItem(
+        vscode.StatusBarAlignment.Right,
+        99
+    );
+    progressStatusBarItem.text = "$(sync) Translation Progress";
+    progressStatusBarItem.tooltip = "View translation progress";
+    progressStatusBarItem.command = "frontier.showProgressDashboard";
+    context.subscriptions.push(progressStatusBarItem);
+
     // Update status bar when state changes
     stateManager.onDidChangeState(() => {
         updateStatusBar(statusBarItem, stateManager.getAuthState());
+        updateProgressStatusBar(progressStatusBarItem, stateManager.getAuthState());
     });
 
     // Initial status bar update and show
     updateStatusBar(statusBarItem, stateManager.getAuthState());
+    updateProgressStatusBar(progressStatusBarItem, stateManager.getAuthState());
     statusBarItem.show();
 
     // Only show activation message if not already authenticated
@@ -328,6 +340,14 @@ function updateStatusBar(statusBarItem: vscode.StatusBarItem, authState: AuthSta
         statusBarItem.command = "frontier.login";
     }
     statusBarItem.show(); // Always show the status bar item
+}
+
+function updateProgressStatusBar(statusBarItem: vscode.StatusBarItem, authState: AuthState) {
+    if (authState.isAuthenticated) {
+        statusBarItem.show();
+    } else {
+        statusBarItem.hide();
+    }
 }
 
 // This method is called when your extension is deactivated

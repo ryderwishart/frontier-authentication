@@ -84,6 +84,26 @@
                 "command": "frontier.listGroupsUserIsAtLeastMemberOf",
                 "title": "List Groups User Is At Least Member Of",
                 "category": "Frontier"
+            },
+            {
+                "command": "frontier.showProgressDashboard",
+                "title": "Show Translation Progress Dashboard",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.testProgressReport",
+                "title": "Submit Test Progress Report",
+                "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.debugAuth",
+                "title": "Debug Authentication Status",
+                "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.manualSubmitProgressReport",
+                "title": "Submit Manual Progress Report",
+                "category": "Frontier"
             }
         ],
         "authentication": [
