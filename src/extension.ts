@@ -127,8 +127,8 @@ export interface ResolvedFile {
 
 let authenticationProvider: FrontierAuthProvider;
 
-// const API_ENDPOINT = "https://api.frontierrnd.com/api/v1";
-const API_ENDPOINT = "http://localhost:8000/api/v1";
+const API_ENDPOINT = "https://api.frontierrnd.com/api/v1";
+// const API_ENDPOINT = "http://localhost:8000/api/v1"; // Use this for local development when the frontier server is running locally
 
 // FIXME: let's gracefully handle offline (block login, for instance)
 // TODO: let's display status for the user - cloud sync available, AI online, etc.
