@@ -231,6 +231,7 @@ export class ProgressDashboardView {
                     type: "updateProjectDetails",
                     projectId: projectId,
                     details: detailed.reports[0],
+                    clearPrevious: true,
                 });
             } else {
                 this._panel.webview.postMessage({
@@ -658,13 +659,7 @@ export class ProgressDashboardView {
                     
                     // Show project details
                     function showProjectDetails(projectId) {
-                        // Check if we have the data cached
-                        if (window.projectDetailsMap.has(projectId)) {
-                            displayProjectDetails(projectId, window.projectDetailsMap.get(projectId));
-                            return;
-                        }
-                        
-                        // Show loading state
+                        // Always show loading state first
                         projectDetails.classList.add('visible');
                         projectDetailsTitle.textContent = 'Loading project details...';
                         projectDetailsContent.innerHTML = \`
@@ -674,7 +669,7 @@ export class ProgressDashboardView {
                             </div>
                         \`;
                         
-                        // Fetch project details
+                        // Always fetch fresh project details from the server
                         vscode.postMessage({ 
                             command: 'fetchProjectDetails', 
                             projectId: projectId
@@ -682,7 +677,7 @@ export class ProgressDashboardView {
                     }
                     
                     // Display project details in the UI
-                    function displayProjectDetails(projectId, details) {
+                    function displayProjectDetails(projectId, details, clearPrevious) {
                         projectDetails.classList.add('visible');
                         
                         // Get project name
@@ -690,6 +685,11 @@ export class ProgressDashboardView {
                         const projectName = projectRow ? projectRow.cells[0].textContent : 'Project Details';
                         
                         projectDetailsTitle.textContent = projectName;
+                        
+                        // Clear existing content if requested
+                        if (clearPrevious) {
+                            projectDetailsContent.innerHTML = '';
+                        }
                         
                         // Extract data safely
                         const translationProgress = details.translationProgress || {};
@@ -816,10 +816,7 @@ export class ProgressDashboardView {
                                     window.projectDetailsMap.set(message.projectId, message.details);
                                     
                                     // Display the details
-                                    displayProjectDetails(message.projectId, message.details);
-                                    
-                                    // Update aggregate metrics since we have new data
-                                    updateAggregateMetrics(message.aggregateData);
+                                    displayProjectDetails(message.projectId, message.details, message.clearPrevious);
                                 }
                                 break;
                                 
