@@ -22,12 +22,6 @@ interface ExtendedAuthSession extends vscode.AuthenticationSession {
     gitlabUrl?: string;
 }
 
-interface GitLabInfoResponse {
-    user_id: number;
-    username: string;
-    project_count: number;
-}
-
 // Define a type for the outcome of token validation
 interface TokenValidityResult {
     isValid: boolean;
@@ -189,7 +183,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                 await this.stateManager.updateAuthState({
                     isAuthenticated: false,
                     gitlabCredentials: undefined,
-                    gitlabInfo: undefined,
+                    gitlabInfo: undefined, // Ensure cleared here as well
                 });
                 if (removedSessions.length > 0) {
                     this._onDidChangeSessions.fire({
@@ -201,37 +195,25 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                 }
             } else if (validity.isNetworkError) {
                 // Network error, keep the cached session for now.
-                // The user might be offline.
                 console.warn(
                     "Network error during token validation. Keeping cached session for now."
                 );
-                // Optionally, you could schedule a retry here or rely on future actions
-                // to trigger re-validation.
             }
             return; // Stop further processing if token is not valid or network error
         }
 
-        // Token is valid, proceed to fetch GitLab info
-        try {
-            const gitlabInfo = await this.fetchGitLabInfoWithRetry();
-            // Ensure auth state still reflects authenticated if GitLab info fetch was successful
-            // (it might have been cleared if token validation took too long and user logged out)
-            if (this._sessions.length > 0) {
-                await this.stateManager.updateAuthState({
-                    isAuthenticated: true, // Reaffirm
-                    gitlabInfo,
-                });
-            }
-        } catch (error) {
-            console.error("Failed to fetch GitLab info during background verification:", error);
-            // Do not clear the main session if only GitLab info fails.
-            // Update state to reflect missing GitLab info if session is still active.
-            if (this._sessions.length > 0) {
-                await this.stateManager.updateAuthState({
-                    gitlabInfo: undefined, // Clear GitLab info but keep auth
-                });
-            }
+        // Token is valid. Since GitLab info fetching is being removed,
+        // we just ensure the authentication state is consistent and gitlabInfo is undefined.
+        if (this._sessions.length > 0) {
+            // Session exists and token is valid.
+            await this.stateManager.updateAuthState({
+                isAuthenticated: true, // Reaffirm authentication
+                gitlabInfo: undefined, // Explicitly set to undefined as we are no longer fetching it.
+            });
         }
+        // If no session exists here but token was valid (e.g. called directly after a token set but before session obj update),
+        // the primary session creation/update flows in login/setTokens/initialize handle state updates.
+        // This function primarily ensures that for an *existing, validated* session, gitlabInfo is cleared.
     }
 
     // Update getSessions to ensure initialization is complete
@@ -362,82 +344,14 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
     private async handleResponse<T>(response: Response): Promise<T> {
         if (!response.ok) {
             const errorText = await response.text();
-            throw new Error(errorText || "Request failed");
-        }
-        return response.json();
-    }
-
-    private async fetchGitLabInfo() {
-        try {
-            const token = await this.getToken();
-            if (!token) {
-                throw new Error("No authentication token found");
-            }
-
-            const response = await fetch(`${this.apiEndpoint}/gitlab/info`, {
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    Accept: "application/json",
-                },
-            });
-
-            const gitlabInfo = (await this.handleResponse(response)) as GitLabInfoResponse;
-            await this.stateManager.updateAuthState({
-                isAuthenticated: true,
-                gitlabInfo,
-            });
-
-            return gitlabInfo;
-        } catch (error) {
-            console.error("Error fetching GitLab info:", error);
+            const error = new Error(
+                `Request failed with status ${response.status}: ${errorText || "Server returned an error"}`
+            ) as any;
+            error.status = response.status;
+            error.errorText = errorText; // Store original error text if needed later
             throw error;
         }
-    }
-
-    private async fetchGitLabInfoWithRetry(maxRetries = 3, initialDelay = 1000) {
-        let retries = 0;
-        let lastError;
-
-        while (retries < maxRetries) {
-            try {
-                const token = await this.getToken();
-                if (!token) {
-                    throw new Error("No authentication token found");
-                }
-
-                const response = await fetch(`${this.apiEndpoint}/gitlab/info`, {
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                        Accept: "application/json",
-                    },
-                });
-
-                const gitlabInfo = (await this.handleResponse(response)) as GitLabInfoResponse;
-                await this.stateManager.updateAuthState({
-                    isAuthenticated: true,
-                    gitlabInfo,
-                });
-
-                return gitlabInfo;
-            } catch (error) {
-                lastError = error;
-                retries++;
-
-                // If this is not the last retry, wait before trying again
-                if (retries < maxRetries) {
-                    // Exponential backoff: delay = initialDelay * 2^retryNumber
-                    const delay = initialDelay * Math.pow(2, retries - 1);
-                    console.log(
-                        `GitLab info fetch failed, retrying in ${delay}ms (attempt ${retries}/${maxRetries})`
-                    );
-                    await new Promise((resolve) => setTimeout(resolve, delay));
-                } else {
-                    console.error("All GitLab info fetch retries failed:", lastError);
-                }
-            }
-        }
-
-        throw lastError;
+        return response.json();
     }
 
     async register(username: string, email: string, password: string): Promise<boolean> {
