@@ -189,7 +189,7 @@ export function registerProgressCommands(
                 return await response.json();
             } catch (error) {
                 console.error("Error getting aggregated progress:", error);
-                vscode.window.showErrorMessage(
+                console.error(
                     `Failed to get aggregated progress: ${error instanceof Error ? error.message : String(error)}`
                 );
                 return {
