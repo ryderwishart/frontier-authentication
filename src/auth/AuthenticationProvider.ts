@@ -28,6 +28,13 @@ interface GitLabInfoResponse {
     project_count: number;
 }
 
+// Define a type for the outcome of token validation
+interface TokenValidityResult {
+    isValid: boolean;
+    isNetworkError: boolean; // True if the failure was due to network/server issues, not explicit invalidation
+    isInvalidAuth: boolean; // True if server responded with 401 or 403
+}
+
 export class FrontierAuthProvider implements vscode.AuthenticationProvider, vscode.Disposable {
     private static readonly AUTH_TYPE = "frontier";
     private static readonly AUTH_NAME = "Frontier Authentication";
@@ -65,7 +72,6 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
     }
 
     public async initialize(): Promise<void> {
-        // Ensure we only initialize once
         if (this.initializePromise) {
             return this.initializePromise;
         }
@@ -75,66 +81,65 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                 const sessionDataStr = await this.context.secrets.get(
                     FrontierAuthProvider.SESSION_SECRET_KEY
                 );
+
                 if (sessionDataStr) {
                     const sessionData: FrontierSessionData = JSON.parse(sessionDataStr);
 
-                    // Validate the stored token by making a test API call
-                    const isValid = await this.validateStoredToken(sessionData.accessToken);
-
-                    if (isValid) {
-                        this._sessions = [
-                            {
-                                id: "frontier-session",
-                                accessToken: sessionData.accessToken,
-                                account: {
-                                    id: "frontier-user",
-                                    label: "Frontier User",
-                                },
-                                scopes: ["token"],
-                                gitlabToken: sessionData.gitlabToken,
-                                gitlabUrl: sessionData.gitlabUrl,
+                    // Optimistically load the session
+                    this._sessions = [
+                        {
+                            id: "frontier-session",
+                            accessToken: sessionData.accessToken,
+                            account: {
+                                id: "frontier-user",
+                                label: "Frontier User",
                             },
-                        ];
+                            scopes: ["token"],
+                            gitlabToken: sessionData.gitlabToken,
+                            gitlabUrl: sessionData.gitlabUrl,
+                        },
+                    ];
 
-                        // Update state manager with restored session data
-                        await this.stateManager.updateAuthState({
-                            isAuthenticated: true,
-                            gitlabCredentials: {
-                                token: sessionData.gitlabToken,
-                                url: sessionData.gitlabUrl,
-                            },
-                        });
+                    await this.stateManager.updateAuthState({
+                        isAuthenticated: true,
+                        gitlabCredentials: {
+                            token: sessionData.gitlabToken,
+                            url: sessionData.gitlabUrl,
+                        },
+                        // gitlabInfo will be updated by verifyAndRefreshSessionDetails
+                    });
 
-                        // Fetch and update GitLab info
-                        try {
-                            const gitlabInfo = await this.fetchGitLabInfo();
-                            await this.stateManager.updateAuthState({ gitlabInfo });
-                        } catch (error) {
-                            console.error(
-                                "Failed to fetch GitLab info during session restore:",
-                                error
-                            );
-                        }
+                    this._onDidChangeSessions.fire({
+                        added: this._sessions,
+                        removed: [],
+                        changed: [],
+                    });
+                    this._onDidChangeAuthentication.fire();
 
-                        this._onDidChangeSessions.fire({
-                            added: this._sessions,
-                            removed: [],
-                            changed: [],
-                        });
-                        this._onDidChangeAuthentication.fire();
-                    } else {
-                        // If token is invalid, clean up stored data
-                        await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
-                        await this.stateManager.updateAuthState({
-                            isAuthenticated: false,
-                            gitlabCredentials: undefined,
-                            gitlabInfo: undefined,
-                        });
-                    }
+                    // Start background verification without blocking initialization
+                    this.verifyAndRefreshSessionDetails(sessionData.accessToken).catch((error) => {
+                        console.error("Error during background session verification:", error);
+                    });
+                } else {
+                    // No stored session, ensure state is clean
+                    await this.stateManager.updateAuthState({
+                        isAuthenticated: false,
+                        gitlabCredentials: undefined,
+                        gitlabInfo: undefined,
+                    });
                 }
             } catch (error) {
-                console.error("Failed to restore authentication:", error);
-                // Don't show error message here - just log it
+                console.error("Failed to initialize authentication:", error);
+                // Attempt to clean up state if there was a critical error during init
+                await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
+                this._sessions = [];
+                await this.stateManager.updateAuthState({
+                    isAuthenticated: false,
+                    gitlabCredentials: undefined,
+                    gitlabInfo: undefined,
+                });
+                this._onDidChangeSessions.fire({ added: [], removed: this._sessions, changed: [] });
+                this._onDidChangeAuthentication.fire();
             } finally {
                 this._initialized = true;
             }
@@ -143,7 +148,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         return this.initializePromise;
     }
 
-    private async validateStoredToken(token: string): Promise<boolean> {
+    private async checkTokenValidity(token: string): Promise<TokenValidityResult> {
         try {
             const response = await fetch(`${this.apiEndpoint}/auth/me`, {
                 headers: {
@@ -151,9 +156,81 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                     Accept: "application/json",
                 },
             });
-            return response.ok;
-        } catch {
-            return false;
+
+            if (response.ok) {
+                return { isValid: true, isNetworkError: false, isInvalidAuth: false };
+            } else if (response.status === 401 || response.status === 403) {
+                console.warn(`Token validation failed with status: ${response.status}`);
+                return { isValid: false, isNetworkError: false, isInvalidAuth: true };
+            } else {
+                // Other HTTP errors are treated as network/server issues for now
+                console.error(
+                    `Token validation encountered server error: ${response.status}`,
+                    await response.text()
+                );
+                return { isValid: false, isNetworkError: true, isInvalidAuth: false };
+            }
+        } catch (error) {
+            console.error("Token validation failed due to network error:", error);
+            return { isValid: false, isNetworkError: true, isInvalidAuth: false };
+        }
+    }
+
+    private async verifyAndRefreshSessionDetails(accessToken: string): Promise<void> {
+        const validity = await this.checkTokenValidity(accessToken);
+
+        if (!validity.isValid) {
+            if (validity.isInvalidAuth) {
+                // Token is explicitly invalid (401/403), clear the session
+                console.log("Authentication token is invalid. Clearing session.");
+                await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
+                const removedSessions = this._sessions;
+                this._sessions = [];
+                await this.stateManager.updateAuthState({
+                    isAuthenticated: false,
+                    gitlabCredentials: undefined,
+                    gitlabInfo: undefined,
+                });
+                if (removedSessions.length > 0) {
+                    this._onDidChangeSessions.fire({
+                        added: [],
+                        removed: removedSessions,
+                        changed: [],
+                    });
+                    this._onDidChangeAuthentication.fire();
+                }
+            } else if (validity.isNetworkError) {
+                // Network error, keep the cached session for now.
+                // The user might be offline.
+                console.warn(
+                    "Network error during token validation. Keeping cached session for now."
+                );
+                // Optionally, you could schedule a retry here or rely on future actions
+                // to trigger re-validation.
+            }
+            return; // Stop further processing if token is not valid or network error
+        }
+
+        // Token is valid, proceed to fetch GitLab info
+        try {
+            const gitlabInfo = await this.fetchGitLabInfoWithRetry();
+            // Ensure auth state still reflects authenticated if GitLab info fetch was successful
+            // (it might have been cleared if token validation took too long and user logged out)
+            if (this._sessions.length > 0) {
+                await this.stateManager.updateAuthState({
+                    isAuthenticated: true, // Reaffirm
+                    gitlabInfo,
+                });
+            }
+        } catch (error) {
+            console.error("Failed to fetch GitLab info during background verification:", error);
+            // Do not clear the main session if only GitLab info fails.
+            // Update state to reflect missing GitLab info if session is still active.
+            if (this._sessions.length > 0) {
+                await this.stateManager.updateAuthState({
+                    gitlabInfo: undefined, // Clear GitLab info but keep auth
+                });
+            }
         }
     }
 
@@ -178,6 +255,12 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
             await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
             this._onDidChangeSessions.fire({ added: [], removed, changed: [] });
             this._onDidChangeAuthentication.fire();
+            // Also clear from state manager
+            await this.stateManager.updateAuthState({
+                isAuthenticated: false,
+                gitlabCredentials: undefined,
+                gitlabInfo: undefined,
+            });
         }
     }
 
@@ -187,6 +270,9 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
     }
 
     async getToken(): Promise<string | undefined> {
+        if (!this._initialized) {
+            await this.initialize();
+        }
         return this._sessions[0]?.accessToken;
     }
 
@@ -308,6 +394,52 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         }
     }
 
+    private async fetchGitLabInfoWithRetry(maxRetries = 3, initialDelay = 1000) {
+        let retries = 0;
+        let lastError;
+
+        while (retries < maxRetries) {
+            try {
+                const token = await this.getToken();
+                if (!token) {
+                    throw new Error("No authentication token found");
+                }
+
+                const response = await fetch(`${this.apiEndpoint}/gitlab/info`, {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        Accept: "application/json",
+                    },
+                });
+
+                const gitlabInfo = (await this.handleResponse(response)) as GitLabInfoResponse;
+                await this.stateManager.updateAuthState({
+                    isAuthenticated: true,
+                    gitlabInfo,
+                });
+
+                return gitlabInfo;
+            } catch (error) {
+                lastError = error;
+                retries++;
+
+                // If this is not the last retry, wait before trying again
+                if (retries < maxRetries) {
+                    // Exponential backoff: delay = initialDelay * 2^retryNumber
+                    const delay = initialDelay * Math.pow(2, retries - 1);
+                    console.log(
+                        `GitLab info fetch failed, retrying in ${delay}ms (attempt ${retries}/${maxRetries})`
+                    );
+                    await new Promise((resolve) => setTimeout(resolve, delay));
+                } else {
+                    console.error("All GitLab info fetch retries failed:", lastError);
+                }
+            }
+        }
+
+        throw lastError;
+    }
+
     async register(username: string, email: string, password: string): Promise<boolean> {
         try {
             this.validatePassword(password);
@@ -413,7 +545,16 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
             await this.stateManager.updateAuthState({
                 isAuthenticated: true,
-                gitlabInfo: undefined, // Will be updated by GitLab info fetch
+                gitlabCredentials: {
+                    token: sessionData.gitlabToken,
+                    url: sessionData.gitlabUrl,
+                },
+                gitlabInfo: undefined, // Will be updated by GitLab info fetch after login/register
+            });
+
+            // After setting new tokens (login/register), immediately verify and fetch GitLab info
+            this.verifyAndRefreshSessionDetails(tokenResponse.access_token).catch((error) => {
+                console.error("Error during post-token-set session verification:", error);
             });
         } catch (error) {
             console.error("Failed to store authentication tokens:", error);

@@ -200,13 +200,14 @@ export function registerCommands(
         vscode.commands.registerCommand("frontier.getUserInfo", async () => {
             try {
                 const gitLabService = new GitLabService(authProvider);
-                await gitLabService.initialize();
-                return await gitLabService.getUserInfo();
+                await gitLabService.initializeWithRetry();
+                return gitLabService.getUserInfo();
             } catch (error) {
+                console.error("Error getting user info:", error);
                 vscode.window.showErrorMessage(
-                    `Failed to get user info: ${error instanceof Error ? error.message : "Unknown error"}`
+                    "Failed to get user info. Please check your authentication status."
                 );
-                throw error;
+                return { email: "", username: "" };
             }
         })
     );

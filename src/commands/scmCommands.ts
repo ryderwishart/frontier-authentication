@@ -213,32 +213,51 @@ export function registerSCMCommands(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "frontier.cloneRepository",
-            async (repositoryUrl?: string, cloneToPath?: string) => {
+            async (url?: string, cloneToPath?: string) => {
                 try {
+                    // Initialize GitLab service
+                    await gitLabService.initializeWithRetry();
+
+                    let repositoryUrl = url;
+                    // If no URL is provided, prompt the user to select from their GitLab projects
                     if (!repositoryUrl) {
-                        repositoryUrl = await vscode.window.showInputBox({
-                            prompt: "Enter GitLab repository URL",
-                            validateInput: (value: string) => {
-                                if (!value) {
-                                    return "Repository URL is required";
-                                }
-                                if (!value.startsWith("http")) {
-                                    return "Please enter an HTTPS URL";
-                                }
-                                return null;
-                            },
+                        // Display list of user's projects
+                        const projects = await gitLabService.listProjects();
+
+                        if (projects.length === 0) {
+                            vscode.window.showInformationMessage(
+                                "You don't have any GitLab projects yet. Create one first!"
+                            );
+                            return false;
+                        }
+
+                        const quickPickItems = projects.map((p) => ({
+                            label: p.name,
+                            description: p.description || "",
+                            detail: `Last updated: ${new Date(p.last_activity_at).toLocaleString()}`,
+                            url: p.http_url_to_repo,
+                        }));
+
+                        const selectedProject = await vscode.window.showQuickPick(quickPickItems, {
+                            placeHolder: "Select a project to clone",
+                            matchOnDescription: true,
+                            matchOnDetail: true,
                         });
+
+                        if (!selectedProject) {
+                            // User canceled
+                            return false;
+                        }
+
+                        repositoryUrl = selectedProject.url;
                     }
 
-                    if (repositoryUrl) {
-                        await scmManager.cloneExistingRepository(repositoryUrl, cloneToPath);
-                    }
+                    // Clone the repository
+                    await scmManager.cloneExistingRepository(repositoryUrl, cloneToPath);
                     return true;
                 } catch (error) {
                     vscode.window.showErrorMessage(
-                        `Failed to clone repository: ${
-                            error instanceof Error ? error.message : "Unknown error"
-                        }`
+                        `Failed to clone repository: ${error instanceof Error ? error.message : "Unknown error"}`
                     );
                     return false;
                 }
@@ -250,105 +269,29 @@ export function registerSCMCommands(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "frontier.publishWorkspace",
-            async (options?: {
+            async (options: {
                 name: string;
                 description?: string;
-                visibility?: "private" | /* "internal" | */ "public";
+                visibility?: "private" | "internal" | "public";
                 groupId?: string;
-                force?: boolean;
+                force: boolean;
             }) => {
                 try {
-                    await gitLabService.initialize();
+                    await gitLabService.initializeWithRetry();
 
-                    // Get project name from workspace folder
-                    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-                    if (!workspaceFolder) {
-                        throw new Error("No workspace folder found");
-                    }
-                    const defaultName = workspaceFolder.name;
-
-                    // Prompt for project details
-                    const name =
-                        options?.name ||
-                        (await vscode.window.showInputBox({
-                            prompt: "Enter project name",
-                            value: defaultName,
-                            validateInput: (value) => {
-                                if (!value) {
-                                    return "Project name is required";
-                                }
-                                return null;
-                            },
-                        }));
-
-                    if (!name) {
-                        return; // User cancelled
+                    // Get the workspace folders
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders || workspaceFolders.length === 0) {
+                        throw new Error("No workspace is open");
                     }
 
-                    const description =
-                        options?.description ||
-                        (await vscode.window.showInputBox({
-                            prompt: "Enter project description (optional)",
-                        }));
-
-                    const visibility =
-                        options?.visibility ||
-                        (await vscode.window
-                            .showQuickPick(
-                                [
-                                    { label: "Private", value: "private" },
-                                    // { label: "Internal", value: "internal" },
-                                    { label: "Public", value: "public" },
-                                ],
-                                {
-                                    placeHolder: "Select project visibility",
-                                }
-                            )
-                            .then((selected) => {
-                                return selected?.value;
-                            }));
-
-                    if (!visibility) {
-                        return; // User cancelled
-                    }
-
-                    const groups = await gitLabService.listGroups();
-
-                    const groupId =
-                        options?.groupId ||
-                        (await vscode.window
-                            .showQuickPick(
-                                groups.map((group) => ({
-                                    label: group.name,
-                                    description: group.path,
-                                    id: group.id.toString(),
-                                })),
-                                {
-                                    placeHolder: "Select a group",
-                                }
-                            )
-                            .then((selected) => {
-                                return selected?.id;
-                            }));
-
-                    if (!groupId) {
-                        return; // User cancelled
-                    }
-
-                    // Publish workspace
-                    await scmManager.publishWorkspace({
-                        name,
-                        description,
-                        visibility: visibility as "private" /* | "internal" */ | "public",
-                        groupId: groupId,
-                        force: options?.force || false,
-                    });
+                    await scmManager.publishWorkspace(options);
+                    return true;
                 } catch (error) {
-                    if (error instanceof Error) {
-                        vscode.window.showErrorMessage(
-                            `Failed to publish workspace: ${error.message}`
-                        );
-                    }
+                    vscode.window.showErrorMessage(
+                        `Failed to publish workspace: ${error instanceof Error ? error.message : "Unknown error"}`
+                    );
+                    throw error;
                 }
             }
         )

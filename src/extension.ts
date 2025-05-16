@@ -142,7 +142,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize auth provider with state manager
     authenticationProvider = new FrontierAuthProvider(context, API_ENDPOINT, stateManager);
-    await authenticationProvider.initialize();
+
+    try {
+        await authenticationProvider.initialize();
+    } catch (error) {
+        console.error("Error initializing authentication provider:", error);
+        // Continue anyway, as initialization errors will be handled gracefully
+        // and retried with exponential backoff as needed
+    }
 
     // Register commands
     registerCommands(context, authenticationProvider);

@@ -83,10 +83,10 @@ export class SCMManager {
         workspacePath?: string;
     }): Promise<void> {
         try {
-            // Ensure GitLab service is initialized
-            await this.gitLabService.initialize();
+            // Initialize GitLab service and create project
+            await this.gitLabService.initializeWithRetry();
 
-            // Check if project exists or create a new one
+            // Create the project
             const project = await this.gitLabService.createProject({
                 name: options.name,
                 description: options.description,
@@ -94,9 +94,11 @@ export class SCMManager {
                 groupId: options.groupId,
             });
 
-            // Determine workspace path
-            const workspacePath =
-                options.workspacePath || (await this.promptForWorkspacePath(options.name));
+            // Get workspace path
+            let workspacePath = options.workspacePath;
+            if (!workspacePath) {
+                workspacePath = await this.promptForWorkspacePath(options.name);
+            }
             if (!workspacePath) {
                 throw new Error("No workspace path selected");
             }
@@ -125,7 +127,7 @@ export class SCMManager {
     async cloneExistingRepository(repoUrl: string, cloneToPath?: string): Promise<void> {
         try {
             // Ensure GitLab service is initialized
-            await this.gitLabService.initialize();
+            await this.gitLabService.initializeWithRetry();
 
             // Get GitLab credentials
             const gitlabToken = await this.gitLabService.getToken();
@@ -140,7 +142,7 @@ export class SCMManager {
             url.password = gitlabToken;
 
             // Get workspace path
-            const workspacePath = cloneToPath || await this.promptForWorkspacePath(projectName);
+            const workspacePath = cloneToPath || (await this.promptForWorkspacePath(projectName));
             if (!workspacePath) {
                 throw new Error("No workspace path selected");
             }

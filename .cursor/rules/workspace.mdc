@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+We're in a multi-root workspace with 
+
+1) the codex-editor, 
+2) the auth extension (which communicates with the server), `frontier-authentication` (the folder might be called `genesis-authentication` due to renaming) and 
+3) the fastapi server called `frontier-server`. 

@@ -11,37 +11,38 @@ export function registerGitLabCommands(
     context.subscriptions.push(
         vscode.commands.registerCommand("frontier.createGitLabProject", async () => {
             try {
-                await gitlabService.initialize();
+                await gitlabService.initializeWithRetry();
 
-                // Get project name
+                // Get project name from user
                 const name = await vscode.window.showInputBox({
-                    prompt: "Enter project name",
+                    placeHolder: "Project name",
+                    prompt: "Enter the name for your new GitLab project",
                     validateInput: (value) => {
-                        if (!value) {
-                            return "Project name is required";
-                        }
-                        if (!/^[\w.-]+$/.test(value)) {
-                            return "Invalid project name";
-                        }
-                        return null;
+                        return value.trim() ? null : "Project name is required";
                     },
                 });
+
                 if (!name) {
-                    return;
+                    return; // User canceled
                 }
 
-                // Get description (optional)
+                // Get project description (optional)
                 const description = await vscode.window.showInputBox({
-                    prompt: "Enter project description (optional)",
+                    placeHolder: "Project description (optional)",
+                    prompt: "Enter a description for your project",
                 });
 
                 // Get visibility
                 const visibility = await vscode.window.showQuickPick(
                     ["private", "internal", "public"],
-                    { placeHolder: "Select project visibility" }
+                    {
+                        placeHolder: "Select project visibility",
+                        canPickMany: false,
+                    }
                 );
+
                 if (!visibility) {
-                    return;
+                    return; // User canceled
                 }
 
                 // Try to create as personal project first

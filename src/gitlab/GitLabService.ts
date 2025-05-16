@@ -68,6 +68,46 @@ export class GitLabService {
         }
     }
 
+    async initializeWithRetry(maxRetries = 3, initialDelay = 1000): Promise<void> {
+        let retries = 0;
+        let lastError;
+
+        while (retries < maxRetries) {
+            try {
+                const sessions = await this.authProvider.getSessions();
+                const session = sessions[0];
+                if (!session) {
+                    throw new Error("No active session");
+                }
+                this.gitlabToken = (session as any).gitlabToken;
+                this.gitlabBaseUrl = (session as any).gitlabUrl;
+
+                if (!this.gitlabToken || !this.gitlabBaseUrl) {
+                    throw new Error("GitLab credentials not found in session");
+                }
+
+                // Successfully initialized
+                return;
+            } catch (error) {
+                lastError = error;
+                retries++;
+
+                // If this is not the last retry, wait before trying again
+                if (retries < maxRetries) {
+                    const delay = initialDelay * Math.pow(2, retries - 1);
+                    console.log(
+                        `GitLab service initialization failed, retrying in ${delay}ms (attempt ${retries}/${maxRetries})`
+                    );
+                    await new Promise((resolve) => setTimeout(resolve, delay));
+                } else {
+                    console.error("All GitLab service initialization retries failed:", lastError);
+                }
+            }
+        }
+
+        throw lastError;
+    }
+
     async getCurrentUser(): Promise<GitLabUser> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             throw new Error("GitLab not initialized");
@@ -91,7 +131,7 @@ export class GitLabService {
 
     async getProject(name: string, groupId?: string): Promise<{ id: number; url: string } | null> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
-            await this.initialize();
+            await this.initializeWithRetry();
         }
 
         try {
@@ -130,7 +170,7 @@ export class GitLabService {
 
     async createProject(options: GitLabProjectOptions): Promise<{ id: number; url: string }> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
-            await this.initialize();
+            await this.initializeWithRetry();
         }
 
         try {
@@ -188,7 +228,7 @@ export class GitLabService {
 
     async listGroups(): Promise<Array<{ id: string; name: string; path: string }>> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
-            await this.initialize();
+            await this.initializeWithRetry();
         }
 
         try {
@@ -245,7 +285,7 @@ export class GitLabService {
         } = {}
     ): Promise<GitLabProject[]> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
-            await this.initialize();
+            await this.initializeWithRetry();
         }
 
         try {
@@ -299,7 +339,7 @@ export class GitLabService {
 
     async getToken(): Promise<string | undefined> {
         if (!this.gitlabToken) {
-            await this.initialize();
+            await this.initializeWithRetry();
         }
         return this.gitlabToken;
     }
