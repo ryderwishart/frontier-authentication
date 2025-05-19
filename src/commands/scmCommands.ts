@@ -6,9 +6,9 @@ import { FrontierAuthProvider } from "../auth/AuthenticationProvider";
 export interface PublishWorkspaceOptions {
     name: string;
     description?: string;
-    visibility: "private" | "public";
-    groupId: string;
-    force?: boolean;
+    visibility?: "private" | "internal" | "public";
+    groupId?: number;
+    force: boolean;
 }
 
 export function registerSCMCommands(
@@ -168,6 +168,7 @@ export function registerSCMCommands(
                                     label: group.name,
                                     description: group.path,
                                     id: group.id.toString(),
+                                    path: group.path,
                                 })),
                                 {
                                     placeHolder: "Select a group",
@@ -180,6 +181,7 @@ export function registerSCMCommands(
                                     description,
                                     visibility,
                                     groupId: selectedGroup.id,
+                                    path: selectedGroup.path,
                                 });
                                 return;
                             }
@@ -200,12 +202,31 @@ export function registerSCMCommands(
     // Get all groups the user is at least a member of
     context.subscriptions.push(
         vscode.commands.registerCommand("frontier.listGroupsUserIsAtLeastMemberOf", async () => {
-            const groups = await gitLabService.listGroups();
-            return groups as {
-                id: string;
-                name: string;
-                path: string;
-            }[];
+            try {
+                await gitLabService.initializeWithRetry();
+                console.log("Fetching groups from GitLab...");
+                const groups = await gitLabService.listGroups();
+                console.log(`Successfully retrieved ${groups.length} groups`);
+
+                if (groups.length === 0) {
+                    vscode.window.showInformationMessage(
+                        "No groups found. You may need to be added to a group by your GitLab administrator."
+                    );
+                }
+
+                return groups as {
+                    id: string;
+                    name: string;
+                    path: string;
+                }[];
+            } catch (error) {
+                console.error("Failed to list groups:", error);
+                const errorMessage = error instanceof Error ? error.message : "Unknown error";
+                vscode.window.showErrorMessage(
+                    `Failed to list groups: ${errorMessage}. Please check your GitLab access permissions.`
+                );
+                return [];
+            }
         })
     );
 
@@ -270,7 +291,7 @@ export function registerSCMCommands(
         vscode.commands.registerCommand(
             "frontier.publishWorkspace",
             async (options: {
-                name: string;
+                name?: string;
                 description?: string;
                 visibility?: "private" | "internal" | "public";
                 groupId?: string;
@@ -285,7 +306,121 @@ export function registerSCMCommands(
                         throw new Error("No workspace is open");
                     }
 
-                    await scmManager.publishWorkspace(options);
+                    // Get project name if not provided
+                    let name = options.name;
+                    if (!name) {
+                        // Default to workspace folder name
+                        const defaultName = workspaceFolders[0].name;
+                        name = await vscode.window.showInputBox({
+                            prompt: "Enter project name",
+                            value: defaultName,
+                            validateInput: (value: string) => {
+                                if (!value) {
+                                    return "Project name is required";
+                                }
+                                if (!/^[\w.-]+$/.test(value)) {
+                                    return "Invalid project name";
+                                }
+                                return null;
+                            },
+                        });
+                        if (!name) {
+                            vscode.window.showInformationMessage("Project creation cancelled.");
+                            return false; // User cancelled
+                        }
+                    }
+
+                    // Get description if not provided
+                    let description = options.description;
+                    if (description === undefined) {
+                        description = await vscode.window.showInputBox({
+                            prompt: "Enter project description (optional)",
+                        });
+                        // Description can be empty, so we don't check for null/undefined here
+                    }
+
+                    // Get visibility if not provided
+                    let visibility = options.visibility;
+                    if (!visibility) {
+                        visibility = (await vscode.window.showQuickPick(
+                            ["private", "internal", "public"],
+                            {
+                                placeHolder: "Select project visibility",
+                                canPickMany: false,
+                            }
+                        )) as "private" | "internal" | "public" | undefined;
+
+                        if (!visibility) {
+                            vscode.window.showInformationMessage("Project creation cancelled.");
+                            return false; // User cancelled
+                        }
+                    }
+
+                    // Get group if not provided
+                    let groupId = options.groupId;
+                    if (!groupId) {
+                        // First ask if they want to create a personal or group project
+                        const projectType = await vscode.window.showQuickPick(
+                            [
+                                { label: "Personal Project", value: "personal" },
+                                { label: "Group Project", value: "group" },
+                            ],
+                            {
+                                placeHolder: "Select project type",
+                                canPickMany: false,
+                            }
+                        );
+
+                        if (!projectType) {
+                            vscode.window.showInformationMessage("Project creation cancelled.");
+                            return false; // User cancelled
+                        }
+
+                        if (projectType.value === "group") {
+                            // Get list of groups
+                            const groups = await gitLabService.listGroups();
+
+                            if (groups.length === 0) {
+                                vscode.window.showInformationMessage(
+                                    "You don't have access to any GitLab groups. Please create a group or ask your administrator to add you to a group."
+                                );
+                                return false;
+                            } else {
+                                // Ask user to select a group
+                                const selectedGroup = await vscode.window.showQuickPick(
+                                    groups.map((group) => ({
+                                        label: group.name,
+                                        description: group.path,
+                                        id: group.id.toString(),
+                                    })),
+                                    {
+                                        placeHolder: "Select a group",
+                                        canPickMany: false,
+                                    }
+                                );
+
+                                if (!selectedGroup) {
+                                    vscode.window.showInformationMessage(
+                                        "Project creation cancelled."
+                                    );
+                                    return false; // User cancelled
+                                }
+
+                                groupId = selectedGroup.id;
+                            }
+                        }
+                        // If personal project, groupId remains undefined
+                    }
+
+                    // Now we have all the information we need to publish
+                    await scmManager.publishWorkspace({
+                        name,
+                        description,
+                        visibility,
+                        groupId,
+                        force: options.force,
+                    });
+
                     return true;
                 } catch (error) {
                     vscode.window.showErrorMessage(

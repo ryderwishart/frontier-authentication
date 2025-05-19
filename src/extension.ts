@@ -73,7 +73,7 @@ export interface FrontierAPI {
     >;
     cloneRepository: (repositoryUrl: string, cloneToPath?: string) => Promise<boolean>;
     publishWorkspace: (options: {
-        name: string;
+        name?: string;
         description?: string;
         visibility?: "private" | "internal" | "public";
         groupId?: string;
@@ -247,7 +247,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 cloneToPath
             ),
         publishWorkspace: async (options: {
-            name: string;
+            name?: string;
             description?: string;
             visibility?: "private" | "internal" | "public";
             groupId?: string;

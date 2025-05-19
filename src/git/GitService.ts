@@ -788,6 +788,18 @@ export class GitService {
         }
     }
 
+    async removeRemote(dir: string, name: string): Promise<void> {
+        try {
+            await git.deleteRemote({ fs, dir, remote: name });
+        } catch (error) {
+            console.error(`Error removing remote ${name}:`, error);
+            // If the remote doesn't exist, that's fine
+            if (!(error instanceof Error && error.message.includes("remote does not exist"))) {
+                throw error;
+            }
+        }
+    }
+
     async hasGitRepository(dir: string): Promise<boolean> {
         try {
             await git.resolveRef({ fs, dir, ref: "HEAD" });

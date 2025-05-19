@@ -14,6 +14,7 @@ export interface GitLabProjectOptions {
     description?: string;
     visibility?: "private" | "internal" | "public";
     groupId?: string;
+    path?: string;
 }
 
 interface GitLabGroup {
@@ -187,17 +188,33 @@ export class GitLabService {
 
             const endpoint = `${this.gitlabBaseUrl}/api/v4/projects`;
 
+            // Get the group details to use its path
+            let groupPath: string | undefined;
+            if (options.groupId) {
+                const groups = await this.listGroups();
+                const group = groups.find((g) => g.id === options.groupId);
+                if (!group) {
+                    throw new Error(
+                        `Group with ID ${options.groupId} not found. Please verify you have access to this group.`
+                    );
+                }
+                groupPath = group.path;
+            }
+
             const body: Record<string, any> = {
                 name,
                 description,
                 visibility,
-                initialize_with_readme: true, // TODO: use the project metadata to populate a project README?
-                default_branch_protection: 0, // NOTE: we have no default branch protection
+                initialize_with_readme: true,
+                default_branch_protection: 0,
             };
 
-            if (options.groupId) {
-                body.namespace_id = options.groupId;
+            // Use the group path as the namespace
+            if (groupPath) {
+                body.namespace = groupPath;
             }
+
+            console.log(`Creating project with options:`, JSON.stringify(body, null, 2));
 
             const response = await fetch(endpoint, {
                 method: "POST",
@@ -209,16 +226,46 @@ export class GitLabService {
             });
 
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.message || response.statusText);
+                const errorData = await response.json().catch(() => null);
+                const errorMessage = errorData?.message || errorData?.error || response.statusText;
+                console.error("GitLab API error:", {
+                    status: response.status,
+                    statusText: response.statusText,
+                    errorData,
+                });
+                throw new Error(`Failed to create project (${response.status}): ${errorMessage}`);
             }
 
             const project = await response.json();
+
+            // Add detailed logging of the project response
+            console.log("Project creation response:", {
+                projectId: project.id,
+                projectName: project.name,
+                namespace: project.namespace,
+                fullResponse: project,
+            });
+
+            // Verify the project was created in the correct namespace
+            if (options.groupId && project.namespace?.id?.toString() !== options.groupId) {
+                throw new Error(
+                    `Project was created in incorrect namespace. Expected group ID ${options.groupId}, got ${project.namespace?.id}. Full namespace: ${JSON.stringify(project.namespace)}`
+                );
+            }
+
+            console.log("Project created successfully:", {
+                id: project.id,
+                name: project.name,
+                url: project.http_url_to_repo,
+                namespace: project.namespace,
+            });
+
             return {
                 id: project.id,
                 url: project.http_url_to_repo,
             };
         } catch (error) {
+            console.error("Error in createProject:", error);
             if (error instanceof Error) {
                 throw new Error(`Failed to create project: ${error.message}`);
             }
@@ -238,7 +285,7 @@ export class GitLabService {
 
             while (hasNextPage) {
                 const params = new URLSearchParams({
-                    min_access_level: "20",
+                    min_access_level: "10",
                     page: currentPage.toString(),
                     per_page: "100",
                 }).toString();
@@ -251,10 +298,15 @@ export class GitLabService {
                 });
 
                 if (!response.ok) {
-                    throw new Error(`Failed to list groups: ${response.statusText}`);
+                    const errorText = await response.text();
+                    console.error(`GitLab API error (${response.status}):`, errorText);
+                    throw new Error(
+                        `Failed to list groups: ${response.statusText} (${response.status})`
+                    );
                 }
 
                 const groups = await response.json();
+                console.log(`Retrieved ${groups.length} groups from page ${currentPage}`);
                 allGroups.push(
                     ...groups.map((group: any) => ({
                         id: group.id.toString(),
@@ -268,10 +320,11 @@ export class GitLabService {
                 currentPage++;
             }
 
+            console.log(`Total groups found: ${allGroups.length}`);
             return allGroups;
         } catch (error) {
             console.error("Failed to list groups:", error);
-            return [];
+            throw error;
         }
     }
 

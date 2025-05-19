@@ -81,6 +81,7 @@ export class SCMManager {
         visibility?: "private" | "internal" | "public";
         groupId?: string;
         workspacePath?: string;
+        path?: string;
     }): Promise<void> {
         try {
             // Initialize GitLab service and create project
@@ -92,6 +93,7 @@ export class SCMManager {
                 description: options.description,
                 visibility: options.visibility,
                 groupId: options.groupId,
+                path: options.path,
             });
 
             // Get workspace path
@@ -496,83 +498,81 @@ export class SCMManager {
         force: boolean;
     }): Promise<void> {
         try {
-            const workspacePath = this.getWorkspacePath();
+            console.log("Starting workspace publish with options:", options);
 
-            // Check if workspace is already a git repository
+            // Initialize GitLab service
+            await this.gitLabService.initializeWithRetry();
+
+            // Get workspace path
+            const workspacePath = this.getWorkspacePath();
+            console.log("Using workspace path:", workspacePath);
+
+            // Create the project
+            console.log("Creating GitLab project...");
+            const project = await this.gitLabService.createProject({
+                name: options.name,
+                description: options.description,
+                visibility: options.visibility,
+                groupId: options.groupId,
+            });
+            console.log("Project created successfully:", project);
+
+            // Initialize git repository if not already initialized
             const isGitRepo = await this.gitService.hasGitRepository(workspacePath);
             if (!isGitRepo) {
-                // Initialize git with main branch
+                console.log("Initializing git repository...");
                 await this.gitService.init(workspacePath);
-
-                // Get user info for commit author details before making any commits
-                const user = await this.gitLabService.getCurrentUser();
-                const authorName = user.name || user.username;
-                const authorEmail = user.email;
-                if (!authorEmail) {
-                    throw new Error("GitLab user email not available");
-                }
-
-                // Configure git author
-                await this.gitService.configureAuthor(workspacePath, authorName, authorEmail);
-
-                // Add all files
-                await this.gitService.addAll(workspacePath);
-
-                // Create initial commit
-                await this.gitService.commit(workspacePath, "Initial commit", {
-                    name: authorName,
-                    email: authorEmail,
-                });
             }
 
-            // Get current remote URL if it exists
+            // Add remote if not already added
             const currentRemoteUrl = await this.gitService.getRemoteUrl(workspacePath);
             if (!currentRemoteUrl) {
-                // Create a new project on GitLab
-                const project = await this.gitLabService.createProject({
-                    name: options.name,
-                    description: options.description,
-                    visibility: options.visibility,
-                    groupId: options.groupId,
-                });
-
-                // Get GitLab credentials
-                const gitlabToken = await this.gitLabService.getToken();
-                if (!gitlabToken) {
-                    throw new Error("GitLab token not available");
-                }
-
-                // Add remote
+                console.log("Adding git remote...");
                 await this.gitService.addRemote(workspacePath, "origin", project.url);
-
-                // Push to remote with force option if specified
-                await this.gitService.push(
-                    workspacePath,
-                    {
-                        username: "oauth2",
-                        password: gitlabToken,
-                    },
-                    { force: options.force }
-                );
-
-                vscode.window.showInformationMessage(
-                    `Workspace published successfully to ${project.url}!`
-                );
-            } else {
-                vscode.window.showInformationMessage(
-                    "Workspace is already connected to a remote repository."
-                );
             }
 
-            // Initialize SCM provider
-            await this.initializeSCM(workspacePath);
-        } catch (error) {
-            console.error("Publish workspace error:", error);
-            throw new Error(
-                `Failed to publish workspace: ${
-                    error instanceof Error ? error.message : "Unknown error"
-                }`
+            // Add all files
+            console.log("Adding files to git...");
+            await this.gitService.addAll(workspacePath);
+
+            // Create initial commit
+            console.log("Creating initial commit...");
+            const user = await this.gitLabService.getCurrentUser();
+            await this.gitService.commit(workspacePath, "Initial commit", {
+                name: user.name || user.username,
+                email: user.email || `${user.username}@users.noreply.gitlab.com`,
+            });
+
+            // Push to remote
+            console.log("Pushing to remote...");
+            const gitlabToken = await this.gitLabService.getToken();
+            if (!gitlabToken) {
+                throw new Error("GitLab token not available");
+            }
+            await this.gitService.push(
+                workspacePath,
+                {
+                    username: "oauth2",
+                    password: gitlabToken,
+                },
+                { force: options.force }
             );
+
+            // Initialize SCM
+            console.log("Initializing SCM...");
+            await this.initializeSCM(workspacePath);
+
+            vscode.window.showInformationMessage(
+                `Workspace published successfully to ${project.url}`
+            );
+        } catch (error) {
+            console.error("Error in publishWorkspace:", error);
+            if (error instanceof Error) {
+                const errorMessage = error.message;
+                vscode.window.showErrorMessage(`Failed to publish workspace: ${errorMessage}`);
+                throw new Error(`Failed to publish workspace: ${errorMessage}`);
+            }
+            throw error;
         }
     }
 
