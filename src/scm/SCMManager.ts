@@ -494,7 +494,7 @@ export class SCMManager {
         name: string;
         description?: string;
         visibility?: "private" | "internal" | "public";
-        groupId?: string;
+        groupId?: number;
         force: boolean;
     }): Promise<void> {
         try {

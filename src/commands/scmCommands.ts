@@ -215,7 +215,7 @@ export function registerSCMCommands(
                 }
 
                 return groups as {
-                    id: string;
+                    id: number;
                     name: string;
                     path: string;
                 }[];
@@ -294,7 +294,7 @@ export function registerSCMCommands(
                 name?: string;
                 description?: string;
                 visibility?: "private" | "internal" | "public";
-                groupId?: string;
+                groupId?: number;
                 force: boolean;
             }) => {
                 try {
@@ -362,8 +362,8 @@ export function registerSCMCommands(
                         // First ask if they want to create a personal or group project
                         const projectType = await vscode.window.showQuickPick(
                             [
-                                { label: "Personal Project", value: "personal" },
                                 { label: "Group Project", value: "group" },
+                                { label: "Personal Project", value: "personal" },
                             ],
                             {
                                 placeHolder: "Select project type",
@@ -374,6 +374,19 @@ export function registerSCMCommands(
                         if (!projectType) {
                             vscode.window.showInformationMessage("Project creation cancelled.");
                             return false; // User cancelled
+                        }
+
+                        if (projectType.value === "personal") {
+                            const confirm = await vscode.window.showWarningMessage(
+                                "Are you sure you want to create a personal project?",
+                                { modal: true },
+                                "Yes, continue",
+                                "No, cancel"
+                            );
+
+                            if (confirm !== "Yes, continue") {
+                                return false;
+                            }
                         }
 
                         if (projectType.value === "group") {
@@ -391,7 +404,7 @@ export function registerSCMCommands(
                                     groups.map((group) => ({
                                         label: group.name,
                                         description: group.path,
-                                        id: group.id.toString(),
+                                        id: group.id,
                                     })),
                                     {
                                         placeHolder: "Select a group",

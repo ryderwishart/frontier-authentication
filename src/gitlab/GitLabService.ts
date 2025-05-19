@@ -13,8 +13,7 @@ export interface GitLabProjectOptions {
     name: string;
     description?: string;
     visibility?: "private" | "internal" | "public";
-    groupId?: string;
-    path?: string;
+    groupId?: number;
 }
 
 interface GitLabGroup {
@@ -130,7 +129,7 @@ export class GitLabService {
         return user;
     }
 
-    async getProject(name: string, groupId?: string): Promise<{ id: number; url: string } | null> {
+    async getProject(name: string, groupId?: number): Promise<{ id: number; url: string } | null> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initializeWithRetry();
         }
@@ -188,19 +187,6 @@ export class GitLabService {
 
             const endpoint = `${this.gitlabBaseUrl}/api/v4/projects`;
 
-            // Get the group details to use its path
-            let groupPath: string | undefined;
-            if (options.groupId) {
-                const groups = await this.listGroups();
-                const group = groups.find((g) => g.id === options.groupId);
-                if (!group) {
-                    throw new Error(
-                        `Group with ID ${options.groupId} not found. Please verify you have access to this group.`
-                    );
-                }
-                groupPath = group.path;
-            }
-
             const body: Record<string, any> = {
                 name,
                 description,
@@ -209,12 +195,16 @@ export class GitLabService {
                 default_branch_protection: 0,
             };
 
-            // Use the group path as the namespace
-            if (groupPath) {
-                body.namespace = groupPath;
+            if (options.groupId) {
+                body.namespace_id = Number(options.groupId);
             }
 
             console.log(`Creating project with options:`, JSON.stringify(body, null, 2));
+            console.log(`Making request to: ${endpoint}`);
+            console.log(`Request headers:`, {
+                Authorization: `Bearer ${this.gitlabToken}`,
+                "Content-Type": "application/json",
+            });
 
             const response = await fetch(endpoint, {
                 method: "POST",
@@ -232,6 +222,12 @@ export class GitLabService {
                     status: response.status,
                     statusText: response.statusText,
                     errorData,
+                    requestBody: body,
+                    requestUrl: endpoint,
+                    requestHeaders: {
+                        Authorization: `Bearer ${this.gitlabToken}`,
+                        "Content-Type": "application/json",
+                    },
                 });
                 throw new Error(`Failed to create project (${response.status}): ${errorMessage}`);
             }
@@ -273,13 +269,13 @@ export class GitLabService {
         }
     }
 
-    async listGroups(): Promise<Array<{ id: string; name: string; path: string }>> {
+    async listGroups(): Promise<Array<{ id: number; name: string; path: string }>> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initializeWithRetry();
         }
 
         try {
-            const allGroups: Array<{ id: string; name: string; path: string }> = [];
+            const allGroups: Array<{ id: number; name: string; path: string }> = [];
             let currentPage = 1;
             let hasNextPage = true;
 
@@ -309,7 +305,7 @@ export class GitLabService {
                 console.log(`Retrieved ${groups.length} groups from page ${currentPage}`);
                 allGroups.push(
                     ...groups.map((group: any) => ({
-                        id: group.id.toString(),
+                        id: group.id,
                         name: group.name,
                         path: group.path,
                     }))
