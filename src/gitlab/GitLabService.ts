@@ -13,7 +13,7 @@ export interface GitLabProjectOptions {
     name: string;
     description?: string;
     visibility?: "private" | "internal" | "public";
-    groupId?: number;
+    groupId?: string;
 }
 
 interface GitLabGroup {
@@ -129,7 +129,7 @@ export class GitLabService {
         return user;
     }
 
-    async getProject(name: string, groupId?: number): Promise<{ id: number; url: string } | null> {
+    async getProject(name: string, groupId?: string): Promise<{ id: number; url: string } | null> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initializeWithRetry();
         }
@@ -196,7 +196,7 @@ export class GitLabService {
             };
 
             if (options.groupId) {
-                body.namespace_id = Number(options.groupId);
+                body.namespace_id = options.groupId;
             }
 
             console.log(`Creating project with options:`, JSON.stringify(body, null, 2));

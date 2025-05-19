@@ -167,7 +167,7 @@ export function registerSCMCommands(
                                 groups.map((group) => ({
                                     label: group.name,
                                     description: group.path,
-                                    id: group.id.toString(),
+                                    id: group.id,
                                     path: group.path,
                                 })),
                                 {
@@ -180,7 +180,7 @@ export function registerSCMCommands(
                                     name,
                                     description,
                                     visibility,
-                                    groupId: selectedGroup.id,
+                                    groupId: selectedGroup.id.toString(),
                                     path: selectedGroup.path,
                                 });
                                 return;
@@ -430,7 +430,7 @@ export function registerSCMCommands(
                         name,
                         description,
                         visibility,
-                        groupId,
+                        groupId: groupId?.toString(),
                         force: options.force,
                     });
 

@@ -93,7 +93,6 @@ export class SCMManager {
                 description: options.description,
                 visibility: options.visibility,
                 groupId: options.groupId,
-                path: options.path,
             });
 
             // Get workspace path
@@ -494,7 +493,7 @@ export class SCMManager {
         name: string;
         description?: string;
         visibility?: "private" | "internal" | "public";
-        groupId?: number;
+        groupId?: string;
         force: boolean;
     }): Promise<void> {
         try {
