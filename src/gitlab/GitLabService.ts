@@ -129,7 +129,7 @@ export class GitLabService {
         return user;
     }
 
-    async getProject(name: string, groupId?: string): Promise<{ id: number; url: string } | null> {
+    async getProject(name: string, groupId?: string): Promise<{ id: string; url: string } | null> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initializeWithRetry();
         }
@@ -168,7 +168,7 @@ export class GitLabService {
         }
     }
 
-    async createProject(options: GitLabProjectOptions): Promise<{ id: number; url: string }> {
+    async createProject(options: GitLabProjectOptions): Promise<{ id: string; url: string }> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initializeWithRetry();
         }

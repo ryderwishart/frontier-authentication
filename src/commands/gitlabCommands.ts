@@ -83,7 +83,7 @@ export function registerGitLabCommands(
                                     name,
                                     description,
                                     visibility: visibility as "private" | "internal" | "public",
-                                    groupId: selectedGroup.id,
+                                    groupId: selectedGroup.id.toString(),
                                 });
 
                                 vscode.window.showInformationMessage(
