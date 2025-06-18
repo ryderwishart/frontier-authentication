@@ -12,7 +12,7 @@ export class SCMManager {
     private workingTree: vscode.SourceControlResourceGroup;
     private staging: vscode.SourceControlResourceGroup;
     private fileSystemWatcher: vscode.FileSystemWatcher | undefined;
-    private gitService: GitService;
+    public gitService: GitService;
     private gitLabService: GitLabService;
     private autoSyncEnabled: boolean = false;
     private autoSyncInterval: NodeJS.Timeout | undefined;

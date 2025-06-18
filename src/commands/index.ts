@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { FrontierAuthProvider } from "../auth/AuthenticationProvider";
 import { GitLabService } from "../gitlab/GitLabService";
+import { GitService } from "../git/GitService";
 
 export async function loginWithCredentials(
     authProvider: FrontierAuthProvider,
@@ -37,7 +38,8 @@ export async function registerUser(
 
 export function registerCommands(
     context: vscode.ExtensionContext,
-    authProvider: FrontierAuthProvider
+    authProvider: FrontierAuthProvider,
+    gitService?: GitService // Add gitService parameter to allow debug logging control
 ) {
     context.subscriptions.push(
         // Register login command with input handling
@@ -209,6 +211,26 @@ export function registerCommands(
                 );
                 return { email: "", username: "" };
             }
+        }),
+
+        // Add debug logging toggle command
+        vscode.commands.registerCommand("frontier.toggleDebugLogging", async () => {
+            if (!gitService) {
+                vscode.window.showErrorMessage("Git service not available");
+                return;
+            }
+
+            const config = vscode.workspace.getConfiguration('frontier');
+            const currentSetting = config.get<boolean>('debugGitLogging', false);
+            const newSetting = !currentSetting;
+            
+            await config.update('debugGitLogging', newSetting, vscode.ConfigurationTarget.Global);
+            gitService.setDebugLogging(newSetting);
+            
+            const status = newSetting ? "enabled" : "disabled";
+            vscode.window.showInformationMessage(`Debug logging ${status}`);
+            
+            return newSetting;
         })
     );
 }
