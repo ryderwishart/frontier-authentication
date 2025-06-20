@@ -28,9 +28,32 @@ export enum RemoteBranchStatus {
 
 export class GitService {
     private stateManager: StateManager;
+    private debugLogging: boolean = false;
 
     constructor(stateManager: StateManager) {
         this.stateManager = stateManager;
+        // Check VS Code configuration for debug logging setting
+        this.debugLogging = vscode.workspace.getConfiguration('frontier').get('debugGitLogging', false);
+    }
+
+    /**
+     * Enable or disable debug logging for git operations
+     */
+    setDebugLogging(enabled: boolean): void {
+        this.debugLogging = enabled;
+    }
+
+    /**
+     * Conditional debug logging - only logs if debug logging is enabled
+     */
+    private debugLog(message: string, data?: any): void {
+        if (this.debugLogging) {
+            if (data !== undefined) {
+                console.log(message, JSON.stringify(data));
+            } else {
+                console.log(message);
+            }
+        }
     }
 
     // Below is a simplified version. It commits if dirty, fetches remote changes, tries pulling (which will error on merge conflicts), and then either pushes or returns a list of files that differ.
@@ -97,7 +120,7 @@ export class GitService {
                 oids: [localHead, remoteHead],
             });
 
-            console.log("Merge base commits:", mergeBaseCommits);
+            this.debugLog("Merge base commits:", mergeBaseCommits);
 
             // Get files changed in local HEAD
             const localStatusMatrix = await git.statusMatrix({ fs, dir });
@@ -116,13 +139,10 @@ export class GitService {
                       })
                     : [];
 
-            console.log(
-                "workingCopyStatusBeforeCommit:",
-                JSON.stringify(workingCopyStatusBeforeCommit)
-            );
-            console.log("localStatusMatrix:", JSON.stringify(localStatusMatrix));
-            console.log("mergeBaseStatusMatrix:", JSON.stringify(mergeBaseStatusMatrix));
-            console.log("remoteStatusMatrix:", JSON.stringify(remoteStatusMatrix));
+            this.debugLog("workingCopyStatusBeforeCommit:", workingCopyStatusBeforeCommit);
+            this.debugLog("localStatusMatrix:", localStatusMatrix);
+            this.debugLog("mergeBaseStatusMatrix:", mergeBaseStatusMatrix);
+            this.debugLog("remoteStatusMatrix:", remoteStatusMatrix);
 
             // 6. If local and remote are identical, nothing to do
             if (localHead === remoteHead) {
@@ -266,11 +286,11 @@ export class GitService {
             // filesDeletedLocally.length = 0;
             // filesDeletedLocally.push(...updatedFilesDeletedLocally);
 
-            console.log("Files added locally:", filesAddedLocally);
-            console.log("Files deleted locally:", filesDeletedLocally);
-            console.log("Files added on remote:", filesAddedOnRemote);
-            console.log("Files deleted on remote:", filesDeletedOnRemote);
-            console.log(
+            this.debugLog("Files added locally:", filesAddedLocally);
+            this.debugLog("Files deleted locally:", filesDeletedLocally);
+            this.debugLog("Files added on remote:", filesAddedOnRemote);
+            this.debugLog("Files deleted on remote:", filesDeletedOnRemote);
+            this.debugLog(
                 "Files modified and treated as potential conflict:",
                 filesModifiedAndTreatedAsPotentialConflict
             );
@@ -286,7 +306,7 @@ export class GitService {
                 ]),
             ];
 
-            console.log("All changed files:", allChangedFilePaths);
+            this.debugLog("All changed files:", allChangedFilePaths);
 
             // 9. Get all files changed in either branch with enhanced conflict detection
             const conflicts = await Promise.all(
@@ -333,11 +353,11 @@ export class GitService {
                                 );
                                 localContent = fileContent;
                             } catch (e) {
-                                console.log(`Error reading locally added file ${filepath}:`, e);
+                                this.debugLog(`Error reading locally added file ${filepath}:`, e);
                             }
                         }
                     } catch (err) {
-                        console.log(`File ${filepath} doesn't exist in local HEAD`);
+                        this.debugLog(`File ${filepath} doesn't exist in local HEAD`);
                     }
 
                     // Try to read remote content if it exists in remote HEAD
@@ -361,11 +381,11 @@ export class GitService {
                                 });
                                 remoteContent = new TextDecoder().decode(rBlob);
                             } catch (e) {
-                                console.log(`Error reading remotely added file ${filepath}:`, e);
+                                this.debugLog(`Error reading remotely added file ${filepath}:`, e);
                             }
                         }
                     } catch (err) {
-                        console.log(`File ${filepath} doesn't exist in remote HEAD`);
+                        this.debugLog(`File ${filepath} doesn't exist in remote HEAD`);
                     }
 
                     // Try to read base content if available
@@ -380,7 +400,7 @@ export class GitService {
                             baseContent = new TextDecoder().decode(bBlob);
                         }
                     } catch (err) {
-                        console.log(`File ${filepath} doesn't exist in merge base`);
+                        this.debugLog(`File ${filepath} doesn't exist in merge base`);
                     }
 
                     // Special conflict cases handling
@@ -530,10 +550,10 @@ export class GitService {
         }
 
         try {
-            console.log(
+            this.debugLog(
                 "=== Starting completeMerge because client called and passed resolved files ==="
             );
-            console.log(`Resolved files: ${resolvedFiles.map((f) => f.filepath).join(", ")}`);
+            this.debugLog(`Resolved files: ${resolvedFiles.map((f) => f.filepath).join(", ")}`);
 
             const currentBranch = await git.currentBranch({ fs, dir });
             if (!currentBranch) {
@@ -542,7 +562,7 @@ export class GitService {
 
             // Stage the resolved files based on their resolution type
             for (const { filepath, resolution } of resolvedFiles) {
-                console.log(`Processing resolved file: ${filepath} with resolution: ${resolution}`);
+                this.debugLog(`Processing resolved file: ${filepath} with resolution: ${resolution}`);
 
                 if (resolution === "deleted") {
                     console.log(`Removing file from git: ${filepath}`);

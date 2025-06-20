@@ -104,6 +104,11 @@
                 "command": "frontier.manualSubmitProgressReport",
                 "title": "Submit Manual Progress Report",
                 "category": "Frontier"
+            },
+            {
+                "command": "frontier.toggleDebugLogging",
+                "title": "Toggle Debug Logging",
+                "category": "Frontier: Debug"
             }
         ],
         "authentication": [
@@ -111,7 +116,18 @@
                 "id": "frontier",
                 "label": "Frontier"
             }
-        ]
+        ],
+        "configuration": {
+            "title": "Frontier",
+            "properties": {
+                "frontier.debugGitLogging": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable verbose debug logging for git operations (workingCopyStatusBeforeCommit, localStatusMatrix, mergeBaseStatusMatrix, remoteStatusMatrix)",
+                    "scope": "application"
+                }
+            }
+        }
     },
     "scripts": {
         "vscode:prepublish": "npm run test && npm run package",

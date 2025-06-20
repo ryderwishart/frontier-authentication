@@ -151,8 +151,13 @@ export async function activate(context: vscode.ExtensionContext) {
         // and retried with exponential backoff as needed
     }
 
-    // Register commands
-    registerCommands(context, authenticationProvider);
+    // Create GitService for debug logging control
+    const stateManagerInstance = StateManager.getInstance();
+    const { GitService } = await import("./git/GitService");
+    const gitService = new GitService(stateManagerInstance);
+    
+    // Register commands - pass gitService for debug toggle
+    registerCommands(context, authenticationProvider, gitService);
     registerGitLabCommands(context, authenticationProvider);
     registerSCMCommands(context, authenticationProvider);
     registerProgressCommands(context, authenticationProvider);
