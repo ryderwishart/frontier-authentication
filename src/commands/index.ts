@@ -231,6 +231,38 @@ export function registerCommands(
             vscode.window.showInformationMessage(`Debug logging ${status}`);
             
             return newSetting;
+        }),
+
+        // Add command to clean up duplicate authentication sessions
+        vscode.commands.registerCommand("frontier.cleanupDuplicateSessions", async () => {
+            try {
+                await authProvider.cleanupDuplicateSessions();
+                vscode.window.showInformationMessage("Duplicate authentication sessions cleaned up");
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to cleanup sessions: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }),
+
+        // Add command to force session refresh with correct username
+        vscode.commands.registerCommand("frontier.refreshAuthSession", async () => {
+            try {
+                if (!authProvider.isAuthenticated) {
+                    vscode.window.showWarningMessage("Not currently authenticated");
+                    return;
+                }
+
+                // Force a session refresh by getting a new token with user info
+                const token = await authProvider.getToken();
+                if (token) {
+                    // This will recreate the session with the correct user info
+                    await authProvider.setToken(token);
+                    vscode.window.showInformationMessage("Authentication session refreshed with correct username");
+                } else {
+                    vscode.window.showErrorMessage("Could not retrieve authentication token");
+                }
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to refresh session: ${error instanceof Error ? error.message : String(error)}`);
+            }
         })
     );
 }
