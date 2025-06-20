@@ -332,12 +332,13 @@ export function registerSCMCommands(
 
                     // Get description if not provided
                     let description = options.description;
-                    if (description === undefined) {
-                        description = await vscode.window.showInputBox({
-                            prompt: "Enter project description (optional)",
-                        });
-                        // Description can be empty, so we don't check for null/undefined here
-                    }
+                    // Note: just removing this prompt for now
+                    // if (description === undefined) {
+                    //     description = await vscode.window.showInputBox({
+                    //         prompt: "Enter project description (optional)",
+                    //     });
+                    //     // Description can be empty, so we don't check for null/undefined here
+                    // }
 
                     // Get visibility if not provided
                     let visibility = options.visibility;

@@ -306,7 +306,7 @@ export class GitLabService {
                 allGroups.push(
                     ...groups.map((group: any) => ({
                         id: group.id,
-                        name: group.name,
+                        name: group.full_name,
                         path: group.path,
                     }))
                 );
