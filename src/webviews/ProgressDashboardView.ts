@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { ProjectProgressReport } from "../extension";
+import { ProjectProgressReport, BookCompletionData } from "../extension";
 
 // Add interface for window with our custom properties
 declare global {
@@ -414,41 +414,186 @@ export class ProgressDashboardView {
                 button.ghost:hover {
                     background-color: var(--vscode-list-hoverBackground);
                 }
-                .project-card {
+                .project-item {
                     background-color: var(--vscode-sideBar-background);
                     border: 1px solid var(--vscode-widget-border);
-                    border-radius: 8px;
+                    border-radius: 6px;
                     overflow: hidden;
-                    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-                    margin-bottom: 16px;
+                    margin-bottom: 8px;
+                    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+                    transition: all 0.2s ease;
                 }
-                .project-header {
+                .project-item:hover {
+                    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+                }
+                .project-summary {
+                    padding: 16px;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 12px;
+                }
+                .project-main-info {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    gap: 16px;
+                }
+                .project-name {
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: var(--vscode-foreground);
+                    flex: 1;
+                }
+                .project-completion {
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: var(--vscode-foreground);
+                    min-width: 60px;
+                    text-align: right;
+                }
+                .project-progress-bar {
+                    height: 4px;
+                    background-color: var(--vscode-progressBar-background);
+                    border-radius: 2px;
+                    overflow: hidden;
+                }
+                .project-progress-fill {
+                    height: 100%;
+                    background-color: var(--vscode-progressBar-foreground);
+                    border-radius: 2px;
+                    transition: width 0.3s ease;
+                }
+                .expand-button {
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 6px;
+                    background-color: transparent;
+                    border: 1px solid var(--vscode-button-border);
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                    font-size: 13px;
+                    color: var(--vscode-foreground);
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                }
+                .expand-button:hover {
+                    background-color: var(--vscode-list-hoverBackground);
+                }
+                .expand-icon {
+                    font-size: 14px;
+                    transition: transform 0.2s ease;
+                }
+                .expand-icon.rotated {
+                    transform: rotate(180deg);
+                }
+                .project-details {
+                    display: none;
+                    border-top: 1px solid var(--vscode-widget-border);
+                    background-color: var(--vscode-editor-background);
+                }
+                .project-details.expanded {
+                    display: block;
+                }
+                .project-details-content {
                     padding: 20px;
-                    border-bottom: 1px solid var(--vscode-widget-border);
-                    background-color: var(--vscode-widget-shadow);
+                    display: flex;
+                    flex-direction: column;
+                    gap: 24px;
                 }
-                .project-title-row {
+                .detail-section {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 12px;
+                }
+                .detail-section-title {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: var(--vscode-foreground);
+                    margin: 0;
+                    padding-bottom: 8px;
+                    border-bottom: 1px solid var(--vscode-widget-border);
+                }
+                .detail-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 16px;
+                }
+                .detail-item {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 4px;
+                }
+                .detail-label {
+                    font-size: 12px;
+                    color: var(--vscode-descriptionForeground);
+                    font-weight: 500;
+                }
+                .detail-value {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: var(--vscode-foreground);
+                }
+                .file-progress-grid {
+                    display: grid;
+                    gap: 8px;
+                }
+                .file-progress-item {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 6px;
+                    padding: 12px;
+                    border-radius: 4px;
+                    background-color: var(--vscode-sideBar-background);
+                    border: 1px solid var(--vscode-widget-border);
+                    position: relative;
+                }
+                .file-progress-header {
                     display: flex;
                     justify-content: space-between;
                     align-items: flex-start;
-                    gap: 16px;
+                    gap: 12px;
                 }
-                .project-title {
-                    font-size: 18px;
-                    font-weight: 600;
-                    margin: 0 0 4px 0;
-                }
-                .project-description {
+                .file-name {
                     font-size: 14px;
-                    color: var(--vscode-descriptionForeground);
-                    margin: 0;
-                    display: flex;
-                    align-items: center;
-                    gap: 6px;
+                    font-weight: 500;
+                    color: var(--vscode-foreground);
+                    flex: 1;
                 }
-
-                .project-content {
-                    padding: 20px;
+                .file-completion {
+                    display: flex;
+                    flex-direction: column;
+                    align-items: flex-end;
+                    gap: 2px;
+                }
+                .file-percentage {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: var(--vscode-foreground);
+                }
+                .file-word-count {
+                    font-size: 11px;
+                    color: var(--vscode-descriptionForeground);
+                }
+                .file-progress-bar {
+                    height: 4px;
+                    background-color: var(--vscode-progressBar-background);
+                    border-radius: 2px;
+                    overflow: hidden;
+                }
+                .file-progress-fill {
+                    height: 100%;
+                    background-color: var(--vscode-progressBar-foreground);
+                    border-radius: 2px;
+                    transition: width 0.3s ease;
+                }
+                .file-complete-icon {
+                    position: absolute;
+                    top: 8px;
+                    right: 8px;
+                    color: #16a34a;
+                    font-size: 16px;
+                    font-weight: bold;
                 }
                 .progress-overview {
                     display: grid;
@@ -528,95 +673,7 @@ export class ProgressDashboardView {
                     font-size: 12px;
                     color: var(--vscode-descriptionForeground);
                 }
-                .collapsible-trigger {
-                    display: flex;
-                    align-items: center;
-                    justify-content: space-between;
-                    width: 100%;
-                    padding: 12px 0;
-                    margin-top: 8px;
-                    text-align: left;
-                    font-size: 14px;
-                    font-weight: 500;
-                    color: var(--vscode-foreground);
-                }
-                .collapsible-trigger:hover {
-                    color: var(--vscode-textLink-activeForeground);
-                }
-                .collapsible-trigger-content {
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                }
-                .collapsible-icon {
-                    font-size: 16px;
-                    width: 16px;
-                    height: 16px;
-                }
-                .chevron {
-                    font-size: 16px;
-                    transition: transform 0.2s;
-                }
-                .chevron.rotated {
-                    transform: rotate(180deg);
-                }
-                .collapsible-content {
-                    display: none;
-                    padding-top: 16px;
-                }
-                .collapsible-content.expanded {
-                    display: block;
-                }
-                .file-grid {
-                    display: grid;
-                    gap: 12px;
-                }
-                .file-item {
-                    display: flex;
-                    align-items: center;
-                    gap: 12px;
-                    padding: 12px;
-                    border-radius: 6px;
-                    background-color: var(--vscode-editor-background);
-                    border: 1px solid var(--vscode-widget-border);
-                }
-                .file-info {
-                    flex: 1;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 4px;
-                }
-                .file-name {
-                    font-size: 14px;
-                    font-weight: 500;
-                    color: var(--vscode-foreground);
-                }
-                .file-progress {
-                    display: flex;
-                    align-items: center;
-                    justify-content: space-between;
-                    font-size: 12px;
-                    color: var(--vscode-descriptionForeground);
-                    margin-bottom: 4px;
-                }
-                .file-progress-bar {
-                    height: 4px;
-                    background-color: var(--vscode-progressBar-background);
-                    border-radius: 2px;
-                    overflow: hidden;
-                    width: 100%;
-                }
-                .file-progress-fill {
-                    height: 100%;
-                    background-color: var(--vscode-progressBar-foreground);
-                    border-radius: 2px;
-                    transition: width 0.3s ease;
-                }
-                .check-icon {
-                    color: #16a34a;
-                    font-size: 16px;
-                    flex-shrink: 0;
-                }
+
                 .loading {
                     display: flex;
                     flex-direction: column;
@@ -842,33 +899,35 @@ export class ProgressDashboardView {
                         return bookCode.replace(/_en$/, '').replace(/TheChosen_/, 'Episode ');
                     }
                     
-                    // Toggle project section expansion
-                    function toggleProjectSection(projectId, section) {
-                        const sectionKey = projectId + '_' + section;
-                        const isExpanded = window.expandedProjects.has(sectionKey);
-                        const collapsibleContent = document.querySelector(\`#\${section}-\${projectId}\`);
-                        const chevron = document.querySelector(\`[data-project-id="\${projectId}"][data-section="\${section}"] .chevron\`);
+                    // Toggle project expansion
+                    function toggleProjectExpansion(projectId) {
+                        const isExpanded = window.expandedProjects.has(projectId);
+                        const projectDetails = document.querySelector(\`#project-details-\${projectId}\`);
+                        const expandIcon = document.querySelector(\`[data-project-id="\${projectId}"] .expand-icon\`);
                         
                         if (isExpanded) {
-                            window.expandedProjects.delete(sectionKey);
-                            collapsibleContent.classList.remove('expanded');
-                            chevron.classList.remove('rotated');
+                            window.expandedProjects.delete(projectId);
+                            projectDetails.classList.remove('expanded');
+                            expandIcon.classList.remove('rotated');
                         } else {
-                            window.expandedProjects.add(sectionKey);
-                            collapsibleContent.classList.add('expanded');
-                            chevron.classList.add('rotated');
+                            window.expandedProjects.add(projectId);
+                            projectDetails.classList.add('expanded');
+                            expandIcon.classList.add('rotated');
                             
-                            // Fetch project details if not already cached and this is details or files section
+                            // Fetch project details if not already cached
                             if (!window.projectDetailsMap.has(projectId)) {
                                 vscode.postMessage({ 
                                     command: 'fetchProjectDetails', 
                                     projectId: projectId
                                 });
+                            } else {
+                                // Update the details view with cached data
+                                updateProjectDetailsView(projectId, window.projectDetailsMap.get(projectId));
                             }
                         }
                     }
                     
-                    // Render projects as cards
+                    // Render projects as concise list
                     function renderProjects(projects) {
                         projectsContainer.innerHTML = '';
                         
@@ -883,145 +942,164 @@ export class ProgressDashboardView {
                         
                         projects.forEach(project => {
                             const displayName = getDisplayName(project);
-                            const lastActivity = formatDate(project.lastActivity);
                             const completionPercentage = project.completionPercentage.toFixed(1);
                             
-                            // Remove validation stage - not needed for this dashboard
+                            const projectItem = document.createElement('div');
+                            projectItem.className = 'project-item';
+                            projectItem.dataset.projectId = project.projectId;
                             
-                            const cachedDetails = window.projectDetailsMap.get(project.projectId);
-                            
-                            const card = document.createElement('div');
-                            card.className = 'project-card';
-                            card.dataset.projectId = project.projectId;
-                            
-                            card.innerHTML = \`
-                                <div class="project-header">
-                                    <div class="project-title-row">
-                                        <div>
-                                            <h3 class="project-title">\${displayName}</h3>
-                                            <p class="project-description">
-                                                <span class="icon">🕐</span>
-                                                Last updated: \${lastActivity}
-                                            </p>
-                                        </div>
+                            projectItem.innerHTML = \`
+                                <div class="project-summary">
+                                    <div class="project-main-info">
+                                        <div class="project-name">\${displayName}</div>
+                                        <div class="project-completion">\${completionPercentage}%</div>
                                     </div>
+                                    <div class="project-progress-bar">
+                                        <div class="project-progress-fill" style="width: \${completionPercentage}%"></div>
+                                    </div>
+                                    <button class="expand-button ghost" data-project-id="\${project.projectId}">
+                                        <span class="expand-icon">⌄</span>
+                                        <span>View Details</span>
+                                    </button>
                                 </div>
                                 
-                                <div class="project-content">
-                                    <div class="progress-overview">
-                                        <div class="progress-item">
-                                            <div class="progress-header">
-                                                <span class="progress-label">Translation Progress</span>
-                                                <span class="progress-value">\${completionPercentage}%</span>
-                                            </div>
-                                            <div class="progress-bar">
-                                                <div class="progress-fill" style="width: \${completionPercentage}%"></div>
-                                            </div>
-                                            <div class="progress-text">
-                                                \${cachedDetails ? 
-                                                    \`\${cachedDetails.translationProgress?.translatedVerseCount || 0} / \${cachedDetails.translationProgress?.totalVerseCount || 0} verses\` :
-                                                    'Loading verse count...'
-                                                }
-                                            </div>
-                                        </div>
-                                    </div>
-                                    
-                                    <button class="collapsible-trigger ghost" data-project-id="\${project.projectId}" data-section="details">
-                                        <div class="collapsible-trigger-content">
-                                            <div class="collapsible-icon">📊</div>
-                                            <span>Project Details</span>
-                                        </div>
-                                        <div class="chevron \${window.expandedProjects.has(project.projectId + '_details') ? 'rotated' : ''}">⌄</div>
-                                    </button>
-                                    
-                                    <div class="collapsible-content \${window.expandedProjects.has(project.projectId + '_details') ? 'expanded' : ''}" id="details-\${project.projectId}">
-                                        <div class="metrics-grid">
-                                            \${cachedDetails ? \`
-                                                <div class="metric-item">
-                                                    <div class="metric-icon edit">✏️</div>
-                                                    <div class="metric-content">
-                                                        <div class="metric-value">\${cachedDetails.activityMetrics?.editCountLast24Hours || 0}</div>
-                                                        <div class="metric-label">Edits (24h)</div>
-                                                    </div>
-                                                </div>
-                                                
-                                                <div class="metric-item">
-                                                    <div class="metric-icon trending">📈</div>
-                                                    <div class="metric-content">
-                                                        <div class="metric-value">\${cachedDetails.activityMetrics?.averageDailyEdits || 0}</div>
-                                                        <div class="metric-label">Avg daily edits</div>
-                                                    </div>
-                                                </div>
-                                                
-                                                <div class="metric-item">
-                                                    <div class="metric-icon file">📄</div>
-                                                    <div class="metric-content">
-                                                        <div class="metric-value">\${(cachedDetails.translationProgress?.wordsTranslated || 0).toLocaleString()}</div>
-                                                        <div class="metric-label">Words translated</div>
-                                                    </div>
-                                                </div>
-                                            \` : \`
-                                                <div style="text-align: center; padding: 20px; color: var(--vscode-descriptionForeground);">
-                                                    <div class="loading-spinner" style="width: 24px; height: 24px; margin: 0 auto 12px;"></div>
-                                                    Loading project details...
-                                                </div>
-                                            \`}
-                                        </div>
-                                    </div>
-                                    
-                                    <button class="collapsible-trigger ghost" data-project-id="\${project.projectId}" data-section="files">
-                                        <div class="collapsible-trigger-content">
-                                            <div class="collapsible-icon">📚</div>
-                                            <span>File Progress (\${cachedDetails ? 
-                                                Object.keys(cachedDetails.translationProgress?.bookCompletionMap || {}).length : 
-                                                '...'
-                                            } files)</span>
-                                        </div>
-                                        <div class="chevron \${window.expandedProjects.has(project.projectId + '_files') ? 'rotated' : ''}">⌄</div>
-                                    </button>
-                                    
-                                    <div class="collapsible-content \${window.expandedProjects.has(project.projectId + '_files') ? 'expanded' : ''}" id="files-\${project.projectId}">
-                                        <div class="file-grid">
-                                            \${window.expandedProjects.has(project.projectId + '_files') && cachedDetails ? renderFileProgress(cachedDetails.translationProgress?.bookCompletionMap || {}) : 
-                                                '<div style="text-align: center; padding: 20px; color: var(--vscode-descriptionForeground);">Loading file progress...</div>'
-                                            }
-                                        </div>
+                                <div class="project-details \${window.expandedProjects.has(project.projectId) ? 'expanded' : ''}" id="project-details-\${project.projectId}">
+                                    <div class="details-loading" style="text-align: center; padding: 20px; color: var(--vscode-descriptionForeground);">
+                                        <div class="loading-spinner" style="width: 24px; height: 24px; margin: 0 auto 12px;"></div>
+                                        Loading project details...
                                     </div>
                                 </div>
                             \`;
                             
-                            projectsContainer.appendChild(card);
+                            projectsContainer.appendChild(projectItem);
                         });
                         
-                        // Add event listeners to collapsible triggers
-                        document.querySelectorAll('.collapsible-trigger').forEach(trigger => {
-                            trigger.addEventListener('click', (e) => {
+                        // Add event listeners to expand buttons
+                        document.querySelectorAll('.expand-button').forEach(button => {
+                            button.addEventListener('click', (e) => {
                                 const projectId = e.currentTarget.dataset.projectId;
-                                const section = e.currentTarget.dataset.section;
-                                toggleProjectSection(projectId, section);
+                                toggleProjectExpansion(projectId);
                             });
                         });
                     }
                     
+                    // Helper function to extract completion data (supports both old and new formats)
+                    function getCompletionData(data) {
+                        if (typeof data === 'number') {
+                            // Legacy format - just percentage
+                            return {
+                                completionPercentage: data,
+                                sourceWords: null,
+                                targetWords: null
+                            };
+                        } else if (data && typeof data === 'object') {
+                            // New format - object with word counts
+                            return {
+                                completionPercentage: data.completionPercentage || 0,
+                                sourceWords: data.sourceWords || 0,
+                                targetWords: data.targetWords || 0
+                            };
+                        }
+                        return { completionPercentage: 0, sourceWords: null, targetWords: null };
+                    }
+
                     // Render file progress
                     function renderFileProgress(bookCompletionMap) {
                         const books = Object.entries(bookCompletionMap)
-                            .sort(([, a], [, b]) => b - a);
+                            .sort(([, a], [, b]) => {
+                                const aData = getCompletionData(a);
+                                const bData = getCompletionData(b);
+                                return bData.completionPercentage - aData.completionPercentage;
+                            });
                         
-                        return books.map(([bookCode, completion]) => \`
-                            <div class="file-item">
-                                <div class="file-info">
-                                    <div class="file-name">\${formatBookName(bookCode)}</div>
-                                    <div class="file-progress">
-                                        <span>\${completion.toFixed(1)}%</span>
+                        return books.map(([bookCode, completionData]) => {
+                            const data = getCompletionData(completionData);
+                            const percentage = data.completionPercentage;
+                            const hasWordCounts = data.sourceWords !== null && data.targetWords !== null;
+                            
+                            return \`
+                                <div class="file-progress-item">
+                                    <div class="file-progress-header">
+                                        <span class="file-name">\${formatBookName(bookCode)}</span>
+                                        <div class="file-completion">
+                                            <span class="file-percentage">\${percentage.toFixed(1)}%</span>
+                                            \${hasWordCounts ? 
+                                                \`<span class="file-word-count">
+                                                    \${data.targetWords.toLocaleString()} / \${data.sourceWords.toLocaleString()} words
+                                                </span>\` : ''
+                                            }
+                                        </div>
                                     </div>
                                     <div class="file-progress-bar">
-                                        <div class="file-progress-fill" style="width: \${completion}%"></div>
+                                        <div class="file-progress-fill" style="width: \${percentage}%"></div>
+                                    </div>
+                                    \${percentage === 100 ? '<div class="file-complete-icon">✓</div>' : ''}
+                                </div>
+                            \`;
+                        }).join('');
+                    }
+                    
+                    // Update project details view
+                    function updateProjectDetailsView(projectId, details) {
+                        const projectDetailsContainer = document.querySelector(\`#project-details-\${projectId}\`);
+                        if (!projectDetailsContainer) return;
+                        
+                        const lastActivity = formatDate(details.timestamp);
+                        
+                        projectDetailsContainer.innerHTML = \`
+                            <div class="project-details-content">
+                                <div class="detail-section">
+                                    <h4 class="detail-section-title">📊 Progress Overview</h4>
+                                    <div class="detail-grid">
+                                        <div class="detail-item">
+                                            <span class="detail-label">Total Verses</span>
+                                            <span class="detail-value">\${(details.translationProgress?.totalVerseCount || 0).toLocaleString()}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">Translated</span>
+                                            <span class="detail-value">\${(details.translationProgress?.translatedVerseCount || 0).toLocaleString()}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">Validated</span>
+                                            <span class="detail-value">\${(details.translationProgress?.validatedVerseCount || 0).toLocaleString()}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">Words Translated</span>
+                                            <span class="detail-value">\${(details.translationProgress?.wordsTranslated || 0).toLocaleString()}</span>
+                                        </div>
                                     </div>
                                 </div>
-                                \${completion === 100 ? '<div class="check-icon">✓</div>' : ''}
+                                
+                                <div class="detail-section">
+                                    <h4 class="detail-section-title">⚡ Activity</h4>
+                                    <div class="detail-grid">
+                                        <div class="detail-item">
+                                            <span class="detail-label">Last Update</span>
+                                            <span class="detail-value">\${lastActivity}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">Edits (24h)</span>
+                                            <span class="detail-value">\${details.activityMetrics?.editCountLast24Hours || 0}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">Edits (7d)</span>
+                                            <span class="detail-value">\${details.activityMetrics?.editCountLastWeek || 0}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">Avg Daily</span>
+                                            <span class="detail-value">\${details.activityMetrics?.averageDailyEdits || 0}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="detail-section">
+                                    <h4 class="detail-section-title">📚 File Progress</h4>
+                                    <div class="file-progress-grid">
+                                        \${renderFileProgress(details.translationProgress?.bookCompletionMap || {})}
+                                    </div>
+                                </div>
                             </div>
-                        \`).join('');
+                        \`;
                     }
                     
                     // Update project details in UI
@@ -1029,57 +1107,9 @@ export class ProgressDashboardView {
                         // Cache the details
                         window.projectDetailsMap.set(projectId, details);
                         
-                        // Update the project card if it exists
-                        const projectCard = document.querySelector(\`[data-project-id="\${projectId}"]\`);
-                        if (projectCard) {
-                            // Update verse count in translation progress if visible
-                            const translationProgress = projectCard.querySelector('.progress-item .progress-text');
-                            if (translationProgress && details.translationProgress) {
-                                const verseText = details.translationProgress.translatedVerseCount + ' / ' + details.translationProgress.totalVerseCount + ' verses';
-                                translationProgress.textContent = verseText;
-                            }
-                            
-                            // Update details section if expanded
-                            if (window.expandedProjects.has(projectId + '_details')) {
-                                const detailsSection = document.querySelector(\`#details-\${projectId}\`);
-                                if (detailsSection) {
-                                    detailsSection.innerHTML = \`
-                                        <div class="metrics-grid">
-                                            <div class="metric-item">
-                                                <div class="metric-icon edit">✏️</div>
-                                                <div class="metric-content">
-                                                    <div class="metric-value">\${details.activityMetrics?.editCountLast24Hours || 0}</div>
-                                                    <div class="metric-label">Edits (24h)</div>
-                                                </div>
-                                            </div>
-                                            
-                                            <div class="metric-item">
-                                                <div class="metric-icon trending">📈</div>
-                                                <div class="metric-content">
-                                                    <div class="metric-value">\${details.activityMetrics?.averageDailyEdits || 0}</div>
-                                                    <div class="metric-label">Avg daily edits</div>
-                                                </div>
-                                            </div>
-                                            
-                                            <div class="metric-item">
-                                                <div class="metric-icon file">📄</div>
-                                                <div class="metric-content">
-                                                    <div class="metric-value">\${(details.translationProgress?.wordsTranslated || 0).toLocaleString()}</div>
-                                                    <div class="metric-label">Words translated</div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    \`;
-                                }
-                            }
-                            
-                            // Update file progress if expanded
-                            if (window.expandedProjects.has(projectId + '_files')) {
-                                const filesSection = document.querySelector(\`#files-\${projectId} .file-grid\`);
-                                if (filesSection) {
-                                    filesSection.innerHTML = renderFileProgress(details.translationProgress?.bookCompletionMap || {});
-                                }
-                            }
+                        // Update the details view if project is expanded
+                        if (window.expandedProjects.has(projectId)) {
+                            updateProjectDetailsView(projectId, details);
                         }
                     }
                     

@@ -244,15 +244,8 @@ export function registerProgressCommands(
                 return await response.json();
             } catch (error) {
                 console.error("Error getting aggregated progress:", error);
-                console.error(
-                    `Failed to get aggregated progress: ${error instanceof Error ? error.message : String(error)}`
-                );
-                return {
-                    projectCount: 0,
-                    activeProjectCount: 0,
-                    totalCompletionPercentage: 0,
-                    projectSummaries: [],
-                };
+                // Don't swallow the error - let it bubble up to the dashboard
+                throw error;
             }
         })
     );
@@ -296,12 +289,8 @@ export function registerProgressCommands(
                 return await response.json();
             } catch (error) {
                 console.error("Error getting progress status:", error);
-                return {
-                    projectCount: 0,
-                    activeProjectCount: 0,
-                    totalCompletionPercentage: 0,
-                    lastUpdated: new Date().toISOString(),
-                };
+                // Don't swallow the error - let it bubble up to the dashboard
+                throw error;
             }
         })
     );
@@ -382,6 +371,128 @@ export function registerProgressCommands(
         })
     );
 
+    // Debug progress API calls (helpful for troubleshooting progress dashboard issues)
+    context.subscriptions.push(
+        vscode.commands.registerCommand("frontier.debugProgressAPI", async () => {
+            try {
+                if (!authProvider.isAuthenticated) {
+                    vscode.window.showErrorMessage("Not authenticated");
+                    return;
+                }
+
+                const sessions = await authProvider.getSessions();
+                const session = sessions[0];
+
+                if (!session) {
+                    vscode.window.showErrorMessage("No active session found");
+                    return;
+                }
+
+                const apiEndpoint = context.globalState.get<string>("frontierApiEndpoint");
+                if (!apiEndpoint) {
+                    vscode.window.showErrorMessage("API endpoint is not configured");
+                    return;
+                }
+
+                const channel = vscode.window.createOutputChannel("Frontier Progress API Debug");
+                channel.clear();
+                channel.appendLine("=== Progress API Debug ===");
+                channel.appendLine(`API Endpoint: ${apiEndpoint}`);
+                channel.appendLine(`Token Preview: ${session.accessToken.substring(0, 8)}...`);
+                channel.appendLine("");
+
+                // Test status endpoint
+                channel.appendLine("Testing /projects/progress/status...");
+                try {
+                    const statusResponse = await fetch(`${apiEndpoint}/projects/progress/status`, {
+                        method: "GET",
+                        headers: {
+                            Authorization: `Bearer ${session.accessToken}`,
+                        },
+                    });
+
+                    if (statusResponse.ok) {
+                        const statusData = await statusResponse.json();
+                        channel.appendLine("✅ Status endpoint success:");
+                        channel.appendLine(JSON.stringify(statusData, null, 2));
+                    } else {
+                        const errorData = await statusResponse.text();
+                        channel.appendLine(
+                            `❌ Status endpoint failed (${statusResponse.status}): ${errorData}`
+                        );
+                    }
+                } catch (error) {
+                    channel.appendLine(
+                        `❌ Status endpoint error: ${error instanceof Error ? error.message : String(error)}`
+                    );
+                }
+
+                channel.appendLine("");
+
+                // Test aggregate endpoint
+                channel.appendLine("Testing /projects/progress/aggregate...");
+                try {
+                    const aggregateResponse = await fetch(
+                        `${apiEndpoint}/projects/progress/aggregate`,
+                        {
+                            method: "GET",
+                            headers: {
+                                Authorization: `Bearer ${session.accessToken}`,
+                            },
+                        }
+                    );
+
+                    if (aggregateResponse.ok) {
+                        const aggregateData = await aggregateResponse.json();
+                        channel.appendLine("✅ Aggregate endpoint success:");
+                        channel.appendLine(`Project Count: ${aggregateData.projectCount}`);
+                        channel.appendLine(`Active Projects: ${aggregateData.activeProjectCount}`);
+                        channel.appendLine(
+                            `Total Completion: ${aggregateData.totalCompletionPercentage}%`
+                        );
+                        channel.appendLine(
+                            `Project Summaries: ${aggregateData.projectSummaries?.length || 0} items`
+                        );
+
+                        // Show first few project summaries
+                        if (
+                            aggregateData.projectSummaries &&
+                            aggregateData.projectSummaries.length > 0
+                        ) {
+                            channel.appendLine("\nFirst 3 project summaries:");
+                            aggregateData.projectSummaries
+                                .slice(0, 3)
+                                .forEach((project: any, index: number) => {
+                                    channel.appendLine(
+                                        `${index + 1}. ${project.projectName} (${project.projectId}) - ${project.completionPercentage}%`
+                                    );
+                                });
+                        }
+                    } else {
+                        const errorData = await aggregateResponse.text();
+                        channel.appendLine(
+                            `❌ Aggregate endpoint failed (${aggregateResponse.status}): ${errorData}`
+                        );
+                    }
+                } catch (error) {
+                    channel.appendLine(
+                        `❌ Aggregate endpoint error: ${error instanceof Error ? error.message : String(error)}`
+                    );
+                }
+
+                channel.show();
+                vscode.window.showInformationMessage(
+                    "Progress API debug info has been output to the 'Frontier Progress API Debug' channel"
+                );
+            } catch (error) {
+                console.error("Error debugging progress API:", error);
+                vscode.window.showErrorMessage(
+                    `Failed to debug progress API: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
+        })
+    );
+
     // Add test progress report command
     context.subscriptions.push(
         vscode.commands.registerCommand("frontier.testProgressReport", async () => {
@@ -454,9 +565,21 @@ export function registerProgressCommands(
 
                     translationProgress: {
                         bookCompletionMap: {
-                            GEN: 75.42,
-                            EXO: 45.21,
-                            LEV: 20.78,
+                            GEN: {
+                                completionPercentage: 75.42,
+                                sourceWords: 1247,
+                                targetWords: 940,
+                            },
+                            EXO: {
+                                completionPercentage: 45.21,
+                                sourceWords: 892,
+                                targetWords: 403,
+                            },
+                            LEV: {
+                                completionPercentage: 20.78,
+                                sourceWords: 659,
+                                targetWords: 137,
+                            },
                         },
                         totalVerseCount: 5000,
                         translatedVerseCount: 2500,
@@ -586,11 +709,23 @@ export function registerProgressCommands(
                 }
 
                 // Parse book completion map
-                const bookCompletionMap: Record<string, number> = {};
+                const bookCompletionMap: Record<string, import("../extension").BookCompletionData> =
+                    {};
                 try {
                     bookInput.split(",").forEach((entry) => {
                         const [book, percentage] = entry.trim().split(":");
-                        bookCompletionMap[book] = Number(percentage);
+                        const completionPercentage = Number(percentage);
+
+                        // Generate sample word counts based on completion percentage
+                        const estimatedTotalWords = 800 + Math.floor(Math.random() * 400); // 800-1200 words per book
+                        const sourceWords = estimatedTotalWords;
+                        const targetWords = Math.floor(sourceWords * (completionPercentage / 100));
+
+                        bookCompletionMap[book] = {
+                            completionPercentage,
+                            sourceWords,
+                            targetWords,
+                        };
                     });
                 } catch (e) {
                     vscode.window.showErrorMessage(

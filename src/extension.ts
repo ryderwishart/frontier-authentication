@@ -10,6 +10,12 @@ import { initialState, StateManager } from "./state";
 import { AuthState } from "./types/state";
 import { ConflictedFile } from "./git/GitService";
 
+export interface BookCompletionData {
+    completionPercentage: number;
+    sourceWords: number;
+    targetWords: number;
+}
+
 export interface ProjectProgressReport {
     projectId: string; // Unique project identifier
     timestamp: string; // ISO timestamp of report generation
@@ -17,7 +23,7 @@ export interface ProjectProgressReport {
 
     // Translation metrics
     translationProgress: {
-        bookCompletionMap: Record<string, number>; // Book ID -> percentage complete
+        bookCompletionMap: Record<string, BookCompletionData>; // Book ID -> completion data with word counts
         totalVerseCount: number; // Total verses in project
         translatedVerseCount: number; // Verses with translations
         validatedVerseCount: number; // Verses passing validation
@@ -155,7 +161,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const stateManagerInstance = StateManager.getInstance();
     const { GitService } = await import("./git/GitService");
     const gitService = new GitService(stateManagerInstance);
-    
+
     // Register commands - pass gitService for debug toggle
     registerCommands(context, authenticationProvider, gitService);
     registerGitLabCommands(context, authenticationProvider);
