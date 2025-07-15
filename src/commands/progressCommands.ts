@@ -27,8 +27,7 @@ export function registerProgressCommands(
                         throw new Error("Authentication session expired");
                     }
 
-                    // We need to know the API endpoint from the auth provider
-                    // Since apiEndpoint is private, we'll get it from the context
+                    // Get API endpoint from context
                     const apiEndpoint = context.globalState.get<string>("frontierApiEndpoint");
                     if (!apiEndpoint) {
                         throw new Error("API endpoint is not configured");
@@ -47,7 +46,7 @@ export function registerProgressCommands(
                     if (!response.ok) {
                         const errorData = await response.json();
                         throw new Error(
-                            `Failed to submit progress report: ${errorData.message || response.statusText}`
+                            `Failed to submit progress report: ${errorData.detail || response.statusText}`
                         );
                     }
 
@@ -102,13 +101,13 @@ export function registerProgressCommands(
                     // Construct query parameters
                     const params = new URLSearchParams();
                     if (options.projectIds && options.projectIds.length > 0) {
-                        options.projectIds.forEach((id) => params.append("projectId", id));
+                        options.projectIds.forEach((id) => params.append("project_ids", id));
                     }
                     if (options.startDate) {
-                        params.set("startDate", options.startDate);
+                        params.set("start_date", options.startDate);
                     }
                     if (options.endDate) {
-                        params.set("endDate", options.endDate);
+                        params.set("end_date", options.endDate);
                     }
                     if (options.limit) {
                         params.set("limit", options.limit.toString());
@@ -131,7 +130,7 @@ export function registerProgressCommands(
                     if (!response.ok) {
                         const errorData = await response.json();
                         throw new Error(
-                            `Failed to get progress reports: ${errorData.message || response.statusText}`
+                            `Failed to get progress reports: ${errorData.detail || response.statusText}`
                         );
                     }
 
@@ -140,6 +139,62 @@ export function registerProgressCommands(
                     console.error("Error getting progress reports:", error);
                     vscode.window.showErrorMessage(
                         `Failed to get progress reports: ${error instanceof Error ? error.message : String(error)}`
+                    );
+                    return {
+                        reports: [],
+                        totalCount: 0,
+                    };
+                }
+            }
+        )
+    );
+
+    // Get single project detailed progress
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            "frontier.getProjectProgress",
+            async (projectId: string) => {
+                try {
+                    if (!authProvider.isAuthenticated) {
+                        throw new Error("You must be logged in to retrieve project progress");
+                    }
+
+                    // Get authenticated session
+                    const sessions = await authProvider.getSessions();
+                    const session = sessions[0];
+                    if (!session) {
+                        throw new Error("Authentication session expired");
+                    }
+
+                    // Get API endpoint from context
+                    const apiEndpoint = context.globalState.get<string>("frontierApiEndpoint");
+                    if (!apiEndpoint) {
+                        throw new Error("API endpoint is not configured");
+                    }
+
+                    // Get detailed progress for a single project
+                    const response = await fetch(
+                        `${apiEndpoint}/projects/progress?project_ids=${projectId}&limit=50`,
+                        {
+                            method: "GET",
+                            headers: {
+                                Authorization: `Bearer ${session.accessToken}`,
+                            },
+                        }
+                    );
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(
+                            `Failed to get project progress: ${errorData.detail || response.statusText}`
+                        );
+                    }
+
+                    return await response.json();
+                } catch (error) {
+                    console.error("Error getting project progress:", error);
+                    vscode.window.showErrorMessage(
+                        `Failed to get project progress: ${error instanceof Error ? error.message : String(error)}`
                     );
                     return {
                         reports: [],
@@ -182,7 +237,7 @@ export function registerProgressCommands(
                 if (!response.ok) {
                     const errorData = await response.json();
                     throw new Error(
-                        `Failed to get aggregated progress: ${errorData.message || response.statusText}`
+                        `Failed to get aggregated progress: ${errorData.detail || response.statusText}`
                     );
                 }
 
@@ -202,6 +257,55 @@ export function registerProgressCommands(
         })
     );
 
+    // Get lightweight progress status for dashboard
+    context.subscriptions.push(
+        vscode.commands.registerCommand("frontier.getProgressStatus", async () => {
+            try {
+                if (!authProvider.isAuthenticated) {
+                    throw new Error("You must be logged in to retrieve progress status");
+                }
+
+                // Get authenticated session
+                const sessions = await authProvider.getSessions();
+                const session = sessions[0];
+                if (!session) {
+                    throw new Error("Authentication session expired");
+                }
+
+                // Get API endpoint from context
+                const apiEndpoint = context.globalState.get<string>("frontierApiEndpoint");
+                if (!apiEndpoint) {
+                    throw new Error("API endpoint is not configured");
+                }
+
+                // Use lightweight status endpoint for quick dashboard updates
+                const response = await fetch(`${apiEndpoint}/projects/progress/status`, {
+                    method: "GET",
+                    headers: {
+                        Authorization: `Bearer ${session.accessToken}`,
+                    },
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(
+                        `Failed to get progress status: ${errorData.detail || response.statusText}`
+                    );
+                }
+
+                return await response.json();
+            } catch (error) {
+                console.error("Error getting progress status:", error);
+                return {
+                    projectCount: 0,
+                    activeProjectCount: 0,
+                    totalCompletionPercentage: 0,
+                    lastUpdated: new Date().toISOString(),
+                };
+            }
+        })
+    );
+
     // Add a manual refresh command for progress data
     context.subscriptions.push(
         vscode.commands.registerCommand("frontier.refreshProgressData", async () => {
@@ -209,9 +313,14 @@ export function registerProgressCommands(
                 // If dashboard is open, opening it again will just bring it to focus
                 ProgressDashboardView.createOrShow(context);
 
-                const result = await vscode.commands.executeCommand(
-                    "frontier.getAggregatedProgress"
-                );
+                // Use lightweight status endpoint for faster refresh, fallback to aggregate
+                let result;
+                try {
+                    result = await vscode.commands.executeCommand("frontier.getProgressStatus");
+                } catch (error) {
+                    console.log("Status endpoint failed, using aggregate:", error);
+                    result = await vscode.commands.executeCommand("frontier.getAggregatedProgress");
+                }
                 return result;
             } catch (error) {
                 console.error("Error refreshing progress data:", error);

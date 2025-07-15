@@ -128,7 +128,20 @@ export class ProgressDashboardView {
             // Show loading state
             this._panel.webview.postMessage({ type: "updateStatus", status: "loading" });
 
-            // Fetch aggregated progress data
+            // Step 1: Try to get lightweight status first for fast header update
+            let headerData;
+            try {
+                headerData = await vscode.commands.executeCommand("frontier.getProgressStatus");
+                // Send header update immediately if we get fast status
+                this._panel.webview.postMessage({
+                    type: "updateHeader",
+                    headerData: headerData,
+                });
+            } catch (error) {
+                console.log("Status endpoint failed, will use aggregate data:", error);
+            }
+
+            // Step 2: Get full aggregated data for project summaries (this is required for dashboard)
             const aggregateData = await vscode.commands.executeCommand(
                 "frontier.getAggregatedProgress"
             );
@@ -140,7 +153,7 @@ export class ProgressDashboardView {
             const recentReports = await vscode.commands.executeCommand(
                 "frontier.getProgressReports",
                 {
-                    startDate: thirtyDaysAgo.toISOString(),
+                    start_date: thirtyDaysAgo.toISOString(),
                     limit: 10,
                 }
             );
@@ -169,9 +182,22 @@ export class ProgressDashboardView {
      */
     private async _exportProgressData() {
         try {
-            const aggregateData = await vscode.commands.executeCommand(
-                "frontier.getAggregatedProgress"
-            );
+            // Use cached data if available, otherwise fetch fresh data
+            let aggregateData = this._cachedAggregateData;
+            if (!aggregateData || Date.now() - this._lastFetchTime > 300000) {
+                // 5 minutes
+                // Use the faster status endpoint for export, fallback to aggregated data
+                try {
+                    aggregateData = await vscode.commands.executeCommand(
+                        "frontier.getProgressStatus"
+                    );
+                } catch (error) {
+                    // Fallback to full aggregated data if status endpoint fails
+                    aggregateData = await vscode.commands.executeCommand(
+                        "frontier.getAggregatedProgress"
+                    );
+                }
+            }
 
             // Request a save location
             const uri = await vscode.window.showSaveDialog({
@@ -216,11 +242,20 @@ export class ProgressDashboardView {
                 status: "loading",
             });
 
-            // Get project details - most recent report for this project
-            const detailed = (await vscode.commands.executeCommand("frontier.getProgressReports", {
-                projectIds: [projectId],
-                limit: 1,
-            })) as { reports: ProjectProgressReport[]; totalCount: number };
+            // Try the new getProjectProgress command first, fallback to getProgressReports
+            let detailed: { reports: ProjectProgressReport[]; totalCount: number };
+            try {
+                detailed = (await vscode.commands.executeCommand(
+                    "frontier.getProjectProgress",
+                    projectId
+                )) as { reports: ProjectProgressReport[]; totalCount: number };
+            } catch (error) {
+                // Fallback to the general progress reports command with updated parameter names
+                detailed = (await vscode.commands.executeCommand("frontier.getProgressReports", {
+                    project_ids: [projectId],
+                    limit: 1,
+                })) as { reports: ProjectProgressReport[]; totalCount: number };
+            }
 
             if (detailed && detailed.reports && detailed.reports.length > 0) {
                 // Store in cache
@@ -254,7 +289,7 @@ export class ProgressDashboardView {
     }
 
     /**
-     * Get the HTML for the webview - simplified clean table-based design
+     * Get the HTML for the webview - modern card-based design
      */
     private _getHtmlForWebview() {
         return `<!DOCTYPE html>
@@ -268,103 +303,96 @@ export class ProgressDashboardView {
                     font-family: var(--vscode-font-family);
                     color: var(--vscode-foreground);
                     background-color: var(--vscode-editor-background);
-                    padding: 20px;
-                    line-height: 1.5;
+                    padding: 24px;
+                    line-height: 1.6;
+                    margin: 0;
                 }
                 .dashboard {
+                    max-width: 1400px;
+                    margin: 0 auto;
                     display: flex;
                     flex-direction: column;
-                    gap: 20px;
-                    max-width: 1200px;
-                    margin: 0 auto;
+                    gap: 24px;
                 }
                 .header {
                     display: flex;
+                    flex-direction: column;
+                    gap: 16px;
+                }
+                .header-top {
+                    display: flex;
                     justify-content: space-between;
-                    align-items: center;
-                    margin-bottom: 8px;
+                    align-items: flex-start;
+                    flex-wrap: wrap;
+                    gap: 16px;
+                }
+                .title-section {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 4px;
                 }
                 .title {
-                    font-size: 20px;
-                    font-weight: 600;
+                    font-size: 32px;
+                    font-weight: 700;
+                    margin: 0;
+                    letter-spacing: -0.025em;
+                }
+                .subtitle {
+                    font-size: 16px;
+                    color: var(--vscode-descriptionForeground);
                     margin: 0;
                 }
-                .summary-card {
-                    background-color: var(--vscode-widget-shadow);
-                    border-radius: 6px;
-                    padding: 20px;
-                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+                .header-actions {
+                    display: flex;
+                    align-items: center;
+                    gap: 16px;
                 }
-                .stats-grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-                    gap: 15px;
-                    margin-top: 10px;
+                .search-container {
+                    position: relative;
+                    display: flex;
+                    align-items: center;
                 }
-                .stat-item {
-                    background-color: var(--vscode-editor-background);
-                    padding: 12px;
-                    border-radius: 6px;
-                    border: 1px solid var(--vscode-widget-border);
-                    text-align: center;
-                }
-                .stat-value {
-                    font-size: 24px;
-                    font-weight: 700;
-                    color: var(--vscode-textLink-activeForeground);
-                }
-                .stat-label {
-                    font-size: 12px;
+                .search-icon {
+                    position: absolute;
+                    left: 12px;
+                    top: 50%;
+                    transform: translateY(-50%);
                     color: var(--vscode-descriptionForeground);
-                    margin-top: 4px;
-                }
-                table {
-                    width: 100%;
-                    border-collapse: collapse;
-                    margin-top: 10px;
                     font-size: 14px;
                 }
-                th {
-                    text-align: left;
-                    padding: 10px;
-                    border-bottom: 1px solid var(--vscode-widget-border);
-                    background-color: var(--vscode-widget-shadow);
-                    font-weight: 600;
+                .search-input {
+                    background-color: var(--vscode-input-background);
+                    border: 1px solid var(--vscode-input-border);
+                    border-radius: 6px;
+                    padding: 8px 12px 8px 36px;
+                    font-size: 14px;
+                    color: var(--vscode-input-foreground);
+                    width: 256px;
+                    outline: none;
                 }
-                td {
-                    padding: 10px;
-                    border-bottom: 1px solid var(--vscode-widget-border);
+                .search-input:focus {
+                    border-color: var(--vscode-focusBorder);
                 }
-                tr:hover {
-                    background-color: var(--vscode-list-hoverBackground);
-                }
-                .progress-bar {
-                    height: 8px;
-                    background-color: var(--vscode-progressBar-background);
-                    border-radius: 4px;
-                    overflow: hidden;
-                    width: 100%;
-                }
-                .progress-fill {
-                    height: 100%;
-                    background-color: var(--vscode-progressBar-foreground);
-                    border-radius: 4px;
+                .search-input::placeholder {
+                    color: var(--vscode-input-placeholderForeground);
                 }
                 .toolbar {
                     display: flex;
-                    gap: 10px;
+                    gap: 8px;
                 }
                 button {
                     background-color: var(--vscode-button-background);
                     color: var(--vscode-button-foreground);
                     border: none;
-                    padding: 6px 12px;
-                    border-radius: 4px;
+                    padding: 8px 16px;
+                    border-radius: 6px;
                     cursor: pointer;
-                    font-size: 12px;
+                    font-size: 14px;
+                    font-weight: 500;
                     display: flex;
                     align-items: center;
                     gap: 6px;
+                    transition: background-color 0.2s;
                 }
                 button:hover {
                     background-color: var(--vscode-button-hoverBackground);
@@ -377,22 +405,234 @@ export class ProgressDashboardView {
                 button.secondary:hover {
                     background-color: var(--vscode-list-hoverBackground);
                 }
+                button.ghost {
+                    background-color: transparent;
+                    border: none;
+                    padding: 4px 8px;
+                    color: var(--vscode-foreground);
+                }
+                button.ghost:hover {
+                    background-color: var(--vscode-list-hoverBackground);
+                }
+                .project-card {
+                    background-color: var(--vscode-sideBar-background);
+                    border: 1px solid var(--vscode-widget-border);
+                    border-radius: 8px;
+                    overflow: hidden;
+                    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+                    margin-bottom: 16px;
+                }
+                .project-header {
+                    padding: 20px;
+                    border-bottom: 1px solid var(--vscode-widget-border);
+                    background-color: var(--vscode-widget-shadow);
+                }
+                .project-title-row {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: flex-start;
+                    gap: 16px;
+                }
+                .project-title {
+                    font-size: 18px;
+                    font-weight: 600;
+                    margin: 0 0 4px 0;
+                }
+                .project-description {
+                    font-size: 14px;
+                    color: var(--vscode-descriptionForeground);
+                    margin: 0;
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                }
+
+                .project-content {
+                    padding: 20px;
+                }
+                .progress-overview {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 16px;
+                    margin-bottom: 20px;
+                }
+                .progress-item {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 8px;
+                }
+                .progress-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    font-size: 14px;
+                }
+                .progress-label {
+                    color: var(--vscode-descriptionForeground);
+                    font-weight: 500;
+                }
+                .progress-value {
+                    font-weight: 600;
+                    color: var(--vscode-foreground);
+                }
+                .progress-bar {
+                    height: 6px;
+                    background-color: var(--vscode-progressBar-background);
+                    border-radius: 3px;
+                    overflow: hidden;
+                    position: relative;
+                }
+                .progress-fill {
+                    height: 100%;
+                    background-color: var(--vscode-progressBar-foreground);
+                    border-radius: 3px;
+                    transition: width 0.3s ease;
+                }
+                .progress-text {
+                    font-size: 12px;
+                    color: var(--vscode-descriptionForeground);
+                    margin-top: 2px;
+                }
+                .metrics-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                    gap: 16px;
+                    padding: 16px 0;
+                    border-top: 1px solid var(--vscode-widget-border);
+                }
+                .metric-item {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                }
+                .metric-icon {
+                    font-size: 16px;
+                    width: 16px;
+                    height: 16px;
+                    flex-shrink: 0;
+                }
+                .metric-icon.edit { color: #3b82f6; }
+                .metric-icon.trending { color: #16a34a; }
+                .metric-icon.alert { color: #f97316; }
+                .metric-icon.file { color: #8b5cf6; }
+                .metric-content {
+                    display: flex;
+                    flex-direction: column;
+                }
+                .metric-value {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: var(--vscode-foreground);
+                }
+                .metric-label {
+                    font-size: 12px;
+                    color: var(--vscode-descriptionForeground);
+                }
+                .collapsible-trigger {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    width: 100%;
+                    padding: 12px 0;
+                    margin-top: 8px;
+                    text-align: left;
+                    font-size: 14px;
+                    font-weight: 500;
+                    color: var(--vscode-foreground);
+                }
+                .collapsible-trigger:hover {
+                    color: var(--vscode-textLink-activeForeground);
+                }
+                .collapsible-trigger-content {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                }
+                .collapsible-icon {
+                    font-size: 16px;
+                    width: 16px;
+                    height: 16px;
+                }
+                .chevron {
+                    font-size: 16px;
+                    transition: transform 0.2s;
+                }
+                .chevron.rotated {
+                    transform: rotate(180deg);
+                }
+                .collapsible-content {
+                    display: none;
+                    padding-top: 16px;
+                }
+                .collapsible-content.expanded {
+                    display: block;
+                }
+                .file-grid {
+                    display: grid;
+                    gap: 12px;
+                }
+                .file-item {
+                    display: flex;
+                    align-items: center;
+                    gap: 12px;
+                    padding: 12px;
+                    border-radius: 6px;
+                    background-color: var(--vscode-editor-background);
+                    border: 1px solid var(--vscode-widget-border);
+                }
+                .file-info {
+                    flex: 1;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 4px;
+                }
+                .file-name {
+                    font-size: 14px;
+                    font-weight: 500;
+                    color: var(--vscode-foreground);
+                }
+                .file-progress {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    font-size: 12px;
+                    color: var(--vscode-descriptionForeground);
+                    margin-bottom: 4px;
+                }
+                .file-progress-bar {
+                    height: 4px;
+                    background-color: var(--vscode-progressBar-background);
+                    border-radius: 2px;
+                    overflow: hidden;
+                    width: 100%;
+                }
+                .file-progress-fill {
+                    height: 100%;
+                    background-color: var(--vscode-progressBar-foreground);
+                    border-radius: 2px;
+                    transition: width 0.3s ease;
+                }
+                .check-icon {
+                    color: #16a34a;
+                    font-size: 16px;
+                    flex-shrink: 0;
+                }
                 .loading {
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     justify-content: center;
-                    padding: 40px;
+                    padding: 60px 20px;
                     color: var(--vscode-descriptionForeground);
                 }
                 .loading-spinner {
-                    border: 3px solid rgba(0, 0, 0, 0.1);
+                    border: 3px solid var(--vscode-progressBar-background);
                     border-radius: 50%;
                     border-top: 3px solid var(--vscode-progressBar-foreground);
-                    width: 24px;
-                    height: 24px;
+                    width: 32px;
+                    height: 32px;
                     animation: spin 1s linear infinite;
-                    margin-bottom: 10px;
+                    margin-bottom: 16px;
                 }
                 @keyframes spin {
                     0% { transform: rotate(0deg); }
@@ -403,136 +643,105 @@ export class ProgressDashboardView {
                     padding: 16px;
                     background-color: var(--vscode-inputValidation-errorBackground);
                     border: 1px solid var(--vscode-inputValidation-errorBorder);
-                    margin-bottom: 16px;
                     border-radius: 6px;
+                    margin-bottom: 16px;
                 }
                 .empty-state {
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     justify-content: center;
-                    padding: 40px;
+                    padding: 60px 20px;
                     text-align: center;
                     color: var(--vscode-descriptionForeground);
                 }
-                .project-details {
-                    margin-top: 15px;
-                    background-color: var(--vscode-editor-background);
-                    border: 1px solid var(--vscode-widget-border);
-                    border-radius: 6px;
-                    padding: 15px;
-                    display: none;
-                }
-                .project-details.visible {
-                    display: block;
-                }
-                .book-grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-                    gap: 10px;
-                    margin-top: 15px;
-                }
-                .book-item {
-                    background-color: var(--vscode-editor-background);
-                    border: 1px solid var(--vscode-widget-border);
-                    border-radius: 4px;
-                    padding: 8px;
-                    font-size: 12px;
-                }
-                .book-name {
-                    font-weight: 600;
-                    margin-bottom: 4px;
-                }
-                .book-progress {
-                    font-size: 11px;
+                .empty-state-icon {
+                    font-size: 48px;
+                    margin-bottom: 16px;
                     color: var(--vscode-descriptionForeground);
                 }
-                .highlight {
-                    color: var(--vscode-textLink-activeForeground);
-                    font-weight: 600;
+                .empty-state-title {
+                    font-size: 18px;
+                    font-weight: 500;
+                    margin-bottom: 8px;
                 }
-                .actions {
-                    display: flex;
-                    justify-content: flex-end;
-                    gap: 10px;
-                    margin-top: 15px;
+                .empty-state-description {
+                    font-size: 14px;
+                    margin-bottom: 16px;
+                }
+                .hidden {
+                    display: none !important;
+                }
+                .icon {
+                    display: inline-block;
+                    width: 16px;
+                    height: 16px;
+                    text-align: center;
+                    font-size: 16px;
+                    line-height: 1;
+                }
+                @media (max-width: 768px) {
+                    .header-top {
+                        flex-direction: column;
+                        align-items: stretch;
+                    }
+                    .header-actions {
+                        flex-direction: column;
+                        align-items: stretch;
+                    }
+                    .search-input {
+                        width: 100%;
+                    }
+                    .progress-overview {
+                        grid-template-columns: 1fr;
+                    }
+                    .metrics-grid {
+                        grid-template-columns: repeat(2, 1fr);
+                    }
                 }
             </style>
         </head>
         <body>
             <div class="dashboard">
                 <div class="header">
-                    <h1 class="title">Translation Progress Dashboard</h1>
-                    <div class="toolbar">
-                        <button id="refreshBtn">
-                            <span>↻</span> Refresh
-                        </button>
-                        <button id="exportBtn" class="secondary">
-                            <span>↓</span> Export
-                        </button>
+                    <div class="header-top">
+                        <div class="title-section">
+                            <h1 class="title">Translation Projects</h1>
+                            <p class="subtitle">Monitor progress across all your translation projects</p>
+                        </div>
+                        <div class="header-actions">
+                            <div class="search-container">
+                                <span class="search-icon">🔍</span>
+                                <input type="text" class="search-input" id="searchInput" placeholder="Search projects...">
+                            </div>
+                            <div class="toolbar">
+                                <button id="refreshBtn">
+                                    <span>↻</span> Refresh
+                                </button>
+                                <button id="exportBtn" class="secondary">
+                                    <span>↓</span> Export
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 
-                <div id="errorContainer" class="error" style="display: none;"></div>
+                <div id="errorContainer" class="error hidden"></div>
                 
                 <div id="loadingIndicator" class="loading">
                     <div class="loading-spinner"></div>
                     <div>Loading translation progress data...</div>
                 </div>
                 
-                <div id="dashboardContent" style="display: none;">
-                    <div class="summary-card">
-                        <h2>Overall Progress</h2>
-                        <div class="stats-grid">
-                            <div class="stat-item">
-                                <div class="stat-value" id="totalProjects">0</div>
-                                <div class="stat-label">Active Projects</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-value" id="overallCompletion">0%</div>
-                                <div class="stat-label">Average Completion</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-value" id="totalVerses">0</div>
-                                <div class="stat-label">Total Verses</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-value" id="translatedVerses">0</div>
-                                <div class="stat-label">Translated Verses</div>
-                            </div>
-                        </div>
+                <div id="dashboardContent" class="hidden">
+                    <div id="projectsContainer">
+                        <!-- Project cards will be added here -->
                     </div>
                     
-                    <div class="summary-card">
-                        <h2>Projects</h2>
-                        <table id="projectsTable">
-                            <thead>
-                                <tr>
-                                    <th>Project</th>
-                                    <th>Last Activity</th>
-                                    <th>Completion</th>
-                                    <th>Progress</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="projectsTableBody">
-                                <!-- Project rows will be added here -->
-                            </tbody>
-                        </table>
-                        
-                        <div id="emptyProjectsState" class="empty-state" style="display: none;">
-                            <div>No translation projects found</div>
-                            <button id="createProjectBtn" class="secondary" style="margin-top: 15px;">
-                                Create New Project
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <div id="projectDetails" class="project-details">
-                        <h3 id="projectDetailsTitle">Project Details</h3>
-                        <div id="projectDetailsContent">
-                            <!-- Project details will be added here -->
-                        </div>
+                    <div id="emptyProjectsState" class="empty-state hidden">
+                        <div class="empty-state-icon">📚</div>
+                        <h3 class="empty-state-title">No projects found</h3>
+                        <p class="empty-state-description">Try adjusting your search terms</p>
                     </div>
                 </div>
             </div>
@@ -544,6 +753,7 @@ export class ProgressDashboardView {
                     // Initialize project tracking
                     window.projectDetailsMap = new Map();
                     window.expandedProjects = new Set();
+                    let currentProjects = [];
                     
                     // DOM elements
                     const refreshBtn = document.getElementById('refreshBtn');
@@ -552,17 +762,8 @@ export class ProgressDashboardView {
                     const loadingIndicator = document.getElementById('loadingIndicator');
                     const dashboardContent = document.getElementById('dashboardContent');
                     const emptyProjectsState = document.getElementById('emptyProjectsState');
-                    const createProjectBtn = document.getElementById('createProjectBtn');
-                    const projectsTableBody = document.getElementById('projectsTableBody');
-                    const projectDetails = document.getElementById('projectDetails');
-                    const projectDetailsTitle = document.getElementById('projectDetailsTitle');
-                    const projectDetailsContent = document.getElementById('projectDetailsContent');
-                    
-                    // Elements for metric display
-                    const totalProjects = document.getElementById('totalProjects');
-                    const overallCompletion = document.getElementById('overallCompletion');
-                    const totalVerses = document.getElementById('totalVerses');
-                    const translatedVerses = document.getElementById('translatedVerses');
+                    const projectsContainer = document.getElementById('projectsContainer');
+                    const searchInput = document.getElementById('searchInput');
                     
                     // Setup event listeners
                     refreshBtn.addEventListener('click', () => {
@@ -573,25 +774,49 @@ export class ProgressDashboardView {
                         vscode.postMessage({ command: 'exportData' });
                     });
                     
-                    createProjectBtn.addEventListener('click', () => {
-                        vscode.postMessage({ command: 'createProject' });
+                    // Search functionality
+                    searchInput.addEventListener('input', (e) => {
+                        const searchTerm = e.target.value.toLowerCase();
+                        const filteredProjects = currentProjects.filter(project => 
+                            project.projectName.toLowerCase().includes(searchTerm) ||
+                            getDisplayName(project).toLowerCase().includes(searchTerm)
+                        );
+                        renderProjects(filteredProjects);
                     });
                     
                     // Format date for better display
                     function formatDate(dateString) {
-                        const date = new Date(dateString);
-                        const now = new Date();
-                        const diffMs = now - date;
-                        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                        if (!dateString) return 'Unknown';
                         
-                        if (diffDays === 0) {
-                            return 'Today, ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                        } else if (diffDays === 1) {
-                            return 'Yesterday, ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                        } else if (diffDays < 7) {
-                            return diffDays + ' days ago';
-                        } else {
-                            return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+                        try {
+                            const date = new Date(dateString);
+                            
+                            // Check if date is valid
+                            if (isNaN(date.getTime())) {
+                                return 'Invalid date';
+                            }
+                            
+                            const now = new Date();
+                            const diffMs = now - date;
+                            const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                            
+                            // Handle future dates (likely data errors)
+                            if (diffMs < 0) {
+                                return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) + ' (future date)';
+                            }
+                            
+                            if (diffDays === 0) {
+                                return 'Today, ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                            } else if (diffDays === 1) {
+                                return 'Yesterday, ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                            } else if (diffDays < 7) {
+                                return diffDays + ' days ago';
+                            } else {
+                                return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+                            }
+                        } catch (error) {
+                            console.error('Error formatting date:', dateString, error);
+                            return 'Invalid date';
                         }
                     }
                     
@@ -610,171 +835,250 @@ export class ProgressDashboardView {
                         return project.projectName;
                     }
                     
-                    // Render projects as table rows
+
+                    
+                    // Format book name for display
+                    function formatBookName(bookCode) {
+                        return bookCode.replace(/_en$/, '').replace(/TheChosen_/, 'Episode ');
+                    }
+                    
+                    // Toggle project section expansion
+                    function toggleProjectSection(projectId, section) {
+                        const sectionKey = projectId + '_' + section;
+                        const isExpanded = window.expandedProjects.has(sectionKey);
+                        const collapsibleContent = document.querySelector(\`#\${section}-\${projectId}\`);
+                        const chevron = document.querySelector(\`[data-project-id="\${projectId}"][data-section="\${section}"] .chevron\`);
+                        
+                        if (isExpanded) {
+                            window.expandedProjects.delete(sectionKey);
+                            collapsibleContent.classList.remove('expanded');
+                            chevron.classList.remove('rotated');
+                        } else {
+                            window.expandedProjects.add(sectionKey);
+                            collapsibleContent.classList.add('expanded');
+                            chevron.classList.add('rotated');
+                            
+                            // Fetch project details if not already cached and this is details or files section
+                            if (!window.projectDetailsMap.has(projectId)) {
+                                vscode.postMessage({ 
+                                    command: 'fetchProjectDetails', 
+                                    projectId: projectId
+                                });
+                            }
+                        }
+                    }
+                    
+                    // Render projects as cards
                     function renderProjects(projects) {
-                        projectsTableBody.innerHTML = '';
+                        projectsContainer.innerHTML = '';
                         
                         if (!projects || projects.length === 0) {
-                            emptyProjectsState.style.display = 'flex';
+                            emptyProjectsState.classList.remove('hidden');
                             return;
                         }
                         
-                        emptyProjectsState.style.display = 'none';
+                        emptyProjectsState.classList.add('hidden');
                         
                         projects.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
                         
                         projects.forEach(project => {
-                            const row = document.createElement('tr');
-                            row.dataset.projectId = project.projectId;
-                            
                             const displayName = getDisplayName(project);
                             const lastActivity = formatDate(project.lastActivity);
-                            const completionPercentage = project.completionPercentage.toFixed(2);
+                            const completionPercentage = project.completionPercentage.toFixed(1);
                             
-                            row.innerHTML = \`
-                                <td>\${displayName}</td>
-                                <td>\${lastActivity}</td>
-                                <td>\${completionPercentage}%</td>
-                                <td>
-                                    <div class="progress-bar">
-                                        <div class="progress-fill" style="width: \${completionPercentage}%"></div>
-                                    </div>
-                                </td>
-                                <td>
-                                    <button class="details-btn secondary" data-project-id="\${project.projectId}">Details</button>
-                                </td>
-                            \`;
+                            // Remove validation stage - not needed for this dashboard
                             
-                            projectsTableBody.appendChild(row);
-                        });
-                        
-                        // Add event listeners to the details buttons
-                        document.querySelectorAll('.details-btn').forEach(btn => {
-                            btn.addEventListener('click', (e) => {
-                                const projectId = e.target.dataset.projectId;
-                                showProjectDetails(projectId);
-                            });
-                        });
-                    }
-                    
-                    // Show project details
-                    function showProjectDetails(projectId) {
-                        // Always show loading state first
-                        projectDetails.classList.add('visible');
-                        projectDetailsTitle.textContent = 'Loading project details...';
-                        projectDetailsContent.innerHTML = \`
-                            <div class="loading" style="height: 80px;">
-                                <div class="loading-spinner"></div>
-                                <div>Loading details...</div>
-                            </div>
-                        \`;
-                        
-                        // Always fetch fresh project details from the server
-                        vscode.postMessage({ 
-                            command: 'fetchProjectDetails', 
-                            projectId: projectId
-                        });
-                    }
-                    
-                    // Display project details in the UI
-                    function displayProjectDetails(projectId, details, clearPrevious) {
-                        projectDetails.classList.add('visible');
-                        
-                        // Get project name
-                        const projectRow = document.querySelector(\`tr[data-project-id="\${projectId}"]\`);
-                        const projectName = projectRow ? projectRow.cells[0].textContent : 'Project Details';
-                        
-                        projectDetailsTitle.textContent = projectName;
-                        
-                        // Clear existing content if requested
-                        if (clearPrevious) {
-                            projectDetailsContent.innerHTML = '';
-                        }
-                        
-                        // Extract data safely
-                        const translationProgress = details.translationProgress || {};
-                        const bookCompletionMap = translationProgress.bookCompletionMap || {};
-                        const books = Object.keys(bookCompletionMap);
-                        
-                        // Build the content HTML
-                        let detailsHtml = \`
-                            <div class="stats-grid" style="margin-bottom: 15px;">
-                                <div class="stat-item">
-                                    <div class="stat-value">\${translationProgress.totalVerseCount || 0}</div>
-                                    <div class="stat-label">Total Verses</div>
-                                </div>
-                                <div class="stat-item">
-                                    <div class="stat-value">\${translationProgress.translatedVerseCount || 0}</div>
-                                    <div class="stat-label">Translated</div>
-                                </div>
-                                <div class="stat-item">
-                                    <div class="stat-value">\${translationProgress.validatedVerseCount || 0}</div>
-                                    <div class="stat-label">Validated</div>
-                                </div>
-                                <div class="stat-item">
-                                    <div class="stat-value">\${translationProgress.wordsTranslated || 0}</div>
-                                    <div class="stat-label">Words</div>
-                                </div>
-                            </div>
-                        \`;
-                        
-                        // Add book completion grid if books exist
-                        if (books.length > 0) {
-                            detailsHtml += '<h4>Book Completion</h4><div class="book-grid">';
+                            const cachedDetails = window.projectDetailsMap.get(project.projectId);
                             
-                            books.forEach(book => {
-                                const completion = bookCompletionMap[book];
-                                detailsHtml += \`
-                                    <div class="book-item">
-                                        <div class="book-name">\${book}</div>
-                                        <div class="book-progress">\${completion.toFixed(2)}%</div>
-                                        <div class="progress-bar">
-                                            <div class="progress-fill" style="width: \${completion}%"></div>
+                            const card = document.createElement('div');
+                            card.className = 'project-card';
+                            card.dataset.projectId = project.projectId;
+                            
+                            card.innerHTML = \`
+                                <div class="project-header">
+                                    <div class="project-title-row">
+                                        <div>
+                                            <h3 class="project-title">\${displayName}</h3>
+                                            <p class="project-description">
+                                                <span class="icon">🕐</span>
+                                                Last updated: \${lastActivity}
+                                            </p>
                                         </div>
                                     </div>
-                                \`;
-                            });
+                                </div>
+                                
+                                <div class="project-content">
+                                    <div class="progress-overview">
+                                        <div class="progress-item">
+                                            <div class="progress-header">
+                                                <span class="progress-label">Translation Progress</span>
+                                                <span class="progress-value">\${completionPercentage}%</span>
+                                            </div>
+                                            <div class="progress-bar">
+                                                <div class="progress-fill" style="width: \${completionPercentage}%"></div>
+                                            </div>
+                                            <div class="progress-text">
+                                                \${cachedDetails ? 
+                                                    \`\${cachedDetails.translationProgress?.translatedVerseCount || 0} / \${cachedDetails.translationProgress?.totalVerseCount || 0} verses\` :
+                                                    'Loading verse count...'
+                                                }
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <button class="collapsible-trigger ghost" data-project-id="\${project.projectId}" data-section="details">
+                                        <div class="collapsible-trigger-content">
+                                            <div class="collapsible-icon">📊</div>
+                                            <span>Project Details</span>
+                                        </div>
+                                        <div class="chevron \${window.expandedProjects.has(project.projectId + '_details') ? 'rotated' : ''}">⌄</div>
+                                    </button>
+                                    
+                                    <div class="collapsible-content \${window.expandedProjects.has(project.projectId + '_details') ? 'expanded' : ''}" id="details-\${project.projectId}">
+                                        <div class="metrics-grid">
+                                            \${cachedDetails ? \`
+                                                <div class="metric-item">
+                                                    <div class="metric-icon edit">✏️</div>
+                                                    <div class="metric-content">
+                                                        <div class="metric-value">\${cachedDetails.activityMetrics?.editCountLast24Hours || 0}</div>
+                                                        <div class="metric-label">Edits (24h)</div>
+                                                    </div>
+                                                </div>
+                                                
+                                                <div class="metric-item">
+                                                    <div class="metric-icon trending">📈</div>
+                                                    <div class="metric-content">
+                                                        <div class="metric-value">\${cachedDetails.activityMetrics?.averageDailyEdits || 0}</div>
+                                                        <div class="metric-label">Avg daily edits</div>
+                                                    </div>
+                                                </div>
+                                                
+                                                <div class="metric-item">
+                                                    <div class="metric-icon file">📄</div>
+                                                    <div class="metric-content">
+                                                        <div class="metric-value">\${(cachedDetails.translationProgress?.wordsTranslated || 0).toLocaleString()}</div>
+                                                        <div class="metric-label">Words translated</div>
+                                                    </div>
+                                                </div>
+                                            \` : \`
+                                                <div style="text-align: center; padding: 20px; color: var(--vscode-descriptionForeground);">
+                                                    <div class="loading-spinner" style="width: 24px; height: 24px; margin: 0 auto 12px;"></div>
+                                                    Loading project details...
+                                                </div>
+                                            \`}
+                                        </div>
+                                    </div>
+                                    
+                                    <button class="collapsible-trigger ghost" data-project-id="\${project.projectId}" data-section="files">
+                                        <div class="collapsible-trigger-content">
+                                            <div class="collapsible-icon">📚</div>
+                                            <span>File Progress (\${cachedDetails ? 
+                                                Object.keys(cachedDetails.translationProgress?.bookCompletionMap || {}).length : 
+                                                '...'
+                                            } files)</span>
+                                        </div>
+                                        <div class="chevron \${window.expandedProjects.has(project.projectId + '_files') ? 'rotated' : ''}">⌄</div>
+                                    </button>
+                                    
+                                    <div class="collapsible-content \${window.expandedProjects.has(project.projectId + '_files') ? 'expanded' : ''}" id="files-\${project.projectId}">
+                                        <div class="file-grid">
+                                            \${window.expandedProjects.has(project.projectId + '_files') && cachedDetails ? renderFileProgress(cachedDetails.translationProgress?.bookCompletionMap || {}) : 
+                                                '<div style="text-align: center; padding: 20px; color: var(--vscode-descriptionForeground);">Loading file progress...</div>'
+                                            }
+                                        </div>
+                                    </div>
+                                </div>
+                            \`;
                             
-                            detailsHtml += '</div>';
-                        }
+                            projectsContainer.appendChild(card);
+                        });
                         
-                        // Add close button
-                        detailsHtml += \`
-                            <div class="actions">
-                                <button id="closeDetailsBtn" class="secondary">Close</button>
-                            </div>
-                        \`;
-                        
-                        projectDetailsContent.innerHTML = detailsHtml;
-                        
-                        // Add event listener to close button
-                        document.getElementById('closeDetailsBtn').addEventListener('click', () => {
-                            projectDetails.classList.remove('visible');
+                        // Add event listeners to collapsible triggers
+                        document.querySelectorAll('.collapsible-trigger').forEach(trigger => {
+                            trigger.addEventListener('click', (e) => {
+                                const projectId = e.currentTarget.dataset.projectId;
+                                const section = e.currentTarget.dataset.section;
+                                toggleProjectSection(projectId, section);
+                            });
                         });
                     }
                     
-                    // Calculate aggregate metrics
-                    function updateAggregateMetrics(aggregateData) {
-                        if (!aggregateData) return;
+                    // Render file progress
+                    function renderFileProgress(bookCompletionMap) {
+                        const books = Object.entries(bookCompletionMap)
+                            .sort(([, a], [, b]) => b - a);
                         
-                        let totalVerseCount = 0;
-                        let translatedVerseCount = 0;
+                        return books.map(([bookCode, completion]) => \`
+                            <div class="file-item">
+                                <div class="file-info">
+                                    <div class="file-name">\${formatBookName(bookCode)}</div>
+                                    <div class="file-progress">
+                                        <span>\${completion.toFixed(1)}%</span>
+                                    </div>
+                                    <div class="file-progress-bar">
+                                        <div class="file-progress-fill" style="width: \${completion}%"></div>
+                                    </div>
+                                </div>
+                                \${completion === 100 ? '<div class="check-icon">✓</div>' : ''}
+                            </div>
+                        \`).join('');
+                    }
+                    
+                    // Update project details in UI
+                    function updateProjectDetails(projectId, details) {
+                        // Cache the details
+                        window.projectDetailsMap.set(projectId, details);
                         
-                        // Try to aggregate data from project summaries
-                        if (aggregateData.projectSummaries && aggregateData.projectSummaries.length > 0) {
-                            totalProjects.textContent = aggregateData.projectCount || aggregateData.projectSummaries.length;
-                            overallCompletion.textContent = aggregateData.totalCompletionPercentage.toFixed(2) + '%';
+                        // Update the project card if it exists
+                        const projectCard = document.querySelector(\`[data-project-id="\${projectId}"]\`);
+                        if (projectCard) {
+                            // Update verse count in translation progress if visible
+                            const translationProgress = projectCard.querySelector('.progress-item .progress-text');
+                            if (translationProgress && details.translationProgress) {
+                                const verseText = details.translationProgress.translatedVerseCount + ' / ' + details.translationProgress.totalVerseCount + ' verses';
+                                translationProgress.textContent = verseText;
+                            }
                             
-                            // We can only show these metrics if they're available
-                            if (window.projectDetailsMap.size > 0) {
-                                for (const details of window.projectDetailsMap.values()) {
-                                    const progress = details.translationProgress || {};
-                                    totalVerseCount += progress.totalVerseCount || 0;
-                                    translatedVerseCount += progress.translatedVerseCount || 0;
+                            // Update details section if expanded
+                            if (window.expandedProjects.has(projectId + '_details')) {
+                                const detailsSection = document.querySelector(\`#details-\${projectId}\`);
+                                if (detailsSection) {
+                                    detailsSection.innerHTML = \`
+                                        <div class="metrics-grid">
+                                            <div class="metric-item">
+                                                <div class="metric-icon edit">✏️</div>
+                                                <div class="metric-content">
+                                                    <div class="metric-value">\${details.activityMetrics?.editCountLast24Hours || 0}</div>
+                                                    <div class="metric-label">Edits (24h)</div>
+                                                </div>
+                                            </div>
+                                            
+                                            <div class="metric-item">
+                                                <div class="metric-icon trending">📈</div>
+                                                <div class="metric-content">
+                                                    <div class="metric-value">\${details.activityMetrics?.averageDailyEdits || 0}</div>
+                                                    <div class="metric-label">Avg daily edits</div>
+                                                </div>
+                                            </div>
+                                            
+                                            <div class="metric-item">
+                                                <div class="metric-icon file">📄</div>
+                                                <div class="metric-content">
+                                                    <div class="metric-value">\${(details.translationProgress?.wordsTranslated || 0).toLocaleString()}</div>
+                                                    <div class="metric-label">Words translated</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    \`;
                                 }
-                                
-                                totalVerses.textContent = totalVerseCount;
-                                translatedVerses.textContent = translatedVerseCount;
+                            }
+                            
+                            // Update file progress if expanded
+                            if (window.expandedProjects.has(projectId + '_files')) {
+                                const filesSection = document.querySelector(\`#files-\${projectId} .file-grid\`);
+                                if (filesSection) {
+                                    filesSection.innerHTML = renderFileProgress(details.translationProgress?.bookCompletionMap || {});
+                                }
                             }
                         }
                     }
@@ -786,54 +1090,51 @@ export class ProgressDashboardView {
                         switch (message.type) {
                             case 'updateStatus':
                                 if (message.status === 'loading') {
-                                    loadingIndicator.style.display = 'flex';
-                                    dashboardContent.style.display = 'none';
-                                    errorContainer.style.display = 'none';
+                                    loadingIndicator.classList.remove('hidden');
+                                    dashboardContent.classList.add('hidden');
+                                    errorContainer.classList.add('hidden');
                                 } else if (message.status === 'error') {
-                                    loadingIndicator.style.display = 'none';
+                                    loadingIndicator.classList.add('hidden');
                                     errorContainer.textContent = message.message || 'Failed to load progress data';
-                                    errorContainer.style.display = 'block';
+                                    errorContainer.classList.remove('hidden');
+                                }
+                                break;
+                                
+                            case 'updateHeader':
+                                // Quick header update with metrics - keep loading indicator visible
+                                const headerData = message.headerData;
+                                if (headerData) {
+                                    // Update the subtitle with quick metrics
+                                    const subtitle = document.querySelector('.subtitle');
+                                    if (subtitle) {
+                                        subtitle.textContent = headerData.projectCount + ' projects • ' + headerData.activeProjectCount + ' active • ' + headerData.totalCompletionPercentage + '% average completion';
+                                    }
                                 }
                                 break;
                                 
                             case 'updateData':
                                 // Hide loading indicator, show content
-                                loadingIndicator.style.display = 'none';
-                                dashboardContent.style.display = 'block';
-                                errorContainer.style.display = 'none';
+                                loadingIndicator.classList.add('hidden');
+                                dashboardContent.classList.remove('hidden');
+                                errorContainer.classList.add('hidden');
                                 
                                 // Update UI
                                 const aggregateData = message.aggregateData;
                                 if (aggregateData && aggregateData.projectSummaries) {
-                                    renderProjects(aggregateData.projectSummaries);
-                                    updateAggregateMetrics(aggregateData);
+                                    currentProjects = aggregateData.projectSummaries;
+                                    renderProjects(currentProjects);
                                 }
                                 break;
                                 
                             case 'updateProjectDetails':
                                 if (message.projectId && message.details) {
-                                    // Cache the project details
-                                    window.projectDetailsMap.set(message.projectId, message.details);
-                                    
-                                    // Display the details
-                                    displayProjectDetails(message.projectId, message.details, message.clearPrevious);
+                                    updateProjectDetails(message.projectId, message.details);
                                 }
                                 break;
                                 
                             case 'updateProjectDetailsStatus':
                                 if (message.status === 'error') {
-                                    projectDetails.classList.add('visible');
-                                    projectDetailsTitle.textContent = 'Error Loading Details';
-                                    projectDetailsContent.innerHTML = \`
-                                        <div class="error">\${message.message || 'Failed to load project details'}</div>
-                                        <div class="actions">
-                                            <button id="closeDetailsBtn" class="secondary">Close</button>
-                                        </div>
-                                    \`;
-                                    
-                                    document.getElementById('closeDetailsBtn').addEventListener('click', () => {
-                                        projectDetails.classList.remove('visible');
-                                    });
+                                    console.error('Error loading project details:', message.message);
                                 }
                                 break;
                         }

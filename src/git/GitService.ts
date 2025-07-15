@@ -33,7 +33,9 @@ export class GitService {
     constructor(stateManager: StateManager) {
         this.stateManager = stateManager;
         // Check VS Code configuration for debug logging setting
-        this.debugLogging = vscode.workspace.getConfiguration('frontier').get('debugGitLogging', false);
+        this.debugLogging = vscode.workspace
+            .getConfiguration("frontier")
+            .get("debugGitLogging", false);
     }
 
     /**
@@ -53,6 +55,185 @@ export class GitService {
             } else {
                 console.log(message);
             }
+        }
+    }
+
+    /**
+     * Wraps git operations with a timeout to prevent hanging indefinitely
+     */
+    private async withTimeout<T>(
+        operation: Promise<T>,
+        timeoutMs: number = 30000,
+        operationName: string = "Git operation"
+    ): Promise<T> {
+        const startTime = Date.now();
+        console.log(`[GitService] Starting ${operationName} with ${timeoutMs}ms timeout`);
+
+        const timeout = new Promise<never>((_, reject) => {
+            setTimeout(() => {
+                reject(new Error(`${operationName} timed out after ${timeoutMs}ms`));
+            }, timeoutMs);
+        });
+
+        try {
+            const result = await Promise.race([operation, timeout]);
+            const duration = Date.now() - startTime;
+            console.log(`[GitService] ${operationName} completed successfully in ${duration}ms`);
+            return result;
+        } catch (error) {
+            const duration = Date.now() - startTime;
+
+            if (error instanceof Error && error.message.includes("timed out")) {
+                console.error(
+                    `[GitService] TIMEOUT: ${operationName} timed out after ${duration}ms`
+                );
+                console.error(`[GitService] Timeout diagnostic info:`, {
+                    operation: operationName,
+                    timeoutMs,
+                    actualDuration: duration,
+                    timestamp: new Date().toISOString(),
+                    possibleCauses: [
+                        "Network connectivity issues",
+                        "Remote server unresponsive",
+                        "Firewall/proxy blocking connection",
+                        "Large repository data transfer",
+                        "Authentication server delays",
+                    ],
+                });
+
+                // Add network connectivity check
+                this.logNetworkDiagnostics();
+
+                throw new Error(
+                    `${operationName} failed: Network timeout after ${duration}ms. Please check your connection and try again.`
+                );
+            }
+
+            // Log other errors with more context
+            console.error(`[GitService] ${operationName} failed after ${duration}ms:`, {
+                error: error instanceof Error ? error.message : String(error),
+                stack: error instanceof Error ? error.stack : undefined,
+                operation: operationName,
+                duration,
+                timestamp: new Date().toISOString(),
+            });
+
+            throw error;
+        }
+    }
+
+    /**
+     * Logs network diagnostic information to help debug connectivity issues
+     */
+    private async logNetworkDiagnostics(): Promise<void> {
+        console.log(`[GitService] Running network diagnostics...`);
+
+        const diagnostics = {
+            timestamp: new Date().toISOString(),
+            userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "N/A",
+            onlineStatus: typeof navigator !== "undefined" ? navigator.onLine : "Unknown",
+            connectionTests: {} as Record<
+                string,
+                { status: string; responseTime?: number; httpStatus?: number; error?: string }
+            >,
+        };
+
+        // Test basic connectivity
+        const testEndpoints = [
+            { name: "GitLab", url: "https://gitlab.com", timeout: 5000 },
+            { name: "Frontier API", url: "https://api.frontierrnd.com", timeout: 5000 },
+            { name: "Google DNS", url: "https://8.8.8.8", timeout: 3000 },
+        ];
+
+        for (const endpoint of testEndpoints) {
+            try {
+                const startTime = Date.now();
+                const response = await Promise.race([
+                    fetch(endpoint.url, { method: "HEAD", cache: "no-store" }),
+                    new Promise<never>((_, reject) =>
+                        setTimeout(() => reject(new Error("timeout")), endpoint.timeout)
+                    ),
+                ]);
+                const duration = Date.now() - startTime;
+
+                diagnostics.connectionTests[endpoint.name] = {
+                    status: "success",
+                    responseTime: duration,
+                    httpStatus: response.status,
+                };
+            } catch (error) {
+                diagnostics.connectionTests[endpoint.name] = {
+                    status: "failed",
+                    error: error instanceof Error ? error.message : String(error),
+                };
+            }
+        }
+
+        console.error(`[GitService] Network diagnostics:`, diagnostics);
+    }
+
+    /**
+     * Safe push operation with timeout and retry logic
+     */
+    private async safePush(
+        dir: string,
+        auth: { username: string; password: string },
+        options?: { force?: boolean; ref?: string; timeoutMs?: number }
+    ): Promise<void> {
+        const { force = false, ref, timeoutMs = 30000 } = options || {};
+
+        console.log(`[GitService] Starting push operation:`, {
+            directory: dir,
+            ref: ref || "HEAD",
+            force,
+            timeoutMs,
+            timestamp: new Date().toISOString(),
+        });
+
+        // Get some context before pushing
+        try {
+            const currentBranch = await git.currentBranch({ fs, dir });
+            const remoteUrl = await this.getRemoteUrl(dir);
+            const status = await git.statusMatrix({ fs, dir });
+            const changedFiles = status.filter(
+                (entry) => entry[1] !== entry[2] || entry[2] !== entry[3]
+            ).length;
+
+            console.log(`[GitService] Push context:`, {
+                currentBranch,
+                remoteUrl,
+                changedFiles,
+                hasAuth: !!auth.username,
+            });
+        } catch (contextError) {
+            console.warn(`[GitService] Could not gather push context:`, contextError);
+        }
+
+        const pushOperation = git.push({
+            fs,
+            http,
+            dir,
+            remote: "origin",
+            ...(ref && { ref }),
+            onAuth: () => {
+                console.log(`[GitService] Authentication requested for push operation`);
+                return auth;
+            },
+            ...(force && { force }),
+        });
+
+        try {
+            await this.withTimeout(pushOperation, timeoutMs, "Push operation");
+            console.log(`[GitService] Push completed successfully`);
+        } catch (error) {
+            console.error(`[GitService] Push operation failed:`, {
+                error: error instanceof Error ? error.message : String(error),
+                directory: dir,
+                ref: ref || "HEAD",
+                force,
+                timestamp: new Date().toISOString(),
+            });
+            throw error;
         }
     }
 
@@ -96,8 +277,33 @@ export class GitService {
             }
 
             // 3. Fetch remote changes to get latest state
-            console.log("Fetching remote changes");
-            await git.fetch({ fs, http, dir, onAuth: () => auth });
+            console.log("[GitService] Fetching remote changes");
+            try {
+                await this.withTimeout(
+                    git.fetch({
+                        fs,
+                        http,
+                        dir,
+                        onAuth: () => {
+                            console.log(
+                                "[GitService] Authentication requested for fetch operation"
+                            );
+                            return auth;
+                        },
+                    }),
+                    30000,
+                    "Fetch operation"
+                );
+                console.log("[GitService] Fetch completed successfully");
+            } catch (fetchError) {
+                console.error("[GitService] Fetch operation failed:", {
+                    error: fetchError instanceof Error ? fetchError.message : String(fetchError),
+                    directory: dir,
+                    hasAuth: !!auth.username,
+                    timestamp: new Date().toISOString(),
+                });
+                throw fetchError;
+            }
 
             // 4. Get references to current state
             const localHead = await git.resolveRef({ fs, dir, ref: "HEAD" });
@@ -110,7 +316,7 @@ export class GitService {
             } catch (err) {
                 // Remote branch doesn't exist, just push our changes
                 console.log("Remote branch doesn't exist, pushing our changes");
-                await git.push({ fs, http, dir, remote: "origin", onAuth: () => auth });
+                await this.safePush(dir, auth);
                 return { hadConflicts: false };
             }
 
@@ -152,28 +358,40 @@ export class GitService {
 
             // 7. Try fast-forward first (simplest case)
             try {
-                console.log("Attempting fast-forward");
-                await git.fastForward({
-                    fs,
-                    http,
-                    dir,
-                    ref: currentBranch,
-                    onAuth: () => auth,
+                console.log("[GitService] Attempting fast-forward merge");
+                console.log("[GitService] Fast-forward context:", {
+                    localHead: localHead.substring(0, 8),
+                    remoteHead: remoteHead.substring(0, 8),
+                    currentBranch,
+                    directory: dir,
                 });
 
+                await this.withTimeout(
+                    git.fastForward({
+                        fs,
+                        http,
+                        dir,
+                        ref: currentBranch,
+                        onAuth: () => {
+                            console.log("[GitService] Authentication requested for fast-forward");
+                            return auth;
+                        },
+                    }),
+                    30000,
+                    "Fast-forward operation"
+                );
+
                 // Fast-forward worked, push any local changes
-                console.log("Fast-forward successful, pushing any local changes");
-                await git.push({
-                    fs,
-                    http,
-                    dir,
-                    remote: "origin",
-                    onAuth: () => auth,
-                });
+                console.log("[GitService] Fast-forward successful, pushing any local changes");
+                await this.safePush(dir, auth);
 
                 return { hadConflicts: false };
             } catch (err) {
-                console.log("Fast-forward failed, need to handle conflicts");
+                console.log("[GitService] Fast-forward failed, analyzing conflicts:", {
+                    error: err instanceof Error ? err.message : String(err),
+                    localHead: localHead.substring(0, 8),
+                    remoteHead: remoteHead.substring(0, 8),
+                });
             }
 
             // 8. If we get here, we have divergent histories - check for conflicts
@@ -468,7 +686,33 @@ export class GitService {
             console.log(`Found ${conflicts.length} conflicts that need resolution`);
             return { hadConflicts: true, conflicts };
         } catch (err) {
-            console.error("Sync error:", err);
+            // Enhanced error logging for sync operations
+            console.error(`[GitService] Sync operation failed:`, {
+                error: err instanceof Error ? err.message : String(err),
+                stack: err instanceof Error ? err.stack : undefined,
+                directory: dir,
+                author: author.name,
+                timestamp: new Date().toISOString(),
+            });
+
+            // Log additional context that might help with debugging
+            try {
+                const currentBranch = await git.currentBranch({ fs, dir });
+                const remoteUrl = await this.getRemoteUrl(dir);
+                const status = await git.statusMatrix({ fs, dir });
+
+                console.error(`[GitService] Sync failure context:`, {
+                    currentBranch,
+                    remoteUrl,
+                    statusMatrixSize: status.length,
+                    dirtyFiles: status.filter(
+                        (entry) => entry[1] !== entry[2] || entry[2] !== entry[3]
+                    ).length,
+                });
+            } catch (contextError) {
+                console.warn(`[GitService] Could not gather sync failure context:`, contextError);
+            }
+
             throw err;
         } finally {
             // Always release the lock when done, regardless of success or failure
@@ -562,7 +806,9 @@ export class GitService {
 
             // Stage the resolved files based on their resolution type
             for (const { filepath, resolution } of resolvedFiles) {
-                this.debugLog(`Processing resolved file: ${filepath} with resolution: ${resolution}`);
+                this.debugLog(
+                    `Processing resolved file: ${filepath} with resolution: ${resolution}`
+                );
 
                 if (resolution === "deleted") {
                     console.log(`Removing file from git: ${filepath}`);
@@ -579,12 +825,20 @@ export class GitService {
             const remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
 
             // Fetch latest changes to ensure we have the most recent remote state
-            await git.fetch({
-                fs,
-                http,
-                dir,
-                onAuth: () => auth,
-            });
+            console.log("[GitService] Fetching latest changes before merge completion");
+            await this.withTimeout(
+                git.fetch({
+                    fs,
+                    http,
+                    dir,
+                    onAuth: () => {
+                        console.log("[GitService] Authentication requested for pre-merge fetch");
+                        return auth;
+                    },
+                }),
+                30000,
+                "Pre-merge fetch operation"
+            );
             const commitMessage = `Merge branch 'origin/${currentBranch}'`;
             console.log(`Creating merge commit with message: ${commitMessage}`);
 
@@ -624,14 +878,7 @@ export class GitService {
             console.log("Pushing merge commit");
             try {
                 // Try normal push first
-                await git.push({
-                    fs,
-                    http,
-                    dir,
-                    remote: "origin",
-                    ref: currentBranch,
-                    onAuth: () => auth,
-                });
+                await this.safePush(dir, auth, { ref: currentBranch });
                 console.log("Successfully pushed merge commit");
             } catch (pushError) {
                 console.error("Error pushing merge commit:", pushError);
@@ -847,14 +1094,7 @@ export class GitService {
         auth: { username: string; password: string },
         options?: { force?: boolean }
     ): Promise<void> {
-        await git.push({
-            fs,
-            http,
-            dir,
-            remote: "origin",
-            onAuth: () => auth,
-            ...(options && { force: options.force }),
-        });
+        await this.safePush(dir, auth, { force: options?.force });
     }
 
     async isOnline(): Promise<boolean> {
