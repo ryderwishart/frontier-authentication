@@ -206,6 +206,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Dispose existing providers if they exist
     if (authenticationProvider) {
         // Removed dispose call here
+        authenticationProvider.dispose();
     }
 
     // Register status bar item

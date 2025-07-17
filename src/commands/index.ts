@@ -201,14 +201,39 @@ export function registerCommands(
         // Add getUserInfo command
         vscode.commands.registerCommand("frontier.getUserInfo", async () => {
             try {
-                const gitLabService = new GitLabService(authProvider);
-                await gitLabService.initializeWithRetry();
-                return gitLabService.getUserInfo();
+                // Get cached user info from state manager - no API calls needed!
+                const authState = authProvider.getAuthStatus();
+
+                if (!authState.isAuthenticated) {
+                    return { email: "", username: "" };
+                }
+
+                // Use cached user info from authentication
+                const { StateManager } = await import("../state");
+                const stateManager = StateManager.getInstance();
+                const userInfo = stateManager.getUserInfo();
+
+                if (userInfo) {
+                    return {
+                        email: userInfo.email,
+                        username: userInfo.username,
+                    };
+                }
+
+                // Fallback: if no cached user info, try to get from session display name
+                const sessions = await authProvider.getSessions();
+                const session = sessions[0];
+                if (session && session.account.label !== "Frontier User") {
+                    return {
+                        email: "", // Not available without API call
+                        username: session.account.label,
+                    };
+                }
+
+                // Final fallback
+                return { email: "", username: "" };
             } catch (error) {
-                console.error("Error getting user info:", error);
-                vscode.window.showErrorMessage(
-                    "Failed to get user info. Please check your authentication status."
-                );
+                console.error("Error getting cached user info:", error);
                 return { email: "", username: "" };
             }
         }),
@@ -220,16 +245,16 @@ export function registerCommands(
                 return;
             }
 
-            const config = vscode.workspace.getConfiguration('frontier');
-            const currentSetting = config.get<boolean>('debugGitLogging', false);
+            const config = vscode.workspace.getConfiguration("frontier");
+            const currentSetting = config.get<boolean>("debugGitLogging", false);
             const newSetting = !currentSetting;
-            
-            await config.update('debugGitLogging', newSetting, vscode.ConfigurationTarget.Global);
+
+            await config.update("debugGitLogging", newSetting, vscode.ConfigurationTarget.Global);
             gitService.setDebugLogging(newSetting);
-            
+
             const status = newSetting ? "enabled" : "disabled";
             vscode.window.showInformationMessage(`Debug logging ${status}`);
-            
+
             return newSetting;
         }),
 
@@ -237,9 +262,13 @@ export function registerCommands(
         vscode.commands.registerCommand("frontier.cleanupDuplicateSessions", async () => {
             try {
                 await authProvider.cleanupDuplicateSessions();
-                vscode.window.showInformationMessage("Duplicate authentication sessions cleaned up");
+                vscode.window.showInformationMessage(
+                    "Duplicate authentication sessions cleaned up"
+                );
             } catch (error) {
-                vscode.window.showErrorMessage(`Failed to cleanup sessions: ${error instanceof Error ? error.message : String(error)}`);
+                vscode.window.showErrorMessage(
+                    `Failed to cleanup sessions: ${error instanceof Error ? error.message : String(error)}`
+                );
             }
         }),
 
@@ -256,12 +285,16 @@ export function registerCommands(
                 if (token) {
                     // This will recreate the session with the correct user info
                     await authProvider.setToken(token);
-                    vscode.window.showInformationMessage("Authentication session refreshed with correct username");
+                    vscode.window.showInformationMessage(
+                        "Authentication session refreshed with correct username"
+                    );
                 } else {
                     vscode.window.showErrorMessage("Could not retrieve authentication token");
                 }
             } catch (error) {
-                vscode.window.showErrorMessage(`Failed to refresh session: ${error instanceof Error ? error.message : String(error)}`);
+                vscode.window.showErrorMessage(
+                    `Failed to refresh session: ${error instanceof Error ? error.message : String(error)}`
+                );
             }
         })
     );

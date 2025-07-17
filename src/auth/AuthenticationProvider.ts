@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { StateManager } from "../state";
+import { UserInfo } from "../types/state";
 
 // Add interface for token response
 interface TokenResponse {
@@ -82,10 +83,17 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
                     // Get user info for proper display name
                     let userLabel = "Frontier User";
+                    let userInfo = undefined;
                     try {
                         const validity = await this.checkTokenValidity(sessionData.accessToken);
                         if (validity.isValid && validity.userInfo) {
                             userLabel = this.getUserDisplayName(validity.userInfo);
+                            // Cache user info for offline access
+                            userInfo = {
+                                email: validity.userInfo.email || "",
+                                username: validity.userInfo.username || userLabel,
+                                name: validity.userInfo.name,
+                            };
                         }
                     } catch (error) {
                         console.warn("Could not fetch user info during initialization:", error);
@@ -112,6 +120,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                             token: sessionData.gitlabToken,
                             url: sessionData.gitlabUrl,
                         },
+                        userInfo: userInfo, // Cache user info for offline access
                         // gitlabInfo will be updated by verifyAndRefreshSessionDetails
                     });
 
@@ -129,9 +138,11 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
                     // Automatically refresh session to ensure correct username and clean up duplicates
                     setTimeout(() => {
-                        this.autoRefreshSessionWithUserInfo(sessionData.accessToken).catch((error) => {
-                            console.error("Error during automatic session refresh:", error);
-                        });
+                        this.autoRefreshSessionWithUserInfo(sessionData.accessToken).catch(
+                            (error) => {
+                                console.error("Error during automatic session refresh:", error);
+                            }
+                        );
                     }, 2000); // Delay to ensure VS Code has processed the session
                 } else {
                     // No stored session, ensure state is clean
@@ -174,7 +185,9 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         return "Frontier User";
     }
 
-    private async checkTokenValidity(token: string): Promise<TokenValidityResult & { userInfo?: any }> {
+    private async checkTokenValidity(
+        token: string
+    ): Promise<TokenValidityResult & { userInfo?: any }> {
         try {
             const response = await fetch(`${this.apiEndpoint}/auth/me`, {
                 headers: {
@@ -217,6 +230,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                     isAuthenticated: false,
                     gitlabCredentials: undefined,
                     gitlabInfo: undefined, // Ensure cleared here as well
+                    userInfo: undefined, // Clear cached user info
                 });
                 if (removedSessions.length > 0) {
                     this._onDidChangeSessions.fire({
@@ -248,7 +262,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                         label: userLabel,
                     },
                 };
-                
+
                 this._sessions = [updatedSession];
                 this._onDidChangeSessions.fire({
                     added: [updatedSession],
@@ -256,12 +270,21 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                     changed: [],
                 });
             }
-        }
 
-        // Token is valid. Since GitLab info fetching is being removed,
-        // we just ensure the authentication state is consistent and gitlabInfo is undefined.
-        if (this._sessions.length > 0) {
-            // Session exists and token is valid.
+            // Update cached user info for offline access
+            const userInfo = {
+                email: validity.userInfo.email || "",
+                username: validity.userInfo.username || userLabel,
+                name: validity.userInfo.name,
+            };
+
+            await this.stateManager.updateAuthState({
+                isAuthenticated: true, // Reaffirm authentication
+                gitlabInfo: undefined, // Explicitly set to undefined as we are no longer fetching it.
+                userInfo: userInfo, // Update cached user info
+            });
+        } else {
+            // Token is valid but no user info available, just reaffirm authentication
             await this.stateManager.updateAuthState({
                 isAuthenticated: true, // Reaffirm authentication
                 gitlabInfo: undefined, // Explicitly set to undefined as we are no longer fetching it.
@@ -269,7 +292,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         }
         // If no session exists here but token was valid (e.g. called directly after a token set but before session obj update),
         // the primary session creation/update flows in login/setTokens/initialize handle state updates.
-        // This function primarily ensures that for an *existing, validated* session, gitlabInfo is cleared.
+        // This function primarily ensures that for an *existing, validated* session, gitlabInfo is cleared and userInfo is updated.
     }
 
     // Update getSessions to ensure initialization is complete
@@ -332,7 +355,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
             // Remove existing sessions to prevent duplicates
             const removedSessions = [...this._sessions];
-            
+
             const session: vscode.AuthenticationSession = {
                 id: "frontier-session",
                 accessToken: token,
@@ -344,10 +367,10 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
             };
 
             this._sessions = [session];
-            this._onDidChangeSessions.fire({ 
-                added: [session], 
-                removed: removedSessions, 
-                changed: [] 
+            this._onDidChangeSessions.fire({
+                added: [session],
+                removed: removedSessions,
+                changed: [],
             });
             this._onDidChangeAuthentication.fire();
         } catch (error) {
@@ -361,6 +384,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         await this.stateManager.updateAuthState({
             isAuthenticated: false,
             gitlabInfo: undefined,
+            userInfo: undefined, // Clear cached user info on logout
         });
     }
 
@@ -507,9 +531,9 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
      */
     private async autoRefreshSessionWithUserInfo(accessToken: string): Promise<void> {
         // Check if auto-refresh is enabled
-        const config = vscode.workspace.getConfiguration('frontier');
-        const autoRefreshEnabled = config.get<boolean>('autoRefreshAuthSessions', true);
-        
+        const config = vscode.workspace.getConfiguration("frontier");
+        const autoRefreshEnabled = config.get<boolean>("autoRefreshAuthSessions", true);
+
         if (!autoRefreshEnabled) {
             console.log("Auto-refresh of authentication sessions is disabled");
             return;
@@ -518,25 +542,25 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         try {
             // Get user info from the API
             const validity = await this.checkTokenValidity(accessToken);
-            
+
             if (!validity.isValid || !validity.userInfo) {
                 console.log("Cannot auto-refresh session: invalid token or no user info");
                 return;
             }
 
             const userLabel = this.getUserDisplayName(validity.userInfo);
-            
+
             // Only refresh if we need to update the username (avoid "Frontier User" entries)
             if (userLabel !== "Frontier User" && this._sessions.length > 0) {
                 const currentLabel = this._sessions[0].account.label;
-                
+
                 // If current label is "Frontier User" or we have duplicates, refresh the session
                 if (currentLabel === "Frontier User" || this._sessions.length > 1) {
                     console.log(`Auto-refreshing session: "${currentLabel}" → "${userLabel}"`);
-                    
+
                     // Clear all existing sessions and create a fresh one
                     const removedSessions = [...this._sessions];
-                    
+
                     const refreshedSession: ExtendedAuthSession = {
                         id: "frontier-session",
                         accessToken: accessToken,
@@ -550,13 +574,24 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                     };
 
                     this._sessions = [refreshedSession];
-                    
+
                     this._onDidChangeSessions.fire({
                         added: [refreshedSession],
                         removed: removedSessions,
                         changed: [],
                     });
-                    
+
+                    // Update cached user info during auto-refresh
+                    const userInfo = {
+                        email: validity.userInfo.email || "",
+                        username: validity.userInfo.username || userLabel,
+                        name: validity.userInfo.name,
+                    };
+
+                    await this.stateManager.updateAuthState({
+                        userInfo: userInfo,
+                    });
+
                     console.log(`Session auto-refreshed successfully with username: ${userLabel}`);
                 }
             }
@@ -577,15 +612,15 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         // Keep only the first session and remove the rest
         const sessionToKeep = this._sessions[0];
         const sessionsToRemove = this._sessions.slice(1);
-        
+
         this._sessions = [sessionToKeep];
-        
+
         this._onDidChangeSessions.fire({
             added: [],
             removed: sessionsToRemove,
             changed: [],
         });
-        
+
         console.log(`Cleaned up ${sessionsToRemove.length} duplicate session(s)`);
     }
 
@@ -617,17 +652,30 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                 JSON.stringify(sessionData)
             );
 
-            // Try to get user info to set proper display name
+            // Try to get user info to set proper display name and cache it
             let userLabel = username || "Frontier User";
+            let userInfo = undefined;
             if (!username) {
                 try {
                     const validity = await this.checkTokenValidity(tokenResponse.access_token);
                     if (validity.isValid && validity.userInfo) {
                         userLabel = this.getUserDisplayName(validity.userInfo);
+                        // Cache the user info for offline use
+                        userInfo = {
+                            email: validity.userInfo.email || "",
+                            username: validity.userInfo.username || userLabel,
+                            name: validity.userInfo.name,
+                        };
                     }
                 } catch (error) {
                     console.warn("Could not fetch user info for display name:", error);
                 }
+            } else {
+                // If username was provided directly (e.g., from registration), cache it
+                userInfo = {
+                    email: "", // Will be updated when token validation succeeds
+                    username: username,
+                };
             }
 
             const session: ExtendedAuthSession = {
@@ -645,12 +693,12 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
             // Remove existing sessions to prevent duplicates
             const removedSessions = [...this._sessions];
-            
+
             this._sessions = [session];
-            this._onDidChangeSessions.fire({ 
-                added: [session], 
-                removed: removedSessions, 
-                changed: [] 
+            this._onDidChangeSessions.fire({
+                added: [session],
+                removed: removedSessions,
+                changed: [],
             });
             this._onDidChangeAuthentication.fire();
 
@@ -661,6 +709,7 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                     url: sessionData.gitlabUrl,
                 },
                 gitlabInfo: undefined, // Will be updated by GitLab info fetch after login/register
+                userInfo: userInfo, // Cache user info for offline access
             });
 
             // After setting new tokens (login/register), immediately verify and fetch GitLab info

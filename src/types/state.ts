@@ -14,6 +14,12 @@ export interface GitLabCredentials {
     url: string;
 }
 
+export interface UserInfo {
+    email: string;
+    username: string;
+    name?: string;
+}
+
 export interface AuthState {
     isAuthenticated: boolean;
     connectionStatus: "connected" | "disconnected";
@@ -24,6 +30,7 @@ export interface AuthState {
     username?: string;
     user_id?: number;
     project_count?: number;
+    userInfo?: UserInfo; // Cached user information from authentication
 }
 
 export interface GlobalState {

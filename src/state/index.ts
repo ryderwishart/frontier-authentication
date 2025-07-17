@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { GlobalState, AuthState, GitLabInfo, GitLabCredentials } from "../types/state";
+import { GlobalState, AuthState, GitLabInfo, GitLabCredentials, UserInfo } from "../types/state";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -84,6 +84,10 @@ export class StateManager {
 
     getGitLabInfo(): GitLabInfo | undefined {
         return this.state.auth.gitlabInfo;
+    }
+
+    getUserInfo(): UserInfo | undefined {
+        return this.state.auth.userInfo;
     }
 
     // Sync lock methods
