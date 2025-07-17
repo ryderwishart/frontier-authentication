@@ -26,9 +26,88 @@ export enum RemoteBranchStatus {
     ERROR,
 }
 
+// LFS-related interfaces
+export interface LFSPointer {
+    version: string;
+    oid: string;
+    size: number;
+}
+
+export interface LFSBatchRequest {
+    operation: "download" | "upload";
+    objects: Array<{
+        oid: string;
+        size: number;
+    }>;
+}
+
+export interface LFSBatchResponse {
+    objects: Array<{
+        oid: string;
+        size: number;
+        authenticated: boolean;
+        actions?: {
+            download?: {
+                href: string;
+                header?: Record<string, string>;
+            };
+            upload?: {
+                href: string;
+                header?: Record<string, string>;
+            };
+        };
+        error?: {
+            code: number;
+            message: string;
+        };
+    }>;
+}
+
 export class GitService {
     private stateManager: StateManager;
     private debugLogging: boolean = false;
+
+    // LFS Configuration
+    private static readonly LFS_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB in bytes
+    private static readonly LFS_POINTER_PREFIX = "version https://git-lfs.github.com/spec/v1";
+    private static readonly LFS_CACHE_KEY = "lfs_objects";
+
+    // LFS tracking patterns for multimedia and large files
+    private static readonly LFS_TRACKING_PATTERNS = [
+        // Video files
+        "*.mp4",
+        "*.mov",
+        "*.avi",
+        "*.mkv",
+        "*.webm",
+        "*.flv",
+        "*.wmv",
+        // Audio files
+        "*.mp3",
+        "*.wav",
+        "*.flac",
+        "*.m4a",
+        "*.ogg",
+        "*.aac",
+        // Images (large formats)
+        "*.tiff",
+        "*.tif",
+        "*.bmp",
+        "*.raw",
+        "*.psd",
+        "*.ai",
+        // Design files
+        "*.sketch",
+        "*.fig",
+        "*.xd",
+        // Archive files
+        "*.zip",
+        "*.tar.gz",
+        "*.rar",
+        "*.7z",
+        // Large document files
+        "*.pdf",
+    ];
 
     constructor(stateManager: StateManager) {
         this.stateManager = stateManager;
@@ -36,6 +115,357 @@ export class GitService {
         this.debugLogging = vscode.workspace
             .getConfiguration("frontier")
             .get("debugGitLogging", false);
+    }
+
+    /**
+     * Check if content is an LFS pointer file
+     */
+    private isLFSPointer(content: Uint8Array): boolean {
+        try {
+            const text = new TextDecoder().decode(content);
+            return text.startsWith(GitService.LFS_POINTER_PREFIX);
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Parse LFS pointer file content
+     */
+    private parseLFSPointer(content: Uint8Array): LFSPointer | null {
+        try {
+            const text = new TextDecoder().decode(content);
+
+            if (!text.startsWith(GitService.LFS_POINTER_PREFIX)) {
+                return null;
+            }
+
+            const lines = text.split("\n");
+            let version = "";
+            let oid = "";
+            let size = 0;
+
+            for (const line of lines) {
+                if (line.startsWith("version ")) {
+                    version = line.split(" ")[1];
+                } else if (line.startsWith("oid sha256:")) {
+                    oid = line.split(":")[1];
+                } else if (line.startsWith("size ")) {
+                    size = parseInt(line.split(" ")[1], 10);
+                }
+            }
+
+            if (!version || !oid || !size) {
+                return null;
+            }
+
+            return { version, oid, size };
+        } catch (error) {
+            console.error("Error parsing LFS pointer:", error);
+            return null;
+        }
+    }
+
+    /**
+     * Create LFS pointer file content
+     */
+    private createLFSPointer(oid: string, size: number): string {
+        return `${GitService.LFS_POINTER_PREFIX}
+oid sha256:${oid}
+size ${size}
+`;
+    }
+
+    /**
+     * Check if file should be tracked by LFS based on size and patterns
+     */
+    private shouldTrackWithLFS(filepath: string, size: number): boolean {
+        // Check size threshold
+        if (size >= GitService.LFS_SIZE_THRESHOLD) {
+            return true;
+        }
+
+        // Check file extension patterns
+        const filename = path.basename(filepath).toLowerCase();
+        const extension = path.extname(filename);
+
+        return GitService.LFS_TRACKING_PATTERNS.some((pattern) => {
+            const regex = new RegExp(pattern.replace(/\*/g, ".*"));
+            return regex.test(filename) || regex.test(extension);
+        });
+    }
+
+    /**
+     * Get LFS object from cache or download from server
+     */
+    private async getLFSObject(
+        pointer: LFSPointer,
+        auth: { username: string; password: string },
+        gitlabBaseUrl: string
+    ): Promise<Uint8Array> {
+        const cacheKey = `${GitService.LFS_CACHE_KEY}_${pointer.oid}`;
+
+        // Try to get from cache first (using VS Code's globalState for caching)
+        try {
+            const cached = vscode.workspace.getConfiguration("frontier").get<number[]>(cacheKey);
+            if (cached) {
+                this.debugLog(`LFS object found in cache: ${pointer.oid}`);
+                return new Uint8Array(cached);
+            }
+        } catch (error) {
+            this.debugLog(`Cache miss for LFS object: ${pointer.oid}`);
+        }
+
+        // Download from GitLab LFS API
+        this.debugLog(`Downloading LFS object: ${pointer.oid} (${pointer.size} bytes)`);
+
+        try {
+            const lfsEndpoint = `${gitlabBaseUrl}/objects/batch`;
+
+            const batchRequest: LFSBatchRequest = {
+                operation: "download",
+                objects: [
+                    {
+                        oid: pointer.oid,
+                        size: pointer.size,
+                    },
+                ],
+            };
+
+            const batchResponse = await fetch(lfsEndpoint, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${auth.password}`, // GitLab token
+                    "Content-Type": "application/vnd.git-lfs+json",
+                    Accept: "application/vnd.git-lfs+json",
+                },
+                body: JSON.stringify(batchRequest),
+            });
+
+            if (!batchResponse.ok) {
+                throw new Error(`LFS batch request failed: ${batchResponse.statusText}`);
+            }
+
+            const batchData: LFSBatchResponse = await batchResponse.json();
+
+            if (!batchData.objects || batchData.objects.length === 0) {
+                throw new Error("No objects in LFS batch response");
+            }
+
+            const object = batchData.objects[0];
+
+            if (object.error) {
+                throw new Error(`LFS object error: ${object.error.message}`);
+            }
+
+            if (!object.actions?.download) {
+                throw new Error("No download action in LFS batch response");
+            }
+
+            // Download the actual content
+            const downloadResponse = await fetch(object.actions.download.href, {
+                headers: object.actions.download.header || {},
+            });
+
+            if (!downloadResponse.ok) {
+                throw new Error(`LFS download failed: ${downloadResponse.statusText}`);
+            }
+
+            const content = new Uint8Array(await downloadResponse.arrayBuffer());
+
+            // Verify size
+            if (content.length !== pointer.size) {
+                throw new Error(
+                    `LFS object size mismatch: expected ${pointer.size}, got ${content.length}`
+                );
+            }
+
+            // Cache the object
+            try {
+                await vscode.workspace
+                    .getConfiguration("frontier")
+                    .update(cacheKey, Array.from(content), vscode.ConfigurationTarget.Global);
+                this.debugLog(`Cached LFS object: ${pointer.oid}`);
+            } catch (cacheError) {
+                console.warn("Failed to cache LFS object:", cacheError);
+            }
+
+            return content;
+        } catch (error) {
+            console.error("Error downloading LFS object:", error);
+            throw new Error(
+                `Failed to download LFS object ${pointer.oid}: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Upload content to LFS and return pointer
+     */
+    private async uploadLFSObject(
+        content: Uint8Array,
+        auth: { username: string; password: string },
+        gitlabBaseUrl: string
+    ): Promise<LFSPointer> {
+        const size = content.length;
+
+        // Calculate SHA256 hash
+        const hashBuffer = await crypto.subtle.digest("SHA-256", content);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const oid = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+
+        this.debugLog(`Uploading LFS object: ${oid} (${size} bytes)`);
+
+        try {
+            const lfsEndpoint = `${gitlabBaseUrl}/objects/batch`;
+
+            const batchRequest: LFSBatchRequest = {
+                operation: "upload",
+                objects: [
+                    {
+                        oid,
+                        size,
+                    },
+                ],
+            };
+
+            const batchResponse = await fetch(lfsEndpoint, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${auth.password}`, // GitLab token
+                    "Content-Type": "application/vnd.git-lfs+json",
+                    Accept: "application/vnd.git-lfs+json",
+                },
+                body: JSON.stringify(batchRequest),
+            });
+
+            if (!batchResponse.ok) {
+                throw new Error(`LFS batch request failed: ${batchResponse.statusText}`);
+            }
+
+            const batchData: LFSBatchResponse = await batchResponse.json();
+
+            if (!batchData.objects || batchData.objects.length === 0) {
+                throw new Error("No objects in LFS batch response");
+            }
+
+            const object = batchData.objects[0];
+
+            if (object.error) {
+                throw new Error(`LFS object error: ${object.error.message}`);
+            }
+
+            // If upload action is provided, upload the content
+            if (object.actions?.upload) {
+                const uploadResponse = await fetch(object.actions.upload.href, {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": "application/octet-stream",
+                        ...object.actions.upload.header,
+                    },
+                    body: content,
+                });
+
+                if (!uploadResponse.ok) {
+                    throw new Error(`LFS upload failed: ${uploadResponse.statusText}`);
+                }
+            }
+
+            // Cache the object locally
+            const cacheKey = `${GitService.LFS_CACHE_KEY}_${oid}`;
+            try {
+                await vscode.workspace
+                    .getConfiguration("frontier")
+                    .update(cacheKey, Array.from(content), vscode.ConfigurationTarget.Global);
+                this.debugLog(`Cached uploaded LFS object: ${oid}`);
+            } catch (cacheError) {
+                console.warn("Failed to cache uploaded LFS object:", cacheError);
+            }
+
+            return {
+                version: GitService.LFS_POINTER_PREFIX.split(" ")[1],
+                oid,
+                size,
+            };
+        } catch (error) {
+            console.error("Error uploading LFS object:", error);
+            throw new Error(
+                `Failed to upload LFS object: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Update .gitattributes file to track LFS files
+     */
+    private async updateGitAttributes(dir: string, filepath: string): Promise<void> {
+        try {
+            const gitattributesPath = path.join(dir, ".gitattributes");
+            const extension = path.extname(filepath);
+            const pattern = extension ? `*${extension}` : filepath;
+            const lfsRule = `${pattern} filter=lfs diff=lfs merge=lfs -text`;
+
+            let content = "";
+            try {
+                content = await fs.promises.readFile(gitattributesPath, "utf8");
+            } catch (error) {
+                // File doesn't exist, that's ok
+            }
+
+            const lines = content.split("\n").filter((line) => line.trim());
+
+            // Check if rule already exists
+            const ruleExists = lines.some(
+                (line) => line.includes(pattern) && line.includes("filter=lfs")
+            );
+
+            if (!ruleExists) {
+                lines.push(lfsRule);
+                const newContent = lines.join("\n") + "\n";
+                await fs.promises.writeFile(gitattributesPath, newContent, "utf8");
+                this.debugLog(`Added LFS tracking rule: ${lfsRule}`);
+            }
+        } catch (error) {
+            console.error("Error updating .gitattributes:", error);
+            // Don't throw, as this is not critical
+        }
+    }
+
+    /**
+     * Initialize LFS tracking for a repository
+     */
+    async initializeLFSTracking(dir: string): Promise<void> {
+        try {
+            const gitattributesPath = path.join(dir, ".gitattributes");
+            const rules = GitService.LFS_TRACKING_PATTERNS.map(
+                (pattern) => `${pattern} filter=lfs diff=lfs merge=lfs -text`
+            ).join("\n");
+
+            let existingContent = "";
+            try {
+                existingContent = await fs.promises.readFile(gitattributesPath, "utf8");
+            } catch (error) {
+                // File doesn't exist, that's ok
+            }
+
+            const existingLines = existingContent.split("\n").filter((line) => line.trim());
+            const newRules = rules
+                .split("\n")
+                .filter((rule) => !existingLines.some((line) => line.includes(rule.split(" ")[0])));
+
+            if (newRules.length > 0) {
+                const combinedContent = [...existingLines, ...newRules].join("\n") + "\n";
+                await fs.promises.writeFile(gitattributesPath, combinedContent, "utf8");
+
+                console.log(`Initialized LFS tracking with ${newRules.length} new rules`);
+                this.debugLog("LFS tracking rules:", newRules);
+            }
+        } catch (error) {
+            console.error("Error initializing LFS tracking:", error);
+            throw new Error(
+                `Failed to initialize LFS tracking: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
     }
 
     /**
@@ -237,7 +667,23 @@ export class GitService {
         }
     }
 
-    // Below is a simplified version. It commits if dirty, fetches remote changes, tries pulling (which will error on merge conflicts), and then either pushes or returns a list of files that differ.
+    /**
+     * Extract GitLab base URL from remote URL
+     */
+    private extractGitLabBaseUrl(remoteUrl: string): string {
+        try {
+            const url = new URL(remoteUrl);
+            return `${url.protocol}//${url.host}`;
+        } catch (error) {
+            console.error("Error extracting GitLab base URL:", error);
+            // Fallback to common GitLab URL
+            return "https://gitlab.com";
+        }
+    }
+
+    /**
+     * Enhanced syncChanges with LFS support
+     */
     async syncChanges(
         dir: string,
         auth: { username: string; password: string },
@@ -260,6 +706,20 @@ export class GitService {
             const currentBranch = await git.currentBranch({ fs, dir });
             if (!currentBranch) {
                 throw new Error("Not on any branch");
+            }
+
+            // Get GitLab base URL from remote URL for LFS operations
+            const remoteUrl = await this.getRemoteUrl(dir);
+            const gitlabBaseUrl = remoteUrl
+                ? this.extractGitLabBaseUrl(remoteUrl)
+                : "https://gitlab.com";
+
+            // Initialize LFS tracking if not already done
+            try {
+                await this.initializeLFSTracking(dir);
+            } catch (error) {
+                console.warn("Failed to initialize LFS tracking:", error);
+                // Continue anyway, as this is not critical for sync
             }
 
             // 1. Commit local changes if needed
@@ -526,7 +986,7 @@ export class GitService {
 
             this.debugLog("All changed files:", allChangedFilePaths);
 
-            // 9. Get all files changed in either branch with enhanced conflict detection
+            // 9. Get all files changed in either branch with enhanced conflict detection and LFS support
             const conflicts = await Promise.all(
                 allChangedFilePaths.map(async (filepath) => {
                     let localContent = "";
@@ -552,24 +1012,46 @@ export class GitService {
                         (isDeletedLocally && !isAddedRemotely) ||
                         (isDeletedRemotely && !isAddedLocally);
 
-                    // Try to read local content if it exists in local HEAD
+                    // Try to read local content with LFS support if it exists in local HEAD
                     try {
                         if (!isDeletedLocally && !isAddedLocally) {
-                            const { blob: lBlob } = await git.readBlob({
-                                fs,
+                            const { blob, isLFS } = await this.readBlobWithLFS(
                                 dir,
-                                oid: localHead,
+                                localHead,
                                 filepath,
-                            });
-                            localContent = new TextDecoder().decode(lBlob);
+                                auth,
+                                gitlabBaseUrl
+                            );
+                            localContent = new TextDecoder().decode(blob);
+                            this.debugLog(
+                                `Local file ${filepath} ${isLFS ? "(LFS)" : "(regular)"} read successfully`
+                            );
                         } else if (isAddedLocally) {
                             // For locally added files, read from working directory
                             try {
-                                const fileContent = await fs.promises.readFile(
-                                    path.join(dir, filepath),
-                                    "utf8"
+                                const fileBuffer = await fs.promises.readFile(
+                                    path.join(dir, filepath)
                                 );
-                                localContent = fileContent;
+
+                                // Check if this is an LFS pointer file
+                                if (this.isLFSPointer(fileBuffer)) {
+                                    const pointer = this.parseLFSPointer(fileBuffer);
+                                    if (pointer) {
+                                        const lfsContent = await this.getLFSObject(
+                                            pointer,
+                                            auth,
+                                            gitlabBaseUrl
+                                        );
+                                        localContent = new TextDecoder().decode(lfsContent);
+                                        this.debugLog(
+                                            `Local added file ${filepath} (LFS) read successfully`
+                                        );
+                                    } else {
+                                        localContent = new TextDecoder().decode(fileBuffer);
+                                    }
+                                } else {
+                                    localContent = new TextDecoder().decode(fileBuffer);
+                                }
                             } catch (e) {
                                 this.debugLog(`Error reading locally added file ${filepath}:`, e);
                             }
@@ -578,26 +1060,34 @@ export class GitService {
                         this.debugLog(`File ${filepath} doesn't exist in local HEAD`);
                     }
 
-                    // Try to read remote content if it exists in remote HEAD
+                    // Try to read remote content with LFS support if it exists in remote HEAD
                     try {
                         if (!isDeletedRemotely && !isAddedRemotely) {
-                            const { blob: rBlob } = await git.readBlob({
-                                fs,
+                            const { blob, isLFS } = await this.readBlobWithLFS(
                                 dir,
-                                oid: remoteHead,
+                                remoteHead,
                                 filepath,
-                            });
-                            remoteContent = new TextDecoder().decode(rBlob);
+                                auth,
+                                gitlabBaseUrl
+                            );
+                            remoteContent = new TextDecoder().decode(blob);
+                            this.debugLog(
+                                `Remote file ${filepath} ${isLFS ? "(LFS)" : "(regular)"} read successfully`
+                            );
                         } else if (isAddedRemotely) {
                             // For remotely added files, we need to read from remote HEAD
                             try {
-                                const { blob: rBlob } = await git.readBlob({
-                                    fs,
+                                const { blob, isLFS } = await this.readBlobWithLFS(
                                     dir,
-                                    oid: remoteHead,
+                                    remoteHead,
                                     filepath,
-                                });
-                                remoteContent = new TextDecoder().decode(rBlob);
+                                    auth,
+                                    gitlabBaseUrl
+                                );
+                                remoteContent = new TextDecoder().decode(blob);
+                                this.debugLog(
+                                    `Remote added file ${filepath} ${isLFS ? "(LFS)" : "(regular)"} read successfully`
+                                );
                             } catch (e) {
                                 this.debugLog(`Error reading remotely added file ${filepath}:`, e);
                             }
@@ -606,16 +1096,20 @@ export class GitService {
                         this.debugLog(`File ${filepath} doesn't exist in remote HEAD`);
                     }
 
-                    // Try to read base content if available
+                    // Try to read base content with LFS support if available
                     try {
                         if (mergeBaseCommits.length > 0) {
-                            const { blob: bBlob } = await git.readBlob({
-                                fs,
+                            const { blob, isLFS } = await this.readBlobWithLFS(
                                 dir,
-                                oid: mergeBaseCommits[0],
+                                mergeBaseCommits[0],
                                 filepath,
-                            });
-                            baseContent = new TextDecoder().decode(bBlob);
+                                auth,
+                                gitlabBaseUrl
+                            );
+                            baseContent = new TextDecoder().decode(blob);
+                            this.debugLog(
+                                `Base file ${filepath} ${isLFS ? "(LFS)" : "(regular)"} read successfully`
+                            );
                         }
                     } catch (err) {
                         this.debugLog(`File ${filepath} doesn't exist in merge base`);
@@ -1289,5 +1783,279 @@ export class GitService {
         }
         // Compare HEAD status (index 1)
         return entry1[1] === entry2[1];
+    }
+
+    /**
+     * Public method to check if a file should be tracked by LFS
+     */
+    public shouldFileUseEFS(filepath: string, size: number): boolean {
+        return this.shouldTrackWithLFS(filepath, size);
+    }
+
+    /**
+     * Public method to initialize LFS tracking for a repository
+     */
+    public async setupLFSTracking(dir: string): Promise<void> {
+        try {
+            await this.initializeLFSTracking(dir);
+            console.log("LFS tracking initialized successfully");
+        } catch (error) {
+            console.error("Failed to setup LFS tracking:", error);
+            throw new Error(
+                `Failed to setup LFS tracking: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Public method to check if content is an LFS pointer
+     */
+    public isContentLFSPointer(content: Uint8Array): boolean {
+        return this.isLFSPointer(content);
+    }
+
+    /**
+     * Public method to get LFS object content
+     */
+    public async getLFSContent(
+        pointer: LFSPointer,
+        auth: { username: string; password: string },
+        gitlabBaseUrl: string
+    ): Promise<Uint8Array> {
+        try {
+            return await this.getLFSObject(pointer, auth, gitlabBaseUrl);
+        } catch (error) {
+            console.error("Failed to get LFS content:", error);
+            throw new Error(
+                `Failed to get LFS content: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Public method to upload content to LFS
+     */
+    public async uploadToLFS(
+        content: Uint8Array,
+        auth: { username: string; password: string },
+        gitlabBaseUrl: string
+    ): Promise<LFSPointer> {
+        try {
+            return await this.uploadLFSObject(content, auth, gitlabBaseUrl);
+        } catch (error) {
+            console.error("Failed to upload to LFS:", error);
+            throw new Error(
+                `Failed to upload to LFS: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Enhanced error handling for LFS operations with fallback strategies
+     */
+    private async handleLFSError(error: any, operation: string, filepath?: string): Promise<void> {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+
+        console.error(`[GitService] LFS ${operation} failed:`, {
+            error: errorMessage,
+            filepath,
+            timestamp: new Date().toISOString(),
+            operation,
+        });
+
+        // Specific error handling for common LFS issues
+        if (errorMessage.includes("timeout")) {
+            console.warn(
+                `[GitService] LFS operation timed out, this might be due to large file size or network issues`
+            );
+        } else if (errorMessage.includes("404") || errorMessage.includes("Not Found")) {
+            console.warn(`[GitService] LFS object not found, might be missing from server`);
+        } else if (errorMessage.includes("401") || errorMessage.includes("403")) {
+            console.warn(`[GitService] LFS authentication failed, check GitLab token permissions`);
+        } else if (
+            errorMessage.includes("413") ||
+            errorMessage.includes("Request Entity Too Large")
+        ) {
+            console.warn(`[GitService] File too large for LFS upload, check GitLab LFS limits`);
+        } else if (errorMessage.includes("422") || errorMessage.includes("Unprocessable Entity")) {
+            console.warn(`[GitService] LFS server rejected request, check file format and size`);
+        } else if (
+            errorMessage.includes("500") ||
+            errorMessage.includes("502") ||
+            errorMessage.includes("503")
+        ) {
+            console.warn(`[GitService] LFS server error, might be temporary - consider retrying`);
+        }
+
+        // Show user-friendly error message
+        if (filepath) {
+            vscode.window.showErrorMessage(
+                `LFS ${operation} failed for file ${filepath}. Check connection and GitLab settings.`
+            );
+        } else {
+            vscode.window.showErrorMessage(
+                `LFS ${operation} failed. Check connection and GitLab settings.`
+            );
+        }
+    }
+
+    /**
+     * Enhanced blob reading with LFS support and error handling
+     */
+    async readBlobWithLFS(
+        dir: string,
+        oid: string,
+        filepath: string,
+        auth: { username: string; password: string },
+        gitlabBaseUrl: string
+    ): Promise<{ blob: Uint8Array; isLFS: boolean }> {
+        try {
+            const gitObject = await git.readBlob({ fs, dir, oid, filepath });
+
+            if (this.isLFSPointer(gitObject.blob)) {
+                const pointer = this.parseLFSPointer(gitObject.blob);
+                if (pointer) {
+                    try {
+                        const lfsContent = await this.getLFSObject(pointer, auth, gitlabBaseUrl);
+                        return { blob: lfsContent, isLFS: true };
+                    } catch (lfsError) {
+                        await this.handleLFSError(lfsError, "download", filepath);
+
+                        // Fallback: return pointer content as-is
+                        console.warn(
+                            `[GitService] LFS download failed, returning pointer content for ${filepath}`
+                        );
+                        return { blob: gitObject.blob, isLFS: false };
+                    }
+                }
+            }
+
+            return { blob: gitObject.blob, isLFS: false };
+        } catch (error) {
+            console.error(`Error reading blob with LFS support: ${filepath}`, error);
+            await this.handleLFSError(error, "read", filepath);
+            throw error;
+        }
+    }
+
+    /**
+     * Enhanced file writing with LFS support and error handling
+     */
+    async writeBlobWithLFS(
+        dir: string,
+        filepath: string,
+        content: Uint8Array,
+        auth: { username: string; password: string },
+        gitlabBaseUrl: string
+    ): Promise<void> {
+        try {
+            const fullPath = path.join(dir, filepath);
+            const size = content.length;
+
+            if (this.shouldTrackWithLFS(filepath, size)) {
+                this.debugLog(`File ${filepath} should be tracked with LFS (size: ${size} bytes)`);
+
+                try {
+                    // Upload to LFS and create pointer
+                    const pointer = await this.uploadLFSObject(content, auth, gitlabBaseUrl);
+                    const pointerContent = this.createLFSPointer(pointer.oid, pointer.size);
+
+                    // Write pointer file instead of actual content
+                    await fs.promises.writeFile(fullPath, pointerContent, "utf8");
+
+                    // Ensure .gitattributes is updated
+                    await this.updateGitAttributes(dir, filepath);
+
+                    console.log(
+                        `[GitService] Successfully uploaded ${filepath} to LFS (${size} bytes)`
+                    );
+                } catch (lfsError) {
+                    await this.handleLFSError(lfsError, "upload", filepath);
+
+                    // Fallback: write file normally if LFS fails
+                    console.warn(
+                        `[GitService] LFS upload failed, writing ${filepath} as regular file`
+                    );
+                    await fs.promises.writeFile(fullPath, content);
+                }
+            } else {
+                // Write normal file
+                await fs.promises.writeFile(fullPath, content);
+            }
+        } catch (error) {
+            console.error(`Error writing blob with LFS support: ${filepath}`, error);
+            await this.handleLFSError(error, "write", filepath);
+            throw error;
+        }
+    }
+
+    /**
+     * Clear LFS cache for a specific object or all objects
+     */
+    public async clearLFSCache(oid?: string): Promise<void> {
+        try {
+            const config = vscode.workspace.getConfiguration("frontier");
+
+            if (oid) {
+                // Clear specific object
+                const cacheKey = `${GitService.LFS_CACHE_KEY}_${oid}`;
+                await config.update(cacheKey, undefined, vscode.ConfigurationTarget.Global);
+                console.log(`[GitService] Cleared LFS cache for object: ${oid}`);
+            } else {
+                // Clear all LFS cache (get all config keys and filter)
+                const allSettings = config.inspect("");
+                if (allSettings?.globalValue) {
+                    const globalConfig = allSettings.globalValue as Record<string, any>;
+                    const lfsKeys = Object.keys(globalConfig).filter((key) =>
+                        key.startsWith(GitService.LFS_CACHE_KEY)
+                    );
+
+                    for (const key of lfsKeys) {
+                        await config.update(key, undefined, vscode.ConfigurationTarget.Global);
+                    }
+                    console.log(`[GitService] Cleared ${lfsKeys.length} LFS cache entries`);
+                }
+            }
+        } catch (error) {
+            console.error("Error clearing LFS cache:", error);
+            throw new Error(
+                `Failed to clear LFS cache: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Get LFS cache statistics
+     */
+    public async getLFSCacheStats(): Promise<{ totalObjects: number; totalSize: number }> {
+        try {
+            const config = vscode.workspace.getConfiguration("frontier");
+            const allSettings = config.inspect("");
+
+            if (!allSettings?.globalValue) {
+                return { totalObjects: 0, totalSize: 0 };
+            }
+
+            const globalConfig = allSettings.globalValue as Record<string, any>;
+            const lfsKeys = Object.keys(globalConfig).filter((key) =>
+                key.startsWith(GitService.LFS_CACHE_KEY)
+            );
+
+            let totalSize = 0;
+            for (const key of lfsKeys) {
+                const value = globalConfig[key];
+                if (Array.isArray(value)) {
+                    totalSize += value.length;
+                }
+            }
+
+            return {
+                totalObjects: lfsKeys.length,
+                totalSize,
+            };
+        } catch (error) {
+            console.error("Error getting LFS cache stats:", error);
+            return { totalObjects: 0, totalSize: 0 };
+        }
     }
 }

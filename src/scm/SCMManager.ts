@@ -39,6 +39,173 @@ export class SCMManager {
 
         // Register sync commands
         this.registerCommands();
+
+        // Automatically check and fix LFS setup when workspace is available
+        this.autoFixLFSOnStartup();
+    }
+
+    /**
+     * Automatically fix LFS setup when extension starts up
+     */
+    private async autoFixLFSOnStartup(): Promise<void> {
+        // Check if auto-fix is enabled
+        const autoFixEnabled = vscode.workspace
+            .getConfiguration("frontier")
+            .get("autoFixLFS", true);
+        if (!autoFixEnabled) {
+            return;
+        }
+
+        // Wait a bit for workspace to be fully loaded
+        setTimeout(async () => {
+            try {
+                const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+                if (!workspaceFolder) {
+                    return;
+                }
+
+                const workspacePath = workspaceFolder.uri.fsPath;
+
+                // Check if this is a git repository
+                const hasGit = await this.gitService.hasGitRepository(workspacePath);
+                if (!hasGit) {
+                    return;
+                }
+
+                // Check if we need to fix LFS
+                const needsLFSFix = await this.checkIfLFSFixNeeded(workspacePath);
+                if (needsLFSFix) {
+                    console.log("Detected LFS conflicts in .gitignore, auto-fixing...");
+
+                    // Show a non-intrusive notification if enabled
+                    const notifyEnabled = vscode.workspace
+                        .getConfiguration("frontier")
+                        .get("notifyLFSConflicts", true);
+                    if (notifyEnabled) {
+                        vscode.window
+                            .showInformationMessage(
+                                "Detected multimedia files in .gitignore. Enabling Git LFS tracking...",
+                                "Learn More"
+                            )
+                            .then((selection) => {
+                                if (selection === "Learn More") {
+                                    vscode.env.openExternal(
+                                        vscode.Uri.parse("https://git-lfs.github.io/")
+                                    );
+                                }
+                            });
+                    }
+
+                    // Fix the LFS setup
+                    await this.setupLFSAndFixGitIgnore(workspacePath);
+
+                    // Commit the changes if there are any and auto-commit is enabled
+                    const autoCommitEnabled = vscode.workspace
+                        .getConfiguration("frontier")
+                        .get("autoCommitLFSFixes", true);
+                    if (autoCommitEnabled) {
+                        await this.commitLFSFixChanges(workspacePath);
+                    }
+                }
+            } catch (error) {
+                console.error("Error in auto LFS fix:", error);
+                // Don't show error to user for automatic fixes
+            }
+        }, 2000);
+    }
+
+    /**
+     * Check if LFS fix is needed by examining .gitignore
+     */
+    private async checkIfLFSFixNeeded(workspacePath: string): Promise<boolean> {
+        try {
+            const gitIgnorePath = path.join(workspacePath, ".gitignore");
+            const gitIgnoreUri = vscode.Uri.file(gitIgnorePath);
+
+            try {
+                const fileContent = await vscode.workspace.fs.readFile(gitIgnoreUri);
+                const content = Buffer.from(fileContent).toString("utf8");
+
+                // Check if any LFS patterns are in .gitignore
+                const lfsPatterns = [
+                    "*.mp4",
+                    "*.avi",
+                    "*.mov",
+                    "*.wmv",
+                    "*.webm",
+                    "*.mp3",
+                    "*.wav",
+                    "*.jpg",
+                    "*.jpeg",
+                    "*.png",
+                    "*.gif",
+                    "*.psd",
+                    "*.pdf",
+                    "*.zip",
+                    ".project/attachments/",
+                ];
+
+                const lines = content.split("\n").map((line) => line.trim());
+                const hasLFSPatterns = lfsPatterns.some((pattern) => lines.includes(pattern));
+
+                const hasLFSSection = lines.some((line) => line.includes("LFS-managed files"));
+
+                // Need fix if we have LFS patterns but no LFS section
+                return hasLFSPatterns && !hasLFSSection;
+            } catch (error) {
+                // .gitignore doesn't exist, no need to fix
+                return false;
+            }
+        } catch (error) {
+            console.error("Error checking LFS fix needed:", error);
+            return false;
+        }
+    }
+
+    /**
+     * Commit LFS fix changes automatically
+     */
+    private async commitLFSFixChanges(workspacePath: string): Promise<void> {
+        try {
+            // Check if there are changes to commit
+            const status = await this.gitService.getStatus(workspacePath);
+            const hasChanges = status.some(
+                ([_, head, workdir, stage]) => head !== workdir || head !== stage
+            );
+
+            if (!hasChanges) {
+                return;
+            }
+
+            // Get auth and user info
+            const token = await this.gitLabService.getToken();
+            if (!token) {
+                return; // Can't commit without auth
+            }
+
+            const user = await this.gitLabService.getCurrentUser();
+            if (!user) {
+                return;
+            }
+
+            const author = {
+                name: user.name || user.username,
+                email: user.email || `${user.username}@users.noreply.gitlab.com`,
+            };
+
+            // Commit the LFS setup changes
+            await this.gitService.addAll(workspacePath);
+            await this.gitService.commit(
+                workspacePath,
+                "Auto-enable Git LFS for multimedia files and attachments",
+                author
+            );
+
+            console.log("Auto-committed LFS setup changes");
+        } catch (error) {
+            console.error("Error committing LFS fix changes:", error);
+            // Don't throw - this is automatic behavior
+        }
     }
 
     private getWorkspacePath(): string {
@@ -252,6 +419,9 @@ export class SCMManager {
             // Load .gitignore patterns
             await this.loadGitIgnore(workspacePath);
 
+            // Initialize LFS tracking and fix .gitignore conflicts
+            await this.setupLFSAndFixGitIgnore(workspacePath);
+
             // Check remote configuration
             const remotes = await this.gitService.getRemotes(workspacePath);
             const remoteUrl = await this.gitService.getRemoteUrl(workspacePath);
@@ -267,6 +437,176 @@ export class SCMManager {
                 `Failed to initialize SCM: ${
                     error instanceof Error ? error.message : "Unknown error"
                 }`
+            );
+        }
+    }
+
+    /**
+     * Set up LFS tracking and fix .gitignore conflicts
+     */
+    private async setupLFSAndFixGitIgnore(workspacePath: string): Promise<void> {
+        try {
+            // Initialize LFS tracking
+            await this.gitService.setupLFSTracking(workspacePath);
+
+            // Fix .gitignore to work with LFS
+            await this.fixGitIgnoreForLFS(workspacePath);
+
+            console.log("LFS tracking set up and .gitignore fixed");
+        } catch (error) {
+            console.error("Error setting up LFS:", error);
+            // Don't throw - LFS is not critical for basic operation
+            vscode.window.showWarningMessage(
+                "LFS setup failed. Large files may not be handled optimally."
+            );
+        }
+    }
+
+    /**
+     * Fix .gitignore to ensure LFS-tracked files are not ignored
+     */
+    private async fixGitIgnoreForLFS(workspacePath: string): Promise<void> {
+        const gitIgnorePath = path.join(workspacePath, ".gitignore");
+
+        try {
+            // Read current .gitignore
+            let content = "";
+            try {
+                const gitIgnoreUri = vscode.Uri.file(gitIgnorePath);
+                const fileContent = await vscode.workspace.fs.readFile(gitIgnoreUri);
+                content = Buffer.from(fileContent).toString("utf8");
+            } catch (error) {
+                // File doesn't exist, create with our template
+                content = "";
+            }
+
+            // Parse lines
+            const lines = content.split("\n");
+            const newLines: string[] = [];
+            let inLFSSection = false;
+            let hasLFSSection = false;
+
+            // Patterns that should be removed from .gitignore (will be handled by LFS)
+            const lfsPatterns = [
+                "*.mp4",
+                "*.avi",
+                "*.mov",
+                "*.wmv",
+                "*.flv",
+                "*.mkv",
+                "*.webm",
+                "*.m4v",
+                "*.3gp",
+                "*.mpg",
+                "*.mpeg",
+                "*.mp3",
+                "*.wav",
+                "*.flac",
+                "*.m4a",
+                "*.ogg",
+                "*.aac",
+                "*.jpg",
+                "*.jpeg",
+                "*.png",
+                "*.gif",
+                "*.bmp",
+                "*.tiff",
+                "*.tif",
+                "*.svg",
+                "*.webp",
+                "*.ico",
+                "*.psd",
+                "*.ai",
+                "*.eps",
+                "*.raw",
+                "*.cr2",
+                "*.nef",
+                "*.dng",
+                "*.zip",
+                "*.rar",
+                "*.7z",
+                "*.tar",
+                "*.tar.gz",
+                "*.tar.bz2",
+                "*.tar.xz",
+                "*.gz",
+                "*.bz2",
+                "*.xz",
+                "*.pdf",
+            ];
+
+            // Process each line
+            for (const line of lines) {
+                const trimmedLine = line.trim();
+
+                // Check if we're entering/leaving LFS section
+                if (trimmedLine === "# LFS-managed files (do not add to .gitignore)") {
+                    inLFSSection = true;
+                    hasLFSSection = true;
+                    newLines.push(line);
+                    continue;
+                } else if (
+                    inLFSSection &&
+                    trimmedLine.startsWith("#") &&
+                    !trimmedLine.startsWith("# ")
+                ) {
+                    inLFSSection = false;
+                }
+
+                // Skip multimedia patterns that will be handled by LFS
+                if (!inLFSSection && lfsPatterns.some((pattern) => trimmedLine === pattern)) {
+                    continue;
+                }
+
+                // Special handling for .project/attachments/
+                if (trimmedLine === ".project/attachments/") {
+                    // Comment it out instead of removing
+                    newLines.push("# .project/attachments/ # Commented out - handled by Git LFS");
+                    continue;
+                }
+
+                newLines.push(line);
+            }
+
+            // Add LFS section if it doesn't exist
+            if (!hasLFSSection) {
+                newLines.push("");
+                newLines.push("# LFS-managed files (do not add to .gitignore)");
+                newLines.push("# Large files and multimedia are tracked via Git LFS");
+                newLines.push("# See .gitattributes for LFS tracking patterns");
+                newLines.push("");
+                newLines.push("# The following patterns have been removed from .gitignore:");
+                newLines.push("# - Multimedia files (*.mp4, *.jpg, etc.) - tracked by LFS");
+                newLines.push("# - Archive files (*.zip, *.rar, etc.) - tracked by LFS");
+                newLines.push("# - .project/attachments/ - tracked by LFS");
+                newLines.push("");
+            }
+
+            // Write updated .gitignore
+            const updatedContent = newLines.join("\n");
+            const gitIgnoreUri = vscode.Uri.file(gitIgnorePath);
+            await vscode.workspace.fs.writeFile(gitIgnoreUri, Buffer.from(updatedContent, "utf8"));
+
+            // Also ensure .project/attachments/ directory exists and has a .gitkeep file
+            const attachmentsPath = path.join(workspacePath, ".project", "attachments");
+            const attachmentsUri = vscode.Uri.file(attachmentsPath);
+
+            try {
+                await vscode.workspace.fs.createDirectory(attachmentsUri);
+
+                // Add .gitkeep to ensure directory is tracked
+                const gitkeepPath = path.join(attachmentsPath, ".gitkeep");
+                const gitkeepUri = vscode.Uri.file(gitkeepPath);
+                await vscode.workspace.fs.writeFile(gitkeepUri, Buffer.from("", "utf8"));
+            } catch (error) {
+                // Directory might already exist, that's fine
+            }
+
+            console.log("Fixed .gitignore for LFS compatibility");
+        } catch (error) {
+            console.error("Error fixing .gitignore:", error);
+            throw new Error(
+                `Failed to fix .gitignore: ${error instanceof Error ? error.message : "Unknown error"}`
             );
         }
     }
@@ -323,6 +663,9 @@ export class SCMManager {
         });
 
         this.fileSystemWatcher.onDidCreate(async (uri) => {
+            // Check if this is a multimedia file that should be LFS tracked
+            await this.checkNewFileForLFS(uri.fsPath);
+
             if (this.autoSyncEnabled && !this.shouldIgnoreFile(uri.fsPath)) {
                 await this.syncChanges();
             }
@@ -333,6 +676,60 @@ export class SCMManager {
                 await this.syncChanges();
             }
         });
+    }
+
+    /**
+     * Check if a newly created file should be LFS tracked but is being ignored
+     */
+    private async checkNewFileForLFS(filePath: string): Promise<void> {
+        try {
+            // Check if notifications are enabled
+            const notifyEnabled = vscode.workspace
+                .getConfiguration("frontier")
+                .get("notifyLFSConflicts", true);
+            if (!notifyEnabled) {
+                return;
+            }
+
+            const workspacePath = this.getWorkspacePath();
+
+            // Check if this file should be LFS tracked
+            const stats = await vscode.workspace.fs.stat(vscode.Uri.file(filePath));
+            const relativePath = vscode.workspace.asRelativePath(filePath);
+
+            const shouldBeLFS = this.gitService.shouldFileUseEFS(relativePath, stats.size);
+            const isBeingIgnored = this.shouldIgnoreFile(filePath);
+
+            if (shouldBeLFS && isBeingIgnored) {
+                console.log(`Detected LFS file being ignored: ${relativePath}`);
+
+                // Show notification with action
+                const action = await vscode.window.showWarningMessage(
+                    `File "${relativePath}" should be tracked by Git LFS but is being ignored by .gitignore`,
+                    "Fix LFS Setup",
+                    "Ignore"
+                );
+
+                if (action === "Fix LFS Setup") {
+                    await this.setupLFSAndFixGitIgnore(workspacePath);
+
+                    // Commit changes if auto-commit is enabled
+                    const autoCommitEnabled = vscode.workspace
+                        .getConfiguration("frontier")
+                        .get("autoCommitLFSFixes", true);
+                    if (autoCommitEnabled) {
+                        await this.commitLFSFixChanges(workspacePath);
+                    }
+
+                    vscode.window.showInformationMessage(
+                        "LFS setup fixed! Multimedia files will now be tracked properly."
+                    );
+                }
+            }
+        } catch (error) {
+            console.error("Error checking new file for LFS:", error);
+            // Don't show error to user for automatic checks
+        }
     }
 
     async syncChanges(): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
@@ -367,6 +764,30 @@ export class SCMManager {
             };
 
             const workspacePath = this.getWorkspacePath();
+
+            // Check and fix LFS setup before syncing (but not every time)
+            const autoFixEnabled = vscode.workspace
+                .getConfiguration("frontier")
+                .get("autoFixLFS", true);
+            if (autoFixEnabled) {
+                const shouldCheckLFS = await this.shouldCheckLFSDuringSync();
+                if (shouldCheckLFS) {
+                    const needsLFSFix = await this.checkIfLFSFixNeeded(workspacePath);
+                    if (needsLFSFix) {
+                        console.log("Fixing LFS setup during sync...");
+                        await this.setupLFSAndFixGitIgnore(workspacePath);
+
+                        // Commit changes if auto-commit is enabled
+                        const autoCommitEnabled = vscode.workspace
+                            .getConfiguration("frontier")
+                            .get("autoCommitLFSFixes", true);
+                        if (autoCommitEnabled) {
+                            await this.commitLFSFixChanges(workspacePath);
+                        }
+                    }
+                }
+            }
+
             const user = await this.gitLabService.getCurrentUser();
             if (!user) {
                 throw new Error("Could not get user information from GitLab");
@@ -405,6 +826,29 @@ export class SCMManager {
                     }
                 }, 3000);
             }
+        }
+    }
+
+    /**
+     * Determine if we should check LFS during sync (throttled to avoid checking every time)
+     */
+    private async shouldCheckLFSDuringSync(): Promise<boolean> {
+        const LAST_LFS_CHECK_KEY = "lastLFSCheck";
+        const CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+
+        try {
+            const lastCheck = this.context.globalState.get<number>(LAST_LFS_CHECK_KEY, 0);
+            const now = Date.now();
+
+            if (now - lastCheck > CHECK_INTERVAL) {
+                await this.context.globalState.update(LAST_LFS_CHECK_KEY, now);
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            console.error("Error checking LFS sync throttle:", error);
+            return false;
         }
     }
 
@@ -489,6 +933,71 @@ export class SCMManager {
         );
     }
 
+    /**
+     * Public method to fix LFS setup for existing projects
+     */
+    public async fixLFSForExistingProject(): Promise<void> {
+        try {
+            const workspacePath = this.getWorkspacePath();
+
+            vscode.window.showInformationMessage("Fixing LFS setup for current project...");
+
+            // Set up LFS and fix .gitignore
+            await this.setupLFSAndFixGitIgnore(workspacePath);
+
+            // Commit the changes
+            const token = await this.gitLabService.getToken();
+            if (!token) {
+                throw new Error("GitLab token not found. Please authenticate first.");
+            }
+
+            const auth = {
+                username: "oauth2",
+                password: token,
+            };
+
+            const user = await this.gitLabService.getCurrentUser();
+            if (!user) {
+                throw new Error("Could not get user information from GitLab");
+            }
+
+            const author = {
+                name: user.name || user.username,
+                email: user.email || `${user.username}@users.noreply.gitlab.com`,
+            };
+
+            // Check if there are changes to commit
+            const status = await this.gitService.getStatus(workspacePath);
+            const hasChanges = status.some(
+                ([_, head, workdir, stage]) => head !== workdir || head !== stage
+            );
+
+            if (hasChanges) {
+                await this.gitService.addAll(workspacePath);
+                await this.gitService.commit(
+                    workspacePath,
+                    "Enable Git LFS for multimedia files and attachments",
+                    author
+                );
+
+                // Sync changes
+                await this.syncChanges();
+
+                vscode.window.showInformationMessage(
+                    "LFS setup complete! Multimedia files and attachments will now be tracked via Git LFS."
+                );
+            } else {
+                vscode.window.showInformationMessage("LFS is already set up correctly.");
+            }
+        } catch (error) {
+            console.error("Error fixing LFS setup:", error);
+            vscode.window.showErrorMessage(
+                `Failed to fix LFS setup: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+            throw error;
+        }
+    }
+
     async publishWorkspace(options: {
         name: string;
         description?: string;
@@ -522,6 +1031,10 @@ export class SCMManager {
                 console.log("Initializing git repository...");
                 await this.gitService.init(workspacePath);
             }
+
+            // Set up LFS and fix .gitignore BEFORE adding files
+            console.log("Setting up LFS and fixing .gitignore...");
+            await this.setupLFSAndFixGitIgnore(workspacePath);
 
             // Add remote if not already added
             const currentRemoteUrl = await this.gitService.getRemoteUrl(workspacePath);

@@ -445,4 +445,18 @@ export function registerSCMCommands(
             }
         )
     );
+
+    // Add new command to fix LFS for existing projects
+    context.subscriptions.push(
+        vscode.commands.registerCommand("frontier.scm.fixLFS", async () => {
+            try {
+                await scmManager.fixLFSForExistingProject();
+            } catch (error) {
+                console.error("Error in fixLFS command:", error);
+                if (error instanceof Error) {
+                    vscode.window.showErrorMessage(`Failed to fix LFS setup: ${error.message}`);
+                }
+            }
+        })
+    );
 }

@@ -109,6 +109,11 @@
                 "command": "frontier.toggleDebugLogging",
                 "title": "Toggle Debug Logging",
                 "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.scm.fixLFS",
+                "title": "Fix LFS for Multimedia Files",
+                "category": "Frontier"
             }
         ],
         "authentication": [
@@ -125,6 +130,24 @@
                     "default": false,
                     "description": "Enable verbose debug logging for git operations (workingCopyStatusBeforeCommit, localStatusMatrix, mergeBaseStatusMatrix, remoteStatusMatrix)",
                     "scope": "application"
+                },
+                "frontier.autoFixLFS": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically fix .gitignore conflicts with Git LFS for multimedia files",
+                    "scope": "workspace"
+                },
+                "frontier.autoCommitLFSFixes": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically commit LFS setup changes when fixing .gitignore conflicts",
+                    "scope": "workspace"
+                },
+                "frontier.notifyLFSConflicts": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show notifications when multimedia files are being ignored by .gitignore",
+                    "scope": "workspace"
                 }
             }
         }
