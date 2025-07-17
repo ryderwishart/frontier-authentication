@@ -109,6 +109,11 @@
                 "command": "frontier.toggleDebugLogging",
                 "title": "Toggle Debug Logging",
                 "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.refreshUserInfo",
+                "title": "Refresh User Info Cache",
+                "category": "Frontier: Debug"
             }
         ],
         "authentication": [

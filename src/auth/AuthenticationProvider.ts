@@ -144,6 +144,13 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                             }
                         );
                     }, 2000); // Delay to ensure VS Code has processed the session
+
+                    // Cache user info for existing authenticated users who don't have it yet
+                    setTimeout(() => {
+                        this.fetchAndCacheUserInfo().catch((error) => {
+                            console.error("Error during user info caching:", error);
+                        });
+                    }, 3000); // Delay to ensure other initialization is complete
                 } else {
                     // No stored session, ensure state is clean
                     await this.stateManager.updateAuthState({
@@ -622,6 +629,46 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         });
 
         console.log(`Cleaned up ${sessionsToRemove.length} duplicate session(s)`);
+    }
+
+    /**
+     * Fetch and cache user info for authenticated users who don't have it cached yet
+     * This helps users who were authenticated before we added user info caching
+     */
+    async fetchAndCacheUserInfo(): Promise<void> {
+        if (!this.isAuthenticated) {
+            return;
+        }
+
+        const currentUserInfo = this.stateManager.getUserInfo();
+        if (currentUserInfo) {
+            return; // Already cached
+        }
+
+        try {
+            const token = await this.getToken();
+            if (token) {
+                const validity = await this.checkTokenValidity(token);
+                if (validity.isValid && validity.userInfo) {
+                    const userInfo: UserInfo = {
+                        email: validity.userInfo.email || "",
+                        username:
+                            validity.userInfo.username ||
+                            this.getUserDisplayName(validity.userInfo),
+                        name: validity.userInfo.name,
+                    };
+
+                    await this.stateManager.updateAuthState({
+                        userInfo: userInfo,
+                    });
+
+                    console.log("User info fetched and cached for existing authenticated user");
+                }
+            }
+        } catch (error) {
+            console.warn("Could not fetch user info for caching:", error);
+            // Don't throw - this is a background enhancement
+        }
     }
 
     dispose() {

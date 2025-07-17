@@ -201,6 +201,13 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage(
             "Frontier Authentication: Click the status bar icon to log in"
         );
+    } else {
+        // For existing authenticated users, try to cache user info if not already cached
+        setTimeout(() => {
+            authenticationProvider.fetchAndCacheUserInfo().catch((error) => {
+                console.error("Error caching user info during activation:", error);
+            });
+        }, 1000); // Small delay to ensure initialization is complete
     }
 
     // Dispose existing providers if they exist

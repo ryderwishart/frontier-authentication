@@ -211,7 +211,18 @@ export function registerCommands(
                 // Use cached user info from authentication
                 const { StateManager } = await import("../state");
                 const stateManager = StateManager.getInstance();
-                const userInfo = stateManager.getUserInfo();
+                let userInfo = stateManager.getUserInfo();
+
+                // If no cached user info exists, try to fetch and cache it
+                if (!userInfo) {
+                    console.log("No cached user info found, attempting to fetch and cache...");
+                    try {
+                        await authProvider.fetchAndCacheUserInfo();
+                        userInfo = stateManager.getUserInfo(); // Try again after caching
+                    } catch (error) {
+                        console.warn("Could not fetch user info for caching:", error);
+                    }
+                }
 
                 if (userInfo) {
                     return {
@@ -294,6 +305,24 @@ export function registerCommands(
             } catch (error) {
                 vscode.window.showErrorMessage(
                     `Failed to refresh session: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
+        }),
+
+        // Add command to refresh user info cache
+        vscode.commands.registerCommand("frontier.refreshUserInfo", async () => {
+            try {
+                if (!authProvider.isAuthenticated) {
+                    vscode.window.showWarningMessage("Not currently authenticated");
+                    return;
+                }
+
+                // Force refresh user info cache
+                await authProvider.fetchAndCacheUserInfo();
+                vscode.window.showInformationMessage("User information cache refreshed");
+            } catch (error) {
+                vscode.window.showErrorMessage(
+                    `Failed to refresh user info: ${error instanceof Error ? error.message : String(error)}`
                 );
             }
         })
