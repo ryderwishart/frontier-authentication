@@ -63,7 +63,7 @@ export class GitService {
      */
     private async withTimeout<T>(
         operation: Promise<T>,
-        timeoutMs: number = 30000,
+        timeoutMs: number = 30 * 60 * 1000, // 30 minutes
         operationName: string = "Git operation"
     ): Promise<T> {
         const startTime = Date.now();
