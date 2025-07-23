@@ -18,6 +18,7 @@ export interface ConflictedFile {
 export interface SyncResult {
     hadConflicts: boolean;
     conflicts?: ConflictedFile[];
+    offline?: boolean;
 }
 
 export enum RemoteBranchStatus {
@@ -63,7 +64,7 @@ export class GitService {
      */
     private async withTimeout<T>(
         operation: Promise<T>,
-        timeoutMs: number = 30 * 60 * 1000, // 30 minutes
+        timeoutMs: number = 2 * 60 * 1000, // 2 minutes
         operationName: string = "Git operation"
     ): Promise<T> {
         const startTime = Date.now();
@@ -180,7 +181,7 @@ export class GitService {
         auth: { username: string; password: string },
         options?: { force?: boolean; ref?: string; timeoutMs?: number }
     ): Promise<void> {
-        const { force = false, ref, timeoutMs = 30000 } = options || {};
+        const { force = false, ref, timeoutMs = 2 * 60 * 1000 } = options || {};
 
         console.log(`[GitService] Starting push operation:`, {
             directory: dir,
@@ -241,7 +242,8 @@ export class GitService {
     async syncChanges(
         dir: string,
         auth: { username: string; password: string },
-        author: { name: string; email: string }
+        author: { name: string; email: string },
+        options?: { commitMessage?: string }
     ): Promise<SyncResult> {
         // Check if sync is already in progress
         if (this.stateManager.isSyncLocked()) {
@@ -268,12 +270,12 @@ export class GitService {
             if (isDirty) {
                 console.log("Working copy is dirty, committing local changes");
                 await this.addAll(dir);
-                await this.commit(dir, "Local changes", author);
+                await this.commit(dir, options?.commitMessage || "Local changes", author);
             }
 
             // 2. Check if we're online
             if (!(await this.isOnline())) {
-                throw new Error("Offline");
+                return { hadConflicts: false, offline: true };
             }
 
             // 3. Fetch remote changes to get latest state
@@ -291,7 +293,7 @@ export class GitService {
                             return auth;
                         },
                     }),
-                    30000,
+                    2 * 60 * 1000,
                     "Fetch operation"
                 );
                 console.log("[GitService] Fetch completed successfully");
@@ -377,7 +379,7 @@ export class GitService {
                             return auth;
                         },
                     }),
-                    30000,
+                    2 * 60 * 1000,
                     "Fast-forward operation"
                 );
 
@@ -836,7 +838,7 @@ export class GitService {
                         return auth;
                     },
                 }),
-                30000,
+                2 * 60 * 1000,
                 "Pre-merge fetch operation"
             );
             const commitMessage = `Merge branch 'origin/${currentBranch}'`;

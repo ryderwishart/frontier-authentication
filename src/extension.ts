@@ -90,9 +90,10 @@ export interface FrontierAPI {
         username: string;
     }>;
     getLlmEndpoint: () => Promise<string | undefined>;
-    syncChanges: () => Promise<{
+    syncChanges: (options?: { commitMessage?: string }) => Promise<{
         hasConflicts: boolean;
         conflicts?: Array<ConflictedFile>;
+        offline?: boolean;
     }>;
     completeMerge: (resolvedFiles: ResolvedFile[]) => Promise<void>;
 
@@ -307,10 +308,11 @@ export async function activate(context: vscode.ExtensionContext) {
         getLlmEndpoint: async () => {
             return API_ENDPOINT;
         },
-        syncChanges: async () =>
-            vscode.commands.executeCommand("frontier.syncChanges") as Promise<{
+        syncChanges: async (options?: { commitMessage?: string }) =>
+            vscode.commands.executeCommand("frontier.syncChanges", options) as Promise<{
                 hasConflicts: boolean;
                 conflicts?: Array<ConflictedFile>;
+                offline?: boolean;
             }>,
         completeMerge: async (resolvedFiles: ResolvedFile[]) =>
             vscode.commands.executeCommand(
