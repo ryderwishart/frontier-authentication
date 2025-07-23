@@ -1109,7 +1109,7 @@ export class GitService {
 
             const apiIsOnline = await fetch("https://api.frontierrnd.com")
                 .then((res) => {
-                    console.log("RYDER: apiIsOnline", { res });
+                    console.log("apiIsOnline", { res });
                     return res.status === 200;
                 })
                 .catch(() => false);
