@@ -91,16 +91,17 @@ export class StateManager {
     }
 
     // Sync lock methods
-    async acquireSyncLock(): Promise<boolean> {
+    async acquireSyncLock(workspacePath: string | undefined): Promise<boolean> {
         // Get workspace folder for lock file
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders || workspaceFolders.length === 0) {
-            console.log("No workspace folder found, cannot create lock file");
-            return false;
+        if (!workspacePath) {
+            workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workspacePath) {
+                console.log("No workspace folder found, cannot create lock file");
+                return false;
+            }
         }
-
         // Create lock file path in .git directory
-        const gitDir = path.join(workspaceFolders[0].uri.fsPath, ".git");
+        const gitDir = path.join(workspacePath, ".git");
         this.lockFilePath = path.join(gitDir, "frontier-sync.lock");
 
         try {
@@ -121,7 +122,7 @@ export class StateManager {
                     console.log("Stale sync lock detected, releasing it");
                     await this.releaseSyncLock();
                     // Try to acquire lock again
-                    return this.acquireSyncLock();
+                    return this.acquireSyncLock(workspacePath);
                 }
             } catch (readError) {
                 console.log("Error reading lock file:", readError);

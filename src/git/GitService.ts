@@ -252,7 +252,7 @@ export class GitService {
         }
 
         // Try to acquire the sync lock
-        const lockAcquired = await this.stateManager.acquireSyncLock();
+        const lockAcquired = await this.stateManager.acquireSyncLock(dir);
         if (!lockAcquired) {
             console.log("Failed to acquire sync lock, skipping this request");
             return { hadConflicts: false };
@@ -789,7 +789,7 @@ export class GitService {
         }
 
         // Try to acquire the sync lock
-        const lockAcquired = await this.stateManager.acquireSyncLock();
+        const lockAcquired = await this.stateManager.acquireSyncLock(dir);
         if (!lockAcquired) {
             console.log("Failed to acquire sync lock, cannot complete merge");
             throw new Error("Failed to acquire sync lock. Please try again later.");

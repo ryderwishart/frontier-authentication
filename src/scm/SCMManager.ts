@@ -70,7 +70,8 @@ export class SCMManager {
         this.context.subscriptions.push(
             vscode.commands.registerCommand(
                 "frontier.completeMerge",
-                (resolvedFiles: ResolvedFile[]) => this.completeMerge(resolvedFiles)
+                (resolvedFiles: ResolvedFile[], workspacePath: string | undefined) =>
+                    this.completeMerge(resolvedFiles, workspacePath)
             )
         );
     }
@@ -82,6 +83,7 @@ export class SCMManager {
         groupId?: string;
         workspacePath?: string;
         path?: string;
+        openWorkspace?: boolean;
     }): Promise<void> {
         try {
             // Initialize GitLab service and create project
@@ -107,11 +109,15 @@ export class SCMManager {
             // Clone the repository using the token for authentication
             await this.cloneRepository(project.url, workspacePath);
 
-            // Open the workspace
-            await this.openWorkspace(workspacePath);
+            // Conditionally open the workspace (default to true for backward compatibility)
+            const shouldOpenWorkspace = options.openWorkspace !== false;
+            if (shouldOpenWorkspace) {
+                // Open the workspace
+                await this.openWorkspace(workspacePath);
 
-            // Initialize SCM
-            await this.initializeSCM(workspacePath);
+                // Initialize SCM
+                await this.initializeSCM(workspacePath);
+            }
 
             const action = project.url.includes("already exists") ? "cloned" : "created and cloned";
             vscode.window.showInformationMessage(`Project ${options.name} ${action} successfully!`);
@@ -125,7 +131,11 @@ export class SCMManager {
         }
     }
 
-    async cloneExistingRepository(repoUrl: string, cloneToPath?: string): Promise<void> {
+    async cloneExistingRepository(
+        repoUrl: string,
+        cloneToPath?: string,
+        openWorkspace: boolean = true
+    ): Promise<void> {
         try {
             // Ensure GitLab service is initialized
             await this.gitLabService.initializeWithRetry();
@@ -151,11 +161,13 @@ export class SCMManager {
             // Clone the repository
             await this.cloneRepository(url.toString(), workspacePath);
 
-            // Open the workspace
-            await this.openWorkspace(workspacePath);
+            // Conditionally open the workspace
+            if (openWorkspace) {
+                await this.openWorkspace(workspacePath);
 
-            // Initialize SCM
-            await this.initializeSCM(workspacePath);
+                // Initialize SCM only if workspace is opened
+                await this.initializeSCM(workspacePath);
+            }
 
             vscode.window.showInformationMessage("Repository cloned successfully!");
         } catch (error) {
@@ -576,7 +588,10 @@ export class SCMManager {
     }
 
     // Add new method to complete merge
-    async completeMerge(resolvedFiles: ResolvedFile[]): Promise<void> {
+    async completeMerge(
+        resolvedFiles: ResolvedFile[],
+        workspacePath: string | undefined
+    ): Promise<void> {
         const token = await this.gitLabService.getToken();
         if (!token) {
             throw new Error("GitLab token not found");
@@ -597,7 +612,9 @@ export class SCMManager {
             email: user.email || `${user.username}@users.noreply.gitlab.com`,
         };
 
-        const workspacePath = this.getWorkspacePath();
+        if (!workspacePath) {
+            workspacePath = this.getWorkspacePath();
+        }
         await this.gitService.completeMerge(workspacePath, auth, author, resolvedFiles);
     }
 }

@@ -77,7 +77,11 @@ export interface FrontierAPI {
             owner: string;
         }>
     >;
-    cloneRepository: (repositoryUrl: string, cloneToPath?: string) => Promise<boolean>;
+    cloneRepository: (
+        repositoryUrl: string,
+        cloneToPath?: string,
+        openWorkspace?: boolean
+    ) => Promise<boolean>;
     publishWorkspace: (options: {
         name?: string;
         description?: string;
@@ -95,7 +99,10 @@ export interface FrontierAPI {
         conflicts?: Array<ConflictedFile>;
         offline?: boolean;
     }>;
-    completeMerge: (resolvedFiles: ResolvedFile[]) => Promise<void>;
+    completeMerge: (
+        resolvedFiles: ResolvedFile[],
+        workspacePath: string | undefined
+    ) => Promise<void>;
 
     // Project Progress Reporting API
     submitProgressReport: (
@@ -260,11 +267,16 @@ export async function activate(context: vscode.ExtensionContext) {
                     owner: string;
                 }>
             >,
-        cloneRepository: async (repositoryUrl: string, cloneToPath?: string) =>
+        cloneRepository: async (
+            repositoryUrl: string,
+            cloneToPath?: string,
+            openWorkspace?: boolean
+        ) =>
             vscode.commands.executeCommand<boolean>(
                 "frontier.cloneRepository",
                 repositoryUrl,
-                cloneToPath
+                cloneToPath,
+                openWorkspace
             ),
         publishWorkspace: async (options: {
             name?: string;
@@ -314,10 +326,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 conflicts?: Array<ConflictedFile>;
                 offline?: boolean;
             }>,
-        completeMerge: async (resolvedFiles: ResolvedFile[]) =>
+        completeMerge: async (resolvedFiles: ResolvedFile[], workspacePath: string | undefined) =>
             vscode.commands.executeCommand(
                 "frontier.completeMerge",
-                resolvedFiles
+                resolvedFiles,
+                workspacePath
             ) as Promise<void>,
 
         // Project Progress Reporting API
