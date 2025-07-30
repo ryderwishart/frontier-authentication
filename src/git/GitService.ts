@@ -884,6 +884,7 @@ export class GitService {
                 console.log("Successfully pushed merge commit");
             } catch (pushError) {
                 console.error("Error pushing merge commit:", pushError);
+                throw pushError;
             }
 
             console.log("=== completeMerge completed successfully ===");
