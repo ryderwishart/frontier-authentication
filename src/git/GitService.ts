@@ -884,13 +884,17 @@ export class GitService {
                 console.log("Successfully pushed merge commit");
             } catch (pushError) {
                 console.error("Error pushing merge commit:", pushError);
-                throw pushError;
+                throw new Error(
+                    `Failed to push merge commit: ${pushError instanceof Error ? pushError.message : String(pushError)}`
+                );
             }
 
             console.log("=== completeMerge completed successfully ===");
         } catch (error) {
             console.error("Complete merge error:", error);
-            throw error;
+            throw new Error(
+                `Complete merge operation failed: ${error instanceof Error ? error.message : String(error)}`
+            );
         } finally {
             // Always release the lock when done, regardless of success or failure
             await this.stateManager.releaseSyncLock();
