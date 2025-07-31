@@ -322,35 +322,11 @@ export class GitService {
                 return { hadConflicts: false };
             }
 
-            const mergeBaseCommits = await git.findMergeBase({
-                fs,
-                dir,
-                oids: [localHead, remoteHead],
-            });
-
-            this.debugLog("Merge base commits:", mergeBaseCommits);
-
-            // Get files changed in local HEAD
+            // Get files changed in local HEAD (this doesn't need updating after refetch)
             const localStatusMatrix = await git.statusMatrix({ fs, dir });
-            // Get files changed in remote HEAD
-            const remoteStatusMatrix = await git.statusMatrix({
-                fs,
-                dir,
-                ref: remoteRef,
-            });
-            const mergeBaseStatusMatrix =
-                mergeBaseCommits.length > 0
-                    ? await git.statusMatrix({
-                          fs,
-                          dir,
-                          ref: mergeBaseCommits[0],
-                      })
-                    : [];
 
             this.debugLog("workingCopyStatusBeforeCommit:", workingCopyStatusBeforeCommit);
             this.debugLog("localStatusMatrix:", localStatusMatrix);
-            this.debugLog("mergeBaseStatusMatrix:", mergeBaseStatusMatrix);
-            this.debugLog("remoteStatusMatrix:", remoteStatusMatrix);
 
             // 6. If local and remote are identical, nothing to do
             if (localHead === remoteHead) {
@@ -399,15 +375,81 @@ export class GitService {
             // 8. If we get here, we have divergent histories - check for conflicts
             console.log("Fast-forward failed, need to handle conflicts");
 
+            // Refetch to ensure we have the absolute latest remote state before analyzing conflicts
+            console.log("[GitService] Refetching remote changes before conflict analysis");
+            try {
+                await this.withTimeout(
+                    git.fetch({
+                        fs,
+                        http,
+                        dir,
+                        onAuth: () => {
+                            console.log(
+                                "[GitService] Authentication requested for pre-conflict-analysis fetch"
+                            );
+                            return auth;
+                        },
+                    }),
+                    2 * 60 * 1000,
+                    "Pre-conflict-analysis fetch"
+                );
+                console.log("[GitService] Pre-conflict-analysis fetch completed successfully");
+
+                // Update remoteHead reference after the new fetch
+                remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
+                console.log(
+                    "[GitService] Updated remote HEAD after refetch:",
+                    remoteHead.substring(0, 8)
+                );
+            } catch (fetchError) {
+                console.error("[GitService] Pre-conflict-analysis fetch failed:", {
+                    error: fetchError instanceof Error ? fetchError.message : String(fetchError),
+                    directory: dir,
+                    hasAuth: !!auth.username,
+                    timestamp: new Date().toISOString(),
+                });
+                // Continue with conflict analysis using the potentially stale remote state
+                console.warn(
+                    "[GitService] Continuing with conflict analysis using potentially stale remote state"
+                );
+            }
+
+            // Recalculate merge base after potential refetch
+            const updatedMergeBaseCommits = await git.findMergeBase({
+                fs,
+                dir,
+                oids: [localHead, remoteHead],
+            });
+
+            this.debugLog("Updated merge base commits after refetch:", updatedMergeBaseCommits);
+
+            // Update status matrices with potentially new remote state
+            const updatedRemoteStatusMatrix = await git.statusMatrix({
+                fs,
+                dir,
+                ref: remoteRef,
+            });
+            const updatedMergeBaseStatusMatrix =
+                updatedMergeBaseCommits.length > 0
+                    ? await git.statusMatrix({
+                          fs,
+                          dir,
+                          ref: updatedMergeBaseCommits[0],
+                      })
+                    : [];
+
+            this.debugLog("updatedRemoteStatusMatrix:", updatedRemoteStatusMatrix);
+            this.debugLog("updatedMergeBaseStatusMatrix:", updatedMergeBaseStatusMatrix);
+
             // Convert status matrices to maps for easier lookup
             const localStatusMap = new Map(
                 localStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
             );
             const remoteStatusMap = new Map(
-                remoteStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
+                updatedRemoteStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
             );
             const mergeBaseStatusMap = new Map(
-                mergeBaseStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
+                updatedMergeBaseStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
             );
 
             // Get all unique filepaths across all three references
@@ -610,11 +652,11 @@ export class GitService {
 
                     // Try to read base content if available
                     try {
-                        if (mergeBaseCommits.length > 0) {
+                        if (updatedMergeBaseCommits.length > 0) {
                             const { blob: bBlob } = await git.readBlob({
                                 fs,
                                 dir,
-                                oid: mergeBaseCommits[0],
+                                oid: updatedMergeBaseCommits[0],
                                 filepath,
                             });
                             baseContent = new TextDecoder().decode(bBlob);
