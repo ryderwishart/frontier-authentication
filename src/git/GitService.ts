@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 
 import { StateManager } from "../state";
+import { LFSService } from "./LFSService";
 
 export interface ConflictedFile {
     filepath: string;
@@ -30,9 +31,11 @@ export enum RemoteBranchStatus {
 export class GitService {
     private stateManager: StateManager;
     private debugLogging: boolean = false;
+    private lfsService: LFSService;
 
     constructor(stateManager: StateManager) {
         this.stateManager = stateManager;
+        this.lfsService = new LFSService();
         // Check VS Code configuration for debug logging setting
         this.debugLogging = vscode.workspace
             .getConfiguration("frontier")
@@ -945,9 +948,11 @@ export class GitService {
 
     /**
      * Stage all changes in the working directory
+     * Automatically handles LFS for multimedia and large files
      */
     async addAll(dir: string): Promise<void> {
         const status = await git.statusMatrix({ fs, dir });
+        const isLFSEnabled = await this.lfsService.isLFSEnabled(dir);
 
         // Handle deletions
         const deletedFiles = status
@@ -966,8 +971,18 @@ export class GitService {
                     (this.fileStatus.hasWorkdirChanges(entry) && !this.fileStatus.isDeleted(entry))
             )
             .map(([filepath]) => filepath);
+        console.log("modifiedFiles", modifiedFiles);
+        console.log("isLFSEnabled", isLFSEnabled);
 
+        // Check for LFS candidates and process them before adding
         for (const filepath of modifiedFiles) {
+            await this.checkAndHandleLFSCandidate(dir, filepath, isLFSEnabled);
+
+            // If LFS is enabled, try to process the file for LFS upload
+            if (isLFSEnabled) {
+                await this.processLFSFileBeforeAdd(dir, filepath);
+            }
+
             await git.add({ fs, dir, filepath });
         }
     }
@@ -1040,6 +1055,17 @@ export class GitService {
     }
 
     async add(dir: string, filepath: string): Promise<void> {
+        // Check if LFS is enabled for this repository
+        const isLFSEnabled = await this.isLFSEnabled(dir);
+
+        // Process file for LFS if enabled
+        if (isLFSEnabled) {
+            await this.processLFSFileBeforeAdd(dir, filepath);
+        } else {
+            // Check if we should suggest LFS
+            await this.checkAndHandleLFSCandidate(dir, filepath, false);
+        }
+
         await git.add({ fs, dir, filepath });
     }
 
@@ -1338,5 +1364,255 @@ export class GitService {
         }
         // Compare HEAD status (index 1)
         return entry1[1] === entry2[1];
+    }
+
+    // ========== LFS INTEGRATION METHODS ==========
+
+    /**
+     * Initialize Git LFS for the repository with multimedia file patterns
+     */
+    async initializeLFS(dir: string, author: { name: string; email: string }): Promise<void> {
+        try {
+            const gitattributesPath = path.join(dir, ".gitattributes");
+            const lfsConfig = this.lfsService.generateGitAttributes();
+
+            // Write .gitattributes file
+            await fs.promises.writeFile(gitattributesPath, lfsConfig, "utf8");
+
+            // Add and commit .gitattributes
+            await this.add(dir, ".gitattributes");
+            await this.commit(dir, "Initialize Git LFS for multimedia files", author);
+
+            console.log("[GitService] LFS initialized successfully");
+        } catch (error) {
+            console.error("[GitService] Failed to initialize LFS:", error);
+            throw new Error(
+                `Failed to initialize Git LFS: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Check if repository has LFS enabled
+     */
+    async isLFSEnabled(dir: string): Promise<boolean> {
+        return this.lfsService.isLFSEnabled(dir);
+    }
+
+    /**
+     * Get LFS status for the repository
+     */
+    async getLFSStatus(dir: string) {
+        return this.lfsService.getLFSStatus(dir);
+    }
+
+    /**
+     * Get LFS service instance
+     */
+    getLFSService(): LFSService {
+        return this.lfsService;
+    }
+
+    /**
+     * Check if file should use LFS and handle accordingly
+     */
+    private async checkAndHandleLFSCandidate(
+        dir: string,
+        filepath: string,
+        isLFSEnabled: boolean
+    ): Promise<void> {
+        try {
+            const fullPath = path.join(dir, filepath);
+            const stats = await fs.promises.stat(fullPath);
+
+            // Check if file should use LFS
+            if (await this.lfsService.shouldUseLFS(filepath, stats.size)) {
+                if (!isLFSEnabled) {
+                    // Suggest enabling LFS for this repository
+                    await this.suggestLFSInitialization(dir, filepath, stats.size);
+                } else if (!this.lfsService.matchesLFSPattern(filepath)) {
+                    // File is large but not covered by patterns - suggest adding pattern
+                    await this.suggestAddingLFSPattern(dir, filepath, stats.size);
+                }
+            }
+        } catch (error) {
+            // File might not exist or be accessible, skip
+            console.debug("[GitService] Could not check file for LFS:", filepath, error);
+        }
+    }
+
+    /**
+     * Process file for LFS upload before adding to git
+     * This is the key method that actually uploads files to LFS
+     */
+    private async processLFSFileBeforeAdd(dir: string, filepath: string): Promise<void> {
+        try {
+            // Get authentication for LFS operations
+            const auth = await this.getLFSAuth();
+
+            // Process the file for LFS (upload and replace with pointer)
+            const wasProcessed = await this.lfsService.processFileForLFS(
+                fs,
+                dir,
+                filepath,
+                http,
+                auth
+            );
+
+            if (wasProcessed) {
+                console.log(`[GitService] File ${filepath} processed for LFS`);
+            }
+        } catch (error) {
+            console.error(`[GitService] Failed to process file for LFS: ${filepath}`, error);
+            // Don't throw - let the normal git add proceed
+        }
+    }
+
+    /**
+     * Get authentication credentials for LFS operations
+     */
+    public async getLFSAuth(): Promise<{ username: string; password: string } | undefined> {
+        try {
+            // Try to get credentials from the state manager
+            const credentials = this.stateManager.getGitLabCredentials();
+            if (credentials?.token) {
+                // For GitLab, use token as password with username 'oauth2'
+                return {
+                    username: "oauth2",
+                    password: credentials.token,
+                };
+            }
+
+            console.debug("[GitService] No LFS credentials available");
+            return undefined;
+        } catch (error) {
+            console.debug("[GitService] Failed to get LFS credentials:", error);
+            return undefined;
+        }
+    }
+
+    /**
+     * Suggest LFS initialization for repositories with multimedia files
+     */
+    private async suggestLFSInitialization(
+        dir: string,
+        filepath: string,
+        fileSize: number
+    ): Promise<void> {
+        const sizeMB = Math.round(fileSize / 1024 / 1024);
+        const fileName = path.basename(filepath);
+
+        // Only suggest once per session to avoid spam
+        const workspaceKey = `lfs-suggestion-${dir}`;
+        const context = vscode.extensions.getExtension("frontier-rnd.frontier-authentication")
+            ?.exports?.context;
+        if (context?.globalState.get(workspaceKey)) {
+            return;
+        }
+        await context?.globalState.update(workspaceKey, true);
+
+        const message = this.lfsService.matchesLFSPattern(filepath)
+            ? `Found multimedia file "${fileName}". Initialize Git LFS to handle multimedia files efficiently?`
+            : `Found large file "${fileName}" (${sizeMB}MB). Initialize Git LFS to handle large files efficiently?`;
+
+        const choice = await vscode.window.showInformationMessage(
+            message,
+            { modal: false },
+            "Initialize LFS",
+            "Not now"
+        );
+
+        if (choice === "Initialize LFS") {
+            vscode.commands.executeCommand("frontier.initializeLFS");
+        }
+    }
+
+    /**
+     * Suggest adding file type to LFS patterns
+     */
+    private async suggestAddingLFSPattern(
+        dir: string,
+        filepath: string,
+        fileSize: number
+    ): Promise<void> {
+        const sizeMB = Math.round(fileSize / 1024 / 1024);
+        const fileName = path.basename(filepath);
+        const ext = path.extname(filepath);
+
+        const choice = await vscode.window.showInformationMessage(
+            `Large file "${fileName}" (${sizeMB}MB) detected. Add ${ext} files to Git LFS patterns?`,
+            "Add to LFS",
+            "Skip"
+        );
+
+        if (choice === "Add to LFS") {
+            try {
+                await this.lfsService.addFileTypeToLFS(dir, filepath);
+                vscode.window.showInformationMessage(`Added ${ext} files to Git LFS patterns`);
+            } catch (error) {
+                console.error("[GitService] Failed to add file type to LFS:", error);
+                vscode.window.showErrorMessage(
+                    `Failed to add file type to LFS: ${error instanceof Error ? error.message : "Unknown error"}`
+                );
+            }
+        }
+    }
+
+    /**
+     * Find large files that could benefit from LFS migration
+     */
+    async findLFSCandidates(dir: string): Promise<string[]> {
+        const status = await this.getStatus(dir);
+        const candidates: string[] = [];
+
+        for (const [filepath] of status) {
+            try {
+                const fullPath = path.join(dir, filepath);
+                const stats = await fs.promises.stat(fullPath);
+
+                if (await this.lfsService.shouldUseLFS(filepath, stats.size)) {
+                    candidates.push(filepath);
+                }
+            } catch (error) {
+                // File might not exist, skip
+            }
+        }
+
+        return candidates;
+    }
+
+    /**
+     * Migrate existing files to LFS (used by migration command)
+     */
+    async migrateFilesToLFS(
+        dir: string,
+        files: string[],
+        author: { name: string; email: string }
+    ): Promise<void> {
+        // Ensure LFS is initialized
+        const isEnabled = await this.isLFSEnabled(dir);
+        if (!isEnabled) {
+            await this.initializeLFS(dir, author);
+        }
+
+        // Remove files from git index but keep actual files
+        for (const filepath of files) {
+            await this.remove(dir, filepath);
+        }
+
+        // Add files back - now they'll be tracked as LFS due to .gitattributes
+        for (const filepath of files) {
+            await this.add(dir, filepath);
+        }
+
+        // Commit the migration
+        const filesList = files.slice(0, 10).join("\n• ");
+        const moreFiles = files.length > 10 ? `\n• ... and ${files.length - 10} more files` : "";
+
+        await this.commit(
+            dir,
+            `Migrate ${files.length} files to Git LFS\n\nFiles migrated:\n• ${filesList}${moreFiles}`,
+            author
+        );
     }
 }

@@ -118,6 +118,31 @@
                 "command": "frontier.refreshUserInfo",
                 "title": "Refresh User Info Cache",
                 "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.initializeLFS",
+                "title": "Initialize Git LFS",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.migrateLargeFiles",
+                "title": "Migrate Large Files to LFS",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.lfsStatus",
+                "title": "Show Git LFS Status",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.addFileTypeToLFS",
+                "title": "Add File Type to LFS",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.testLFSConnectivity",
+                "title": "Test LFS Server Connectivity",
+                "category": "Frontier"
             }
         ],
         "authentication": [
@@ -133,6 +158,12 @@
                     "type": "boolean",
                     "default": false,
                     "description": "Enable verbose debug logging for git operations (workingCopyStatusBeforeCommit, localStatusMatrix, mergeBaseStatusMatrix, remoteStatusMatrix)",
+                    "scope": "application"
+                },
+                "frontier.autoSuggestLFS": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically suggest Git LFS initialization for repositories with multimedia files",
                     "scope": "application"
                 }
             }
@@ -180,6 +211,8 @@
         "webpack-cli": "^5.1.4"
     },
     "dependencies": {
+        "@riboseinc/isogit-lfs": "^0.2.0",
+        "@aws-crypto/sha256-universal": "^2.0.0",
         "diff3": "^0.0.4",
         "isomorphic-git": "^1.25.3",
         "node-fetch": "^2.7.0"

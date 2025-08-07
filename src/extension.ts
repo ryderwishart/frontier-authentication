@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 import { FrontierAuthProvider } from "./auth/AuthenticationProvider";
 import { registerCommands } from "./commands";
 import { registerGitLabCommands } from "./commands/gitlabCommands";
+import { registerLFSCommands, hasMultimediaFiles } from "./commands/lfsCommands";
 import { registerProgressCommands } from "./commands/progressCommands";
 import { registerSCMCommands } from "./commands/scmCommands";
 import { initialState, StateManager } from "./state";
@@ -170,11 +171,18 @@ export async function activate(context: vscode.ExtensionContext) {
     const { GitService } = await import("./git/GitService");
     const gitService = new GitService(stateManagerInstance);
 
+    // Import GitLabService for LFS commands
+    const { GitLabService } = await import("./gitlab/GitLabService");
+    const gitlabService = new GitLabService(authenticationProvider);
+
     // Register commands - pass gitService for debug toggle
     registerCommands(context, authenticationProvider, gitService);
     registerGitLabCommands(context, authenticationProvider);
     registerSCMCommands(context, authenticationProvider);
     registerProgressCommands(context, authenticationProvider);
+
+    // Register LFS commands
+    registerLFSCommands(context, gitService, gitlabService);
 
     // Store API endpoint for use by other components
     context.globalState.update("frontierApiEndpoint", API_ENDPOINT);
@@ -217,6 +225,32 @@ export async function activate(context: vscode.ExtensionContext) {
             });
         }, 1000); // Small delay to ensure initialization is complete
     }
+
+    // Auto-suggest LFS for repositories with multimedia files
+    setTimeout(async () => {
+        await checkAndSuggestLFS(gitService, authenticationProvider);
+    }, 2000); // Delay to ensure everything is initialized
+
+    // Watch for workspace changes to suggest LFS for new repositories
+    vscode.workspace.onDidChangeWorkspaceFolders(async (event) => {
+        for (const folder of event.added) {
+            try {
+                const hasGit = await gitService.hasGitRepository(folder.uri.fsPath);
+                if (hasGit) {
+                    // Small delay to let repository settle
+                    setTimeout(async () => {
+                        await checkAndSuggestLFS(
+                            gitService,
+                            authenticationProvider,
+                            folder.uri.fsPath
+                        );
+                    }, 1000);
+                }
+            } catch (error) {
+                console.debug("[Extension] Error checking new workspace folder for git:", error);
+            }
+        }
+    });
 
     // Dispose existing providers if they exist
     if (authenticationProvider) {
@@ -368,6 +402,70 @@ export async function activate(context: vscode.ExtensionContext) {
     };
 
     return frontierAPI;
+}
+
+/**
+ * Check if workspace has multimedia files and suggest LFS initialization
+ */
+async function checkAndSuggestLFS(
+    gitService: any,
+    authProvider: FrontierAuthProvider,
+    specificPath?: string
+): Promise<void> {
+    try {
+        if (!authProvider.isAuthenticated) {
+            return; // Only suggest LFS for authenticated users
+        }
+
+        const workspacePath = specificPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspacePath) {
+            return;
+        }
+
+        const hasGit = await gitService.hasGitRepository(workspacePath);
+        if (!hasGit) {
+            return;
+        }
+
+        const isLFSEnabled = await gitService.isLFSEnabled(workspacePath);
+        if (isLFSEnabled) {
+            return; // LFS already enabled
+        }
+
+        // Check for multimedia files
+        const hasMultimedia = await hasMultimediaFiles(workspacePath, gitService);
+        if (!hasMultimedia) {
+            return; // No multimedia files to benefit from LFS
+        }
+
+        // Only suggest once per session per workspace to avoid spam
+        const sessionKey = `lfs-auto-suggestion-${workspacePath}`;
+        const context = vscode.extensions.getExtension("frontier-rnd.frontier-authentication")
+            ?.exports?.context;
+        if (context?.globalState.get(sessionKey)) {
+            return;
+        }
+        context?.globalState.update(sessionKey, true);
+
+        // Show suggestion
+        const choice = await vscode.window.showInformationMessage(
+            "🎬 This repository contains multimedia files. Enable Git LFS for better performance?",
+            { modal: false },
+            "Enable LFS",
+            "Not now",
+            "Don't ask again"
+        );
+
+        if (choice === "Enable LFS") {
+            await vscode.commands.executeCommand("frontier.initializeLFS");
+        } else if (choice === "Don't ask again") {
+            // Store permanent preference
+            const config = vscode.workspace.getConfiguration("frontier");
+            await config.update("autoSuggestLFS", false, vscode.ConfigurationTarget.Global);
+        }
+    } catch (error) {
+        console.debug("[Extension] Error checking for LFS suggestion:", error);
+    }
 }
 
 function updateStatusBar(statusBarItem: vscode.StatusBarItem, authState: AuthState) {
