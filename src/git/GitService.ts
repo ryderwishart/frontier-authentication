@@ -1,5 +1,7 @@
 import * as git from "isomorphic-git";
-import http from "isomorphic-git/http/web";
+import http from "isomorphic-git/http/node";
+import uploadBlob from "@riboseinc/isogit-lfs/upload";
+import { formatPointerInfo } from "@riboseinc/isogit-lfs/pointers";
 import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
@@ -1096,7 +1098,8 @@ export class GitService {
         try {
             const remotes = await git.listRemotes({ fs, dir });
             const origin = remotes.find((remote) => remote.remote === "origin");
-            return origin?.url;
+            const sanitizedUrl = this.stripCredentialsFromUrl(origin?.url || "");
+            return sanitizedUrl;
         } catch (error) {
             console.error("Error getting remote URL:", error);
             return undefined;
@@ -1419,23 +1422,23 @@ export class GitService {
 
     private async isLfsTracked(dir: string, filepath: string): Promise<boolean> {
         const globs = await this.getLfsGlobs(dir);
-        console.log(`[GitService] ${filepath} is LFS-tracked: ${globs.length > 0}`);
-        console.log(`[GitService] ${filepath} globs: ${globs}`);
+        // console.log(`[GitService] ${filepath} is LFS-tracked: ${globs.length > 0}`);
+        // console.log(`[GitService] ${filepath} globs: ${globs}`);
         if (globs.length === 0) {
             return false;
         }
 
         // Normalize to forward slashes relative to repo root
         const rel = filepath.replace(/\\/g, "/");
-        console.log(`[GitService] ${filepath} rel: ${rel}`);
+        // console.log(`[GitService] ${filepath} rel: ${rel}`);
         for (const g of globs) {
             const re = this.globToRegExp(g);
-            console.log(`[GitService] ${filepath} re: ${re}`);
+            // console.log(`[GitService] ${filepath} re: ${re}`);
             // If the pattern contains a path separator, test against the full relative path.
             // Otherwise, test against the basename so patterns like "*.webm" match in any folder.
             const subject = g.includes("/") ? rel : path.posix.basename(rel);
             if (re.test(subject)) {
-                console.log(`[GitService] ${filepath} re.test(rel) true`);
+                // console.log(`[GitService] ${filepath} re.test(rel) true`);
                 return true;
             }
         }
@@ -1449,9 +1452,23 @@ export class GitService {
 
     /** Get LFS batch endpoint from a standard remote URL */
     private lfsBatchUrl(remoteUrl: string): string {
-        // Ensure trailing ".git" removed just once
-        const base = remoteUrl.replace(/\.git$/i, "");
-        return `${base}/info/lfs/objects/batch`;
+        // LFS endpoints live under <repo>.git/info/lfs
+        const withGit = remoteUrl.endsWith(".git") ? remoteUrl : `${remoteUrl}.git`;
+        return `${withGit}/info/lfs/objects/batch`;
+    }
+
+    /** Remove embedded credentials from a remote URL (e.g., https://user:pass@host/...) */
+    private stripCredentialsFromUrl(remoteUrl: string): string {
+        console.log(`[GitService] Stripping credentials from ${remoteUrl} ben123`);
+        try {
+            const u = new URL(remoteUrl);
+            u.username = "";
+            u.password = "";
+            return u.toString().replace(/\/$/, "");
+        } catch {
+            // Fallback regex-based removal
+            return remoteUrl.replace(/^(https?:\/\/)[^@]+@/, "$1");
+        }
     }
 
     /**
@@ -1510,12 +1527,11 @@ export class GitService {
         // 2) If upload required, PUT the bytes to actions.upload.href
         if (actions.upload?.href) {
             const method = actions.upload.header?.["x-http-method"] ?? "PUT";
+            // Use only server-provided headers for the upload (presigned URLs often reject extra auth)
             const putRes = await fetch(actions.upload.href, {
                 method,
                 headers: {
                     ...(actions.upload.header || {}),
-                    // GitLab often signs the URL; Authorization usually not required, but harmless if present.
-                    Authorization: this.basicAuthHeader(auth),
                     "Content-Type": "application/octet-stream",
                     "Content-Length": String(size),
                 },
@@ -1532,8 +1548,9 @@ export class GitService {
             const verifyRes = await fetch(actions.verify.href, {
                 method: "POST",
                 headers: {
+                    // Many servers require a curl-like UA here
+                    "User-Agent": "curl/7.54",
                     ...(actions.verify.header || {}),
-                    Authorization: this.basicAuthHeader(auth),
                     "Content-Type": "application/vnd.git-lfs+json",
                 },
                 body: JSON.stringify({ oid, size }),
@@ -1586,18 +1603,13 @@ export class GitService {
             return;
         }
 
-        // Upload to LFS (idempotent; server will skip if already present)
-        const { oid, size } = await this.lfsUploadOne({
-            remoteUrl,
-            auth,
-            data: buf,
-        });
-
-        // Build pointer file content
-        const pointer = this.buildLfsPointer(oid, size);
+        // Upload to LFS via our helper (handles batch, upload, verify and x-http-method)
+        console.log(`[GitService] Uploading ${filepath} to LFS`);
+        const info = await this.lfsUploadOne({ remoteUrl, auth, data: buf });
+        const pointerBlob = formatPointerInfo(info);
 
         // Write pointer, stage it, then restore original bytes locally
-        await fs.promises.writeFile(abs, pointer);
+        await fs.promises.writeFile(abs, Buffer.from(pointerBlob));
         await git.add({ fs, dir, filepath });
         await fs.promises.writeFile(abs, buf);
     }
