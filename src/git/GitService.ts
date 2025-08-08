@@ -1419,18 +1419,27 @@ export class GitService {
 
     private async isLfsTracked(dir: string, filepath: string): Promise<boolean> {
         const globs = await this.getLfsGlobs(dir);
+        console.log(`[GitService] ${filepath} is LFS-tracked: ${globs.length > 0}`);
+        console.log(`[GitService] ${filepath} globs: ${globs}`);
         if (globs.length === 0) {
             return false;
         }
 
         // Normalize to forward slashes relative to repo root
         const rel = filepath.replace(/\\/g, "/");
+        console.log(`[GitService] ${filepath} rel: ${rel}`);
         for (const g of globs) {
             const re = this.globToRegExp(g);
-            if (re.test(rel)) {
+            console.log(`[GitService] ${filepath} re: ${re}`);
+            // If the pattern contains a path separator, test against the full relative path.
+            // Otherwise, test against the basename so patterns like "*.webm" match in any folder.
+            const subject = g.includes("/") ? rel : path.posix.basename(rel);
+            if (re.test(subject)) {
+                console.log(`[GitService] ${filepath} re.test(rel) true`);
                 return true;
             }
         }
+        console.log(`[GitService] ${filepath} re.test(rel) false`);
         return false;
     }
 
@@ -1559,10 +1568,11 @@ export class GitService {
     ): Promise<void> {
         // If not LFS-tracked, do normal add
         if (!(await this.isLfsTracked(dir, filepath))) {
+            console.log(`[GitService] ${filepath} is not LFS-tracked; adding as normal`);
             await git.add({ fs, dir, filepath });
             return;
         }
-
+        console.log(`[GitService] ${filepath} is LFS-tracked; adding as LFS`);
         // Read original bytes
         const abs = path.join(dir, filepath);
         const buf = await fs.promises.readFile(abs);
