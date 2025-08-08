@@ -3,6 +3,7 @@ import http from "isomorphic-git/http/web";
 import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
+import crypto from "crypto";
 
 import { StateManager } from "../state";
 
@@ -80,7 +81,7 @@ export class GitService {
             const result = await Promise.race([operation, timeout]);
             const duration = Date.now() - startTime;
             console.log(`[GitService] ${operationName} completed successfully in ${duration}ms`);
-            return result;
+            return result as T;
         } catch (error) {
             const duration = Date.now() - startTime;
 
@@ -132,7 +133,7 @@ export class GitService {
         const diagnostics = {
             timestamp: new Date().toISOString(),
             userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "N/A",
-            onlineStatus: typeof navigator !== "undefined" ? navigator.onLine : "Unknown",
+            onlineStatus: typeof navigator !== "undefined" ? (navigator as any).onLine : "Unknown",
             connectionTests: {} as Record<
                 string,
                 { status: string; responseTime?: number; httpStatus?: number; error?: string }
@@ -160,7 +161,7 @@ export class GitService {
                 diagnostics.connectionTests[endpoint.name] = {
                     status: "success",
                     responseTime: duration,
-                    httpStatus: response.status,
+                    httpStatus: (response as Response).status,
                 };
             } catch (error) {
                 diagnostics.connectionTests[endpoint.name] = {
@@ -268,8 +269,8 @@ export class GitService {
             const { isDirty, status: workingCopyStatusBeforeCommit } =
                 await this.getWorkingCopyState(dir);
             if (isDirty) {
-                console.log("Working copy is dirty, committing local changes");
-                await this.addAll(dir);
+                console.log("Working copy is dirty, committing local changes (LFS-aware)");
+                await this.addAllWithLFS(dir, auth);
                 await this.commit(dir, options?.commitMessage || "Local changes", author);
             }
 
@@ -475,9 +476,9 @@ export class GitService {
                 // File exists in remote but not in local or merge base -> added on remote
                 if (
                     remoteStatus &&
-                    remoteStatus[0] === 1 &&
-                    (!localStatus || localStatus[0] === 0) &&
-                    (!mergeBaseStatus || mergeBaseStatus[0] === 0)
+                    (remoteStatus as any)[0] === 1 &&
+                    (!localStatus || (localStatus as any)[0] === 0) &&
+                    (!mergeBaseStatus || (mergeBaseStatus as any)[0] === 0)
                 ) {
                     filesAddedOnRemote.push(filepath);
                     continue;
@@ -486,9 +487,9 @@ export class GitService {
                 // File exists in local but not in remote or merge base -> added locally
                 if (
                     localStatus &&
-                    localStatus[0] === 1 &&
-                    (!remoteStatus || remoteStatus[0] === 0) &&
-                    (!mergeBaseStatus || mergeBaseStatus[0] === 0)
+                    (localStatus as any)[0] === 1 &&
+                    (!remoteStatus || (remoteStatus as any)[0] === 0) &&
+                    (!mergeBaseStatus || (mergeBaseStatus as any)[0] === 0)
                 ) {
                     filesAddedLocally.push(filepath);
                     continue;
@@ -497,10 +498,10 @@ export class GitService {
                 // File exists in merge base and local but not in remote -> deleted on remote
                 if (
                     mergeBaseStatus &&
-                    mergeBaseStatus[0] === 1 &&
+                    (mergeBaseStatus as any)[0] === 1 &&
                     localStatus &&
-                    localStatus[0] === 1 &&
-                    (!remoteStatus || remoteStatus[0] === 0)
+                    (localStatus as any)[0] === 1 &&
+                    (!remoteStatus || (remoteStatus as any)[0] === 0)
                 ) {
                     filesDeletedOnRemote.push(filepath);
                     continue;
@@ -509,10 +510,10 @@ export class GitService {
                 // File exists in merge base and remote but not in local -> deleted locally
                 if (
                     mergeBaseStatus &&
-                    mergeBaseStatus[0] === 1 &&
+                    (mergeBaseStatus as any)[0] === 1 &&
                     remoteStatus &&
-                    remoteStatus[0] === 1 &&
-                    (!localStatus || localStatus[0] === 0)
+                    (remoteStatus as any)[0] === 1 &&
+                    (!localStatus || (localStatus as any)[0] === 0)
                 ) {
                     filesDeletedLocally.push(filepath);
                     continue;
@@ -521,15 +522,15 @@ export class GitService {
                 // File exists in all three but has different content
                 if (
                     localStatus &&
-                    localStatus[0] === 1 &&
+                    (localStatus as any)[0] === 1 &&
                     remoteStatus &&
-                    remoteStatus[0] === 1 &&
+                    (remoteStatus as any)[0] === 1 &&
                     mergeBaseStatus &&
-                    mergeBaseStatus[0] === 1
+                    (mergeBaseStatus as any)[0] === 1
                 ) {
-                    const localModified = localStatus[1] === 2; // workdir different from HEAD
-                    const remoteModified = remoteStatus[1] === 2; // workdir different from HEAD
-                    const mergeBaseModified = mergeBaseStatus[1] === 2; // merge base different from HEAD
+                    const localModified = (localStatus as any)[1] === 2; // workdir different from HEAD
+                    const remoteModified = (remoteStatus as any)[1] === 2; // workdir different from HEAD
+                    const mergeBaseModified = (mergeBaseStatus as any)[1] === 2; // merge base different from HEAD
 
                     // Treat all modified files as potential conflicts for simplicity
                     if (localModified || remoteModified || mergeBaseModified) {
@@ -537,16 +538,6 @@ export class GitService {
                     }
                 }
             }
-
-            // Additional validation to ensure files are properly categorized
-            // Filter out files from filesDeletedLocally that are actually added on remote
-            // const updatedFilesDeletedLocally = filesDeletedLocally.filter(
-            //     (filepath) => !filesAddedOnRemote.includes(filepath)
-            // );
-
-            // // Reassign the array contents while preserving the original reference
-            // filesDeletedLocally.length = 0;
-            // filesDeletedLocally.push(...updatedFilesDeletedLocally);
 
             this.debugLog("Files added locally:", filesAddedLocally);
             this.debugLog("Files deleted locally:", filesDeletedLocally);
@@ -589,9 +580,6 @@ export class GitService {
                     isNew = isAddedLocally || isAddedRemotely;
 
                     // Determine if this should be considered deleted
-                    // A file is truly deleted if:
-                    // 1. It's deleted locally and not modified remotely (user wants to delete)
-                    // 2. It's deleted remotely and not modified locally (remote deleted it)
                     isDeleted =
                         (isDeletedLocally && !isAddedRemotely) ||
                         (isDeletedRemotely && !isAddedLocally);
@@ -633,7 +621,6 @@ export class GitService {
                             });
                             remoteContent = new TextDecoder().decode(rBlob);
                         } else if (isAddedRemotely) {
-                            // For remotely added files, we need to read from remote HEAD
                             try {
                                 const { blob: rBlob } = await git.readBlob({
                                     fs,
@@ -973,6 +960,36 @@ export class GitService {
     }
 
     /**
+     * Stage all changes, routing LFS-tracked files through LFS upload.
+     * This preserves the working tree's original binary content after staging.
+     */
+    async addAllWithLFS(dir: string, auth: { username: string; password: string }): Promise<void> {
+        const status = await git.statusMatrix({ fs, dir });
+
+        // Handle deletions
+        const deletedFiles = status
+            .filter((entry) => this.fileStatus.isDeleted(entry))
+            .map(([filepath]) => filepath);
+
+        for (const filepath of deletedFiles) {
+            await git.remove({ fs, dir, filepath });
+        }
+
+        // Handle modifications and additions
+        const modifiedFiles = status
+            .filter(
+                (entry) =>
+                    this.fileStatus.isNew(entry) ||
+                    (this.fileStatus.hasWorkdirChanges(entry) && !this.fileStatus.isDeleted(entry))
+            )
+            .map(([filepath]) => filepath);
+
+        for (const filepath of modifiedFiles) {
+            await this.addWithLFS(dir, filepath, auth);
+        }
+    }
+
+    /**
      * Create a commit with the given message
      */
     async commit(
@@ -1153,13 +1170,13 @@ export class GitService {
                 method: "HEAD",
                 cache: "no-store", // Prevent caching
             })
-                .then((res) => res.status === 200)
+                .then((res) => (res as Response).status === 200)
                 .catch(() => false);
 
             const apiIsOnline = await fetch("https://api.frontierrnd.com")
                 .then((res) => {
                     console.log("apiIsOnline", { res });
-                    return res.status === 200;
+                    return (res as Response).status === 200;
                 })
                 .catch(() => false);
 
@@ -1338,5 +1355,223 @@ export class GitService {
         }
         // Compare HEAD status (index 1)
         return entry1[1] === entry2[1];
+    }
+
+    // =========================
+    // LFS INTEGRATION HELPERS
+    // =========================
+
+    /**
+     * Parse .gitattributes and return globs that have filter=lfs
+     */
+    private async getLfsGlobs(dir: string): Promise<string[]> {
+        try {
+            const attrsPath = path.join(dir, ".gitattributes");
+            const text = await fs.promises.readFile(attrsPath, "utf8");
+            const globs: string[] = [];
+
+            for (const rawLine of text.split(/\r?\n/)) {
+                const line = rawLine.trim();
+                if (!line || line.startsWith("#")) continue;
+
+                // naive split: "<pattern> attr[=val] attr[=val] ..."
+                const [pattern, ...attrs] = line.split(/\s+/);
+                if (!pattern) continue;
+
+                // explicitly contain "filter=lfs"
+                const hasLfs = attrs.some((a) => /^filter\s*=\s*lfs$/i.test(a));
+                if (hasLfs) globs.push(pattern);
+            }
+            return globs;
+        } catch {
+            // No .gitattributes is fine
+            return [];
+        }
+    }
+
+    /**
+     * Very small glob -> RegExp converter supporting "*", "?", and "**"
+     */
+    private globToRegExp(glob: string): RegExp {
+        // Escape regex specials
+        let s = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+        // ** -> match multi-segment
+        s = s.replace(/\\\*\\\*/g, ".*");
+        // * -> match any except path separator
+        s = s.replace(/\\\*/g, "[^/]*");
+        // ? -> match single char except path separator
+        s = s.replace(/\\\?/g, "[^/]");
+        return new RegExp("^" + s + "$");
+    }
+
+    private async isLfsTracked(dir: string, filepath: string): Promise<boolean> {
+        const globs = await this.getLfsGlobs(dir);
+        if (globs.length === 0) return false;
+
+        // Normalize to forward slashes relative to repo root
+        const rel = filepath.replace(/\\/g, "/");
+        for (const g of globs) {
+            const re = this.globToRegExp(g);
+            if (re.test(rel)) return true;
+        }
+        return false;
+    }
+
+    private sha256(buf: Buffer | Uint8Array): string {
+        return crypto.createHash("sha256").update(buf).digest("hex");
+    }
+
+    /** Get LFS batch endpoint from a standard remote URL */
+    private lfsBatchUrl(remoteUrl: string): string {
+        // Ensure trailing ".git" removed just once
+        const base = remoteUrl.replace(/\.git$/i, "");
+        return `${base}/info/lfs/objects/batch`;
+    }
+
+    /**
+     * Basic auth header for GitLab using username + PAT (password)
+     */
+    private basicAuthHeader(auth: { username: string; password: string }): string {
+        const token = Buffer.from(`${auth.username}:${auth.password}`, "utf8").toString("base64");
+        return `Basic ${token}`;
+    }
+
+    /**
+     * Upload a single blob to LFS (idempotent).
+     * Returns { oid, size } – enough to build a pointer file.
+     */
+    private async lfsUploadOne(opts: {
+        remoteUrl: string;
+        auth: { username: string; password: string };
+        data: Uint8Array;
+    }): Promise<{ oid: string; size: number }> {
+        const { remoteUrl, auth, data } = opts;
+        const oid = this.sha256(data);
+        const size = data.byteLength;
+
+        const batchUrl = this.lfsBatchUrl(remoteUrl);
+        const headers = {
+            "Content-Type": "application/vnd.git-lfs+json",
+            Accept: "application/vnd.git-lfs+json",
+            Authorization: this.basicAuthHeader(auth),
+        };
+
+        // 1) Ask server about upload
+        const batchBody = JSON.stringify({
+            operation: "upload",
+            transfers: ["basic"],
+            objects: [{ oid, size }],
+        });
+
+        const batchRes = await fetch(batchUrl, { method: "POST", headers, body: batchBody });
+        if (!(batchRes as Response).ok) {
+            const t = await (batchRes as Response).text().catch(() => "");
+            throw new Error(
+                `LFS batch upload negotiation failed: ${(batchRes as Response).status} ${t}`
+            );
+        }
+
+        const batchJson: any = await (batchRes as Response).json();
+
+        if (!Array.isArray(batchJson.objects) || !batchJson.objects[0]) {
+            // If object array missing, assume already present
+            return { oid, size };
+        }
+
+        const obj = batchJson.objects[0];
+        const actions = obj.actions || {};
+
+        // 2) If upload required, PUT the bytes to actions.upload.href
+        if (actions.upload?.href) {
+            const method = actions.upload.header?.["x-http-method"] ?? "PUT";
+            const putRes = await fetch(actions.upload.href, {
+                method,
+                headers: {
+                    ...(actions.upload.header || {}),
+                    // GitLab often signs the URL; Authorization usually not required, but harmless if present.
+                    Authorization: this.basicAuthHeader(auth),
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": String(size),
+                },
+                body: data as any,
+            });
+            if (!(putRes as Response).ok) {
+                const t = await (putRes as Response).text().catch(() => "");
+                throw new Error(`LFS upload failed: ${(putRes as Response).status} ${t}`);
+            }
+        }
+
+        // 3) If verify step provided, POST it
+        if (actions.verify?.href) {
+            const verifyRes = await fetch(actions.verify.href, {
+                method: "POST",
+                headers: {
+                    ...(actions.verify.header || {}),
+                    Authorization: this.basicAuthHeader(auth),
+                    "Content-Type": "application/vnd.git-lfs+json",
+                },
+                body: JSON.stringify({ oid, size }),
+            });
+            if (!(verifyRes as Response).ok) {
+                const t = await (verifyRes as Response).text().catch(() => "");
+                throw new Error(`LFS verify failed: ${(verifyRes as Response).status} ${t}`);
+            }
+        }
+
+        return { oid, size };
+    }
+
+    /** Build Git LFS pointer file text */
+    private buildLfsPointer(oidHex: string, size: number): string {
+        return [
+            "version https://git-lfs.github.com/spec/v1",
+            `oid sha256:${oidHex}`,
+            `size ${size}`,
+            "",
+        ].join("\n");
+    }
+
+    /**
+     * For a given path: if tracked by LFS, upload to LFS, stage pointer,
+     * then restore the original content in the working tree so the user can keep working.
+     */
+    private async addWithLFS(
+        dir: string,
+        filepath: string,
+        auth: { username: string; password: string }
+    ): Promise<void> {
+        // If not LFS-tracked, do normal add
+        if (!(await this.isLfsTracked(dir, filepath))) {
+            await git.add({ fs, dir, filepath });
+            return;
+        }
+
+        // Read original bytes
+        const abs = path.join(dir, filepath);
+        const buf = await fs.promises.readFile(abs);
+
+        // Resolve remote URL
+        const remoteUrl = await this.getRemoteUrl(dir);
+        if (!remoteUrl) {
+            // Fall back: just add as normal if we have no remote yet
+            console.warn(`[GitService] No remote URL; adding ${filepath} without LFS`);
+            await git.add({ fs, dir, filepath });
+            return;
+        }
+
+        // Upload to LFS (idempotent; server will skip if already present)
+        const { oid, size } = await this.lfsUploadOne({
+            remoteUrl,
+            auth,
+            data: buf,
+        });
+
+        // Build pointer file content
+        const pointer = this.buildLfsPointer(oid, size);
+
+        // Write pointer, stage it, then restore original bytes locally
+        await fs.promises.writeFile(abs, pointer);
+        await git.add({ fs, dir, filepath });
+        await fs.promises.writeFile(abs, buf);
     }
 }
