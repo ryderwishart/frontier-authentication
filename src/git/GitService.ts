@@ -1372,15 +1372,21 @@ export class GitService {
 
             for (const rawLine of text.split(/\r?\n/)) {
                 const line = rawLine.trim();
-                if (!line || line.startsWith("#")) continue;
+                if (!line || line.startsWith("#")) {
+                    continue;
+                }
 
                 // naive split: "<pattern> attr[=val] attr[=val] ..."
                 const [pattern, ...attrs] = line.split(/\s+/);
-                if (!pattern) continue;
+                if (!pattern) {
+                    continue;
+                }
 
                 // explicitly contain "filter=lfs"
                 const hasLfs = attrs.some((a) => /^filter\s*=\s*lfs$/i.test(a));
-                if (hasLfs) globs.push(pattern);
+                if (hasLfs) {
+                    globs.push(pattern);
+                }
             }
             return globs;
         } catch {
@@ -1393,26 +1399,37 @@ export class GitService {
      * Very small glob -> RegExp converter supporting "*", "?", and "**"
      */
     private globToRegExp(glob: string): RegExp {
-        // Escape regex specials
+        // Escape regex specials except *, ?, which we'll handle separately
         let s = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-        // ** -> match multi-segment
-        s = s.replace(/\\\*\\\*/g, ".*");
-        // * -> match any except path separator
-        s = s.replace(/\\\*/g, "[^/]*");
-        // ? -> match single char except path separator
-        s = s.replace(/\\\?/g, "[^/]");
+
+        // Handle ** first (multi-segment match including path separators)
+        s = s.replace(/\*\*/g, "§DOUBLESTAR§");
+
+        // Handle remaining single * (match anything except path separator)
+        s = s.replace(/\*/g, "[^/]*");
+
+        // Handle ? (match single char except path separator)
+        s = s.replace(/\?/g, "[^/]");
+
+        // Restore ** replacement
+        s = s.replace(/§DOUBLESTAR§/g, ".*");
+
         return new RegExp("^" + s + "$");
     }
 
     private async isLfsTracked(dir: string, filepath: string): Promise<boolean> {
         const globs = await this.getLfsGlobs(dir);
-        if (globs.length === 0) return false;
+        if (globs.length === 0) {
+            return false;
+        }
 
         // Normalize to forward slashes relative to repo root
         const rel = filepath.replace(/\\/g, "/");
         for (const g of globs) {
             const re = this.globToRegExp(g);
-            if (re.test(rel)) return true;
+            if (re.test(rel)) {
+                return true;
+            }
         }
         return false;
     }
