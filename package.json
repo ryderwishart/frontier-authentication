@@ -174,7 +174,7 @@
         "diff3": "^0.0.4",
         "isomorphic-git": "^1.25.3",
         "node-fetch": "^2.7.0",
-        "@riboseinc/isogit-lfs": "^0.2.0",
+        "@fetsorn/isogit-lfs": "^0.5.3",
         "@aws-crypto/sha256-universal": "^2.0.0"
     }
 }

@@ -1,7 +1,6 @@
 import * as git from "isomorphic-git";
 import http from "isomorphic-git/http/node";
-import uploadBlob from "@riboseinc/isogit-lfs/upload";
-import { formatPointerInfo } from "@riboseinc/isogit-lfs/pointers";
+import lfs from "@fetsorn/isogit-lfs";
 import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
@@ -28,6 +27,280 @@ export enum RemoteBranchStatus {
     FOUND,
     NOT_FOUND,
     ERROR,
+}
+
+/**
+ * Fixed validation function that properly handles GitLab LFS responses
+ */
+function isValidLFSInfoResponseData(val: any): boolean {
+    try {
+        // Check if response has the expected structure
+        if (!val || !Array.isArray(val.objects)) {
+            console.warn("[LFS Patch] Invalid response structure:", val);
+            return false;
+        }
+
+        const obj = val.objects[0];
+        if (!obj) {
+            console.warn("[LFS Patch] No objects in response");
+            return false;
+        }
+
+        // If there are no actions, it means the server already has the file
+        if (!obj.actions) {
+            console.log("[LFS Patch] Server already has file (no actions needed)");
+            return true;
+        }
+
+        // Check if upload action has required properties
+        const uploadAction = obj.actions.upload;
+        if (!uploadAction) {
+            console.warn("[LFS Patch] No upload action in response");
+            return false;
+        }
+
+        // Check if href exists and is a string (the original bug was here)
+        if (!uploadAction.href || typeof uploadAction.href !== "string") {
+            console.warn(
+                "[LFS Patch] Invalid or missing href in upload action:",
+                uploadAction.href
+            );
+            return false;
+        }
+
+        console.log("[LFS Patch] Response validation passed");
+        return true;
+    } catch (error) {
+        console.error("[LFS Patch] Error validating response:", error);
+        return false;
+    }
+}
+/**
+ * replace @fetsorn/isogit-lfs uploadBlobs function with corrected validation
+ */
+async function uploadBlobsToLFSBucket(
+    { headers = {}, url, auth }: { headers?: any; url: string; auth?: any },
+    contents: Uint8Array[]
+): Promise<any[]> {
+    console.log("[LFS Patch] Using patched uploadBlobs function");
+    console.log("[LFS Patch] URL:", url);
+    console.log("[LFS Patch] Auth object:", auth);
+
+    // Use the original library's buildPointerInfo function
+    const buildPointerInfo = (lfs as any).buildPointerInfo;
+    const getAuthHeader = (lfs as any).getAuthHeader || (() => ({}));
+
+    if (!buildPointerInfo) {
+        throw new Error("Unable to access buildPointerInfo from LFS library");
+    }
+
+    const infos = await Promise.all(contents.map((c: Uint8Array) => buildPointerInfo(c)));
+
+    // Build authentication headers - handle the auth object properly
+    let authHeaders: Record<string, string> = {};
+    if (auth) {
+        if (auth.username && auth.password) {
+            // Basic authentication
+            const credentials = `${auth.username}:${auth.password}`;
+            authHeaders.Authorization = `Basic ${Buffer.from(credentials).toString("base64")}`;
+            console.log("[LFS Patch] Using Basic auth for user:", auth.username);
+        } else if (auth.token) {
+            // Token authentication
+            authHeaders.Authorization = `Bearer ${auth.token}`;
+            console.log("[LFS Patch] Using Bearer token auth");
+        } else {
+            // Try the library's getAuthHeader as fallback
+            authHeaders = getAuthHeader(auth);
+            console.log("[LFS Patch] Using library's auth method");
+        }
+    } else {
+        console.log("[LFS Patch] No authentication provided");
+    }
+
+    // Request LFS transfer
+    const lfsInfoRequestData = {
+        operation: "upload",
+        transfers: ["basic"],
+        objects: infos,
+    };
+
+    console.log("[LFS Patch] Making request to:", `${url}/info/lfs/objects/batch`);
+    console.log("[LFS Patch] Request data:", lfsInfoRequestData);
+    console.log("[LFS Patch] Auth headers:", Object.keys(authHeaders));
+
+    const lfsInfoRes = await fetch(`${url}/info/lfs/objects/batch`, {
+        method: "POST",
+        headers: {
+            ...headers,
+            ...authHeaders,
+            Accept: "application/vnd.git-lfs+json",
+            "Content-Type": "application/vnd.git-lfs+json",
+        },
+        body: JSON.stringify(lfsInfoRequestData),
+    });
+
+    if (!lfsInfoRes.ok) {
+        const errorText = await lfsInfoRes.text();
+        console.error("[LFS Patch] Request failed:");
+        console.error("Status:", lfsInfoRes.status, lfsInfoRes.statusText);
+        console.error("Response:", errorText);
+        console.error("Request URL:", `${url}/info/lfs/objects/batch`);
+        console.error("Request headers:", { ...headers, ...authHeaders });
+        throw new Error(
+            `LFS request failed with status ${lfsInfoRes.status}: ${lfsInfoRes.statusText}\nResponse: ${errorText}`
+        );
+    }
+
+    const lfsInfoResponseData = await lfsInfoRes.json();
+    console.log("[LFS Patch] Server response:", lfsInfoResponseData);
+
+    // Use our fixed validation
+    if (!isValidLFSInfoResponseData(lfsInfoResponseData)) {
+        console.error("[LFS Patch] Invalid response data:", lfsInfoResponseData);
+        throw new Error("Unexpected JSON structure received for LFS upload request");
+    }
+
+    // Upload each object
+    await Promise.all(
+        lfsInfoResponseData.objects.map(async (object: any, index: number) => {
+            // Server already has file
+            if (!object.actions) {
+                console.log(`[LFS Patch] Server already has file ${index}`);
+                return;
+            }
+
+            const { actions } = object;
+
+            console.log(`[LFS Patch] Uploading file ${index} to:`, actions.upload.href);
+            console.log(`[LFS Patch] Upload headers for file ${index}:`, {
+                ...headers,
+                ...authHeaders,
+                ...(actions.upload.header ?? {}),
+                // Don't override Content-Type if it's set by the server
+                ...(actions.upload.header?.["Content-Type"]
+                    ? {}
+                    : { "Content-Type": "application/octet-stream" }),
+            });
+            console.log(`[LFS Patch] File size:`, contents[index].length, "bytes");
+
+            try {
+                // Use the specific headers provided by GitLab for the upload
+                // These include the proper authentication for the LFS storage
+                const uploadHeaders = {
+                    ...headers,
+                    // Use GitLab's provided headers (which include auth)
+                    ...(actions.upload.header ?? {}),
+                    // Only add Content-Type if not already specified
+                    ...(actions.upload.header?.["Content-Type"]
+                        ? {}
+                        : { "Content-Type": "application/octet-stream" }),
+                };
+
+                // Remove headers that Node.js fetch doesn't allow to be set manually
+                delete uploadHeaders["Transfer-Encoding"];
+                delete uploadHeaders["Content-Length"];
+
+                console.log(`[LFS Patch] Final upload headers:`, uploadHeaders);
+
+                // Create AbortController for timeout handling
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
+
+                const resp = await fetch(actions.upload.href, {
+                    method: "PUT",
+                    headers: uploadHeaders,
+                    body: contents[index],
+                    signal: controller.signal,
+                    // Add keepalive for large uploads
+                    keepalive: false,
+                });
+
+                clearTimeout(timeoutId);
+
+                if (!resp.ok) {
+                    const errorText = await resp.text();
+                    console.error(`[LFS Patch] Upload failed for file ${index}:`);
+                    console.error("Status:", resp.status, resp.statusText);
+                    console.error("Response:", errorText);
+                    throw new Error(
+                        `Upload failed for file ${index}, HTTP ${resp.status}: ${resp.statusText}\nResponse: ${errorText}`
+                    );
+                }
+
+                console.log(`[LFS Patch] File ${index} uploaded successfully`);
+            } catch (fetchError: any) {
+                console.error(`[LFS Patch] Network error uploading file ${index}:`, fetchError);
+                console.error(`[LFS Patch] Error details:`, {
+                    message: fetchError.message,
+                    cause: fetchError.cause,
+                    code: fetchError.code,
+                    stack: fetchError.stack,
+                });
+
+                // Log the cause in more detail if it exists
+                if (fetchError.cause) {
+                    console.error(`[LFS Patch] Error cause details:`, {
+                        message: fetchError.cause.message,
+                        code: fetchError.cause.code,
+                        errno: fetchError.cause.errno,
+                        syscall: fetchError.cause.syscall,
+                        address: fetchError.cause.address,
+                        port: fetchError.cause.port,
+                        stack: fetchError.cause.stack,
+                    });
+                }
+
+                // Provide more helpful error messages based on the error type
+                if (
+                    fetchError.message?.includes("certificate") ||
+                    fetchError.message?.includes("SSL") ||
+                    fetchError.message?.includes("TLS")
+                ) {
+                    throw new Error(
+                        `SSL/Certificate error uploading to LFS storage. This may be a self-signed certificate issue. Original error: ${fetchError.message}`
+                    );
+                } else if (
+                    fetchError.message?.includes("ECONNREFUSED") ||
+                    fetchError.message?.includes("ENOTFOUND")
+                ) {
+                    throw new Error(
+                        `Network connection error uploading to LFS storage. Check if the LFS storage server is accessible. Original error: ${fetchError.message}`
+                    );
+                } else if (fetchError.message?.includes("timeout")) {
+                    throw new Error(
+                        `Upload timeout to LFS storage. The file may be too large or the connection too slow. Original error: ${fetchError.message}`
+                    );
+                } else {
+                    throw new Error(
+                        `Network error uploading to LFS storage: ${fetchError.message}`
+                    );
+                }
+            }
+
+            // Handle verification if required
+            if (actions.verify) {
+                console.log(`[LFS Patch] Verifying file ${index}`);
+                const verificationResp = await fetch(actions.verify.href, {
+                    method: "POST",
+                    headers: {
+                        ...(actions.verify.header ?? {}),
+                        Accept: "application/vnd.git-lfs+json",
+                        "Content-Type": "application/vnd.git-lfs+json",
+                    },
+                    body: JSON.stringify(infos[index]),
+                });
+
+                if (!verificationResp.ok) {
+                    throw new Error(
+                        `Verification failed for file ${index}, HTTP ${verificationResp.status}: ${verificationResp.statusText}`
+                    );
+                }
+            }
+        })
+    );
+
+    console.log("[LFS Patch] Upload completed successfully");
+    return infos;
 }
 
 export class GitService {
@@ -987,7 +1260,7 @@ export class GitService {
             .map(([filepath]) => filepath);
 
         for (const filepath of modifiedFiles) {
-            await this.addWithLFS(dir, filepath, auth);
+            await this.addWithLFS(dir, filepath);
         }
     }
 
@@ -1098,8 +1371,9 @@ export class GitService {
         try {
             const remotes = await git.listRemotes({ fs, dir });
             const origin = remotes.find((remote) => remote.remote === "origin");
-            const sanitizedUrl = this.stripCredentialsFromUrl(origin?.url || "");
-            return sanitizedUrl;
+            return origin?.url;
+            // const sanitizedUrl = this.stripCredentialsFromUrl(origin?.url || "");
+            // return sanitizedUrl;
         } catch (error) {
             console.error("Error getting remote URL:", error);
             return undefined;
@@ -1575,13 +1849,130 @@ export class GitService {
     }
 
     /**
+     * Upload a file to LFS and get pointer info
+     */
+    static async uploadToLFS(
+        workspaceUri: vscode.Uri,
+        filePath: string,
+        fileContent: Uint8Array
+    ): Promise<{ success: boolean; pointerInfo?: any; error?: string }> {
+        try {
+            const workspaceFolder = workspaceUri.fsPath;
+
+            // Get remote URL for LFS operations
+            const remoteURL = await git.getConfig({
+                fs,
+                dir: workspaceFolder,
+                path: "remote.origin.url",
+            });
+
+            if (!remoteURL) {
+                return { success: false, error: "No remote URL configured" };
+            }
+
+            // Parse URL to extract credentials
+            const { cleanUrl, auth } = this.parseGitUrl(remoteURL);
+            console.log("[LFS] Using clean URL for upload:", cleanUrl);
+
+            // Upload blobs to LFS (uploadBlobs expects an array) - now using patched version
+            console.log(
+                "[LFS] Attempting upload with auth:",
+                auth ? "credentials provided" : "no auth"
+            );
+
+            const pointerInfos = await uploadBlobsToLFSBucket(
+                {
+                    url: cleanUrl,
+                    headers: {},
+                    auth, // Pass extracted credentials
+                },
+                [fileContent]
+            );
+
+            const pointerInfo = pointerInfos[0]; // Get first result since we uploaded one blob
+            console.log("[LFS] Upload successful, pointer info:", pointerInfo);
+
+            return { success: true, pointerInfo };
+        } catch (error) {
+            console.error("[LFS] Upload failed:", error);
+
+            // If LFS upload fails, let's fall back to adding the file normally to Git
+            // This ensures the user's workflow isn't completely blocked
+            console.warn("[LFS] Falling back to regular Git storage due to LFS upload failure");
+
+            const workspaceFolder = workspaceUri.fsPath;
+
+            try {
+                // Add file to Git normally (without LFS)
+                // Use filePath directly since it should already be relative to workspace
+                const relativePath = path.isAbsolute(filePath)
+                    ? path.relative(workspaceFolder, filePath)
+                    : filePath;
+
+                // Ensure the path doesn't go outside the workspace
+                if (relativePath.startsWith("..")) {
+                    throw new Error(`File path is outside workspace: ${relativePath}`);
+                }
+
+                await git.add({
+                    fs,
+                    dir: workspaceFolder,
+                    filepath: relativePath,
+                });
+
+                console.log("[LFS] File added to Git (without LFS) as fallback");
+
+                return {
+                    success: false,
+                    error: `LFS upload failed, file was added to Git normally instead: ${error instanceof Error ? error.message : String(error)}`,
+                };
+            } catch (gitError) {
+                console.error("[LFS] Fallback to Git also failed:", gitError);
+                return {
+                    success: false,
+                    error: `Both LFS upload and Git fallback failed: ${error instanceof Error ? error.message : String(error)}`,
+                };
+            }
+        }
+    }
+
+    private static parseGitUrl(url: string): {
+        cleanUrl: string;
+        auth?: { username: string; password: string };
+    } {
+        try {
+            const urlObj = new URL(url);
+
+            // Check if URL has embedded credentials
+            if (urlObj.username || urlObj.password) {
+                const auth = {
+                    username: decodeURIComponent(urlObj.username),
+                    password: decodeURIComponent(urlObj.password),
+                };
+
+                // Remove credentials from URL
+                urlObj.username = "";
+                urlObj.password = "";
+
+                return { cleanUrl: urlObj.toString(), auth };
+            }
+
+            return { cleanUrl: url };
+        } catch (error) {
+            // If URL parsing fails, return as-is
+            console.warn("[LFS] Could not parse URL, using as-is:", error);
+            return { cleanUrl: url };
+        }
+    }
+
+    /**
      * For a given path: if tracked by LFS, upload to LFS, stage pointer,
      * then restore the original content in the working tree so the user can keep working.
      */
     private async addWithLFS(
         dir: string,
-        filepath: string,
-        auth: { username: string; password: string }
+        filepath: string
+        // auth:. { username: string; password: string }
     ): Promise<void> {
         // If not LFS-tracked, do normal add
         if (!(await this.isLfsTracked(dir, filepath))) {
@@ -1602,11 +1993,25 @@ export class GitService {
             await git.add({ fs, dir, filepath });
             return;
         }
-
+        const { cleanUrl, auth } = GitService.parseGitUrl(remoteUrl);
+        console.log(`[GitService] cleanUrl: ${cleanUrl}`);
+        console.log(`[GitService] auth: ${auth}`);
+        if (!auth) {
+            console.warn(`[GitService] No auth; adding ${filepath} without LFS`);
+            await git.add({ fs, dir, filepath });
+            return;
+        }
         // Upload to LFS via our helper (handles batch, upload, verify and x-http-method)
         console.log(`[GitService] Uploading ${filepath} to LFS`);
-        const info = await this.lfsUploadOne({ remoteUrl, auth, data: buf });
-        const pointerBlob = formatPointerInfo(info);
+        const pointerInfos = await uploadBlobsToLFSBucket(
+            {
+                url: cleanUrl,
+                headers: {},
+                auth, // Pass extracted credentials
+            },
+            [buf]
+        );
+        const pointerBlob = lfs.formatPointerInfo(pointerInfos[0]);
 
         // Write pointer, stage it, then restore original bytes locally
         await fs.promises.writeFile(abs, Buffer.from(pointerBlob));

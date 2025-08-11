@@ -50,3 +50,4 @@ export const isGitLabInfo = (obj: any): obj is GitLabInfo => {
 export const isGitLabCredentials = (obj: any): obj is GitLabCredentials => {
     return typeof obj === "object" && typeof obj.token === "string" && typeof obj.url === "string";
 };
+
