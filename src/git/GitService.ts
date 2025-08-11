@@ -7,6 +7,12 @@ import * as path from "path";
 import crypto from "crypto";
 
 import { StateManager } from "../state";
+import {
+    UploadBlobsOptions,
+    LFSBatchRequest,
+    LFSBatchResponse,
+    LfsPointerInfo,
+} from "../types/lfs";
 
 export interface ConflictedFile {
     filepath: string;
@@ -32,15 +38,16 @@ export enum RemoteBranchStatus {
 /**
  * Fixed validation function that properly handles GitLab LFS responses
  */
-function isValidLFSInfoResponseData(val: any): boolean {
+function isValidLFSInfoResponseData(val: unknown): val is LFSBatchResponse {
     try {
         // Check if response has the expected structure
-        if (!val || !Array.isArray(val.objects)) {
+        const maybe = val as Partial<LFSBatchResponse> | undefined;
+        if (!maybe || !Array.isArray(maybe.objects)) {
             console.warn("[LFS Patch] Invalid response structure:", val);
             return false;
         }
 
-        const obj = val.objects[0];
+        const obj = maybe.objects[0];
         if (!obj) {
             console.warn("[LFS Patch] No objects in response");
             return false;
@@ -53,7 +60,7 @@ function isValidLFSInfoResponseData(val: any): boolean {
         }
 
         // Check if upload action has required properties
-        const uploadAction = obj.actions.upload;
+        const uploadAction = obj.actions?.upload;
         if (!uploadAction) {
             console.warn("[LFS Patch] No upload action in response");
             return false;
@@ -79,9 +86,9 @@ function isValidLFSInfoResponseData(val: any): boolean {
  * replace @fetsorn/isogit-lfs uploadBlobs function with corrected validation
  */
 async function uploadBlobsToLFSBucket(
-    { headers = {}, url, auth }: { headers?: any; url: string; auth?: any },
+    { headers = {}, url, auth }: UploadBlobsOptions,
     contents: Uint8Array[]
-): Promise<any[]> {
+): Promise<LfsPointerInfo[]> {
     console.log("[LFS Patch] Using patched uploadBlobs function");
     console.log("[LFS Patch] URL:", url);
     console.log("[LFS Patch] Auth object:", auth);
@@ -94,7 +101,9 @@ async function uploadBlobsToLFSBucket(
         throw new Error("Unable to access buildPointerInfo from LFS library");
     }
 
-    const infos = await Promise.all(contents.map((c: Uint8Array) => buildPointerInfo(c)));
+    const infos = (await Promise.all(
+        contents.map((c: Uint8Array) => buildPointerInfo(c))
+    )) as LfsPointerInfo[];
 
     // Build authentication headers - handle the auth object properly
     let authHeaders: Record<string, string> = {};
@@ -118,10 +127,13 @@ async function uploadBlobsToLFSBucket(
     }
 
     // Request LFS transfer
-    const lfsInfoRequestData = {
+    const lfsInfoRequestData: LFSBatchRequest = {
         operation: "upload",
         transfers: ["basic"],
-        objects: infos,
+        objects: infos.map((pi) => ({
+            oid: String((pi as any).oid ?? pi["oid"]),
+            size: Number((pi as any).size ?? 0),
+        })),
     };
 
     console.log("[LFS Patch] Making request to:", `${url}/info/lfs/objects/batch`);
@@ -151,7 +163,7 @@ async function uploadBlobsToLFSBucket(
         );
     }
 
-    const lfsInfoResponseData = await lfsInfoRes.json();
+    const lfsInfoResponseData = (await lfsInfoRes.json()) as unknown;
     console.log("[LFS Patch] Server response:", lfsInfoResponseData);
 
     // Use our fixed validation
@@ -161,8 +173,9 @@ async function uploadBlobsToLFSBucket(
     }
 
     // Upload each object
+    const responseData = lfsInfoResponseData as LFSBatchResponse;
     await Promise.all(
-        lfsInfoResponseData.objects.map(async (object: any, index: number) => {
+        responseData.objects.map(async (object, index: number) => {
             // Server already has file
             if (!object.actions) {
                 console.log(`[LFS Patch] Server already has file ${index}`);
@@ -170,14 +183,19 @@ async function uploadBlobsToLFSBucket(
             }
 
             const { actions } = object;
+            const upload = actions.upload;
+            if (!upload?.href) {
+                console.log(`[LFS Patch] No upload action provided for file ${index}`);
+                return;
+            }
 
-            console.log(`[LFS Patch] Uploading file ${index} to:`, actions.upload.href);
+            console.log(`[LFS Patch] Uploading file ${index} to:`, upload.href);
             console.log(`[LFS Patch] Upload headers for file ${index}:`, {
                 ...headers,
                 ...authHeaders,
-                ...(actions.upload.header ?? {}),
+                ...(upload.header ?? {}),
                 // Don't override Content-Type if it's set by the server
-                ...(actions.upload.header?.["Content-Type"]
+                ...(upload.header?.["Content-Type"]
                     ? {}
                     : { "Content-Type": "application/octet-stream" }),
             });
@@ -186,12 +204,12 @@ async function uploadBlobsToLFSBucket(
             try {
                 // Use the specific headers provided by GitLab for the upload
                 // These include the proper authentication for the LFS storage
-                const uploadHeaders = {
+                const uploadHeaders: Record<string, string> = {
                     ...headers,
                     // Use GitLab's provided headers (which include auth)
-                    ...(actions.upload.header ?? {}),
+                    ...(upload.header ?? {}),
                     // Only add Content-Type if not already specified
-                    ...(actions.upload.header?.["Content-Type"]
+                    ...(upload.header?.["Content-Type"]
                         ? {}
                         : { "Content-Type": "application/octet-stream" }),
                 };
@@ -206,7 +224,7 @@ async function uploadBlobsToLFSBucket(
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
 
-                const resp = await fetch(actions.upload.href, {
+                const resp = await fetch(upload.href, {
                     method: "PUT",
                     headers: uploadHeaders,
                     body: contents[index],
@@ -287,7 +305,10 @@ async function uploadBlobsToLFSBucket(
                         Accept: "application/vnd.git-lfs+json",
                         "Content-Type": "application/vnd.git-lfs+json",
                     },
-                    body: JSON.stringify(infos[index]),
+                    body: JSON.stringify({
+                        oid: String((infos[index] as any).oid ?? ""),
+                        size: Number((infos[index] as any).size ?? 0),
+                    }),
                 });
 
                 if (!verificationResp.ok) {
