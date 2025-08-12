@@ -1313,7 +1313,7 @@ export class GitService {
             .map(([filepath]) => filepath);
 
         for (const filepath of modifiedFiles) {
-            await this.addWithLFS(dir, filepath);
+            await this.addWithLFS(dir, filepath, auth);
         }
     }
 
@@ -1684,7 +1684,6 @@ export class GitService {
         return equal;
     }
 
-
     /**
      * Upload a file to LFS and get pointer info
      */
@@ -1724,8 +1723,8 @@ export class GitService {
      */
     private async addWithLFS(
         dir: string,
-        filepath: string
-        // auth:. { username: string; password: string }
+        filepath: string,
+        authFromCaller?: { username: string; password: string }
     ): Promise<void> {
         // If not LFS-tracked, do normal add
         if (!(await this.isLfsTracked(dir, filepath))) {
@@ -1747,9 +1746,18 @@ export class GitService {
             return;
         }
         const { cleanUrl, auth } = GitService.parseGitUrl(remoteUrl);
-        console.log(`[GitService] cleanUrl: ${cleanUrl}`);
-        console.log(`[GitService] auth: ${auth}`);
-        if (!auth) {
+        // Prefer embedded auth if present; otherwise use the caller-provided auth (e.g. oauth2 + token)
+        const effectiveAuth = auth ?? authFromCaller;
+
+        // Ensure repo URL includes .git to hit correct LFS endpoints on some servers
+        const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+
+        console.log(`[GitService] LFS base URL: ${lfsBaseUrl}`);
+        console.log(
+            `[GitService] Using ${auth ? "embedded" : authFromCaller ? "provided" : "no"} auth for LFS`
+        );
+
+        if (!effectiveAuth) {
             console.warn(`[GitService] No auth; adding ${filepath} without LFS`);
             await git.add({ fs, dir, filepath });
             return;
@@ -1758,9 +1766,9 @@ export class GitService {
         console.log(`[GitService] Uploading ${filepath} to LFS`);
         const pointerInfos = await uploadBlobsToLFSBucket(
             {
-                url: cleanUrl,
+                url: lfsBaseUrl,
                 headers: {},
-                auth, // Pass extracted credentials
+                auth: effectiveAuth, // Pass credentials (embedded or provided)
             },
             [buf]
         );
