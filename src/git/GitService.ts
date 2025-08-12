@@ -4,7 +4,6 @@ import lfs from "@fetsorn/isogit-lfs";
 import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
-import crypto from "crypto";
 
 import { StateManager } from "../state";
 import {
@@ -1092,7 +1091,40 @@ export class GitService {
                 )
             )
         );
-        return { isDirty: status.some((entry) => this.fileStatus.isAnyChange(entry)), status };
+
+        // Apply LFS-aware cleanliness: treat LFS-tracked files as clean if the
+        // worktree bytes hash to the same LFS pointer {oid,size} as HEAD.
+        const lfsAwareChanges: Array<[string, number, number, number]> = [];
+
+        for (const entry of status) {
+            const [filepath, head, workdir, stage] = entry as [string, number, number, number];
+
+            // If there are no changes at all, preserve as-is
+            if (!this.fileStatus.isAnyChange(entry)) {
+                continue;
+            }
+
+            // Only consider LFS override when it's a modification (not new/deleted) and
+            // the difference is specifically in the workdir vs HEAD content.
+            const isPotentialLfsCleanCase =
+                head === 1 && // exists in HEAD
+                workdir !== head && // workdir differs from HEAD
+                !this.fileStatus.isNew(entry) &&
+                !this.fileStatus.isDeleted(entry);
+
+            if (
+                isPotentialLfsCleanCase &&
+                (await this.isLfsWorktreeEquivalentToHeadPointer(dir, filepath))
+            ) {
+                // Skip adding to changes: treat as clean in the working tree
+                continue;
+            }
+
+            lfsAwareChanges.push(entry);
+        }
+
+        const isDirty = lfsAwareChanges.some((entry) => this.fileStatus.isAnyChange(entry));
+        return { isDirty, status };
     }
 
     /**
@@ -1356,26 +1388,6 @@ export class GitService {
         await git.add({ fs, dir, filepath });
     }
 
-    async remove(dir: string, filepath: string): Promise<void> {
-        await git.remove({ fs, dir, filepath });
-    }
-
-    async getStatus(dir: string): Promise<Array<[string, number, number, number]>> {
-        return git.statusMatrix({ fs, dir });
-    }
-
-    async getCurrentBranch(dir: string): Promise<string | undefined> {
-        return (await git.currentBranch({ fs, dir })) || undefined;
-    }
-
-    async listBranches(dir: string): Promise<string[]> {
-        return git.listBranches({ fs, dir });
-    }
-
-    async checkout(dir: string, ref: string): Promise<void> {
-        await git.checkout({ fs, dir, ref });
-    }
-
     async init(dir: string): Promise<void> {
         try {
             await git.init({ fs, dir, defaultBranch: "main" });
@@ -1419,18 +1431,6 @@ export class GitService {
         }
     }
 
-    async removeRemote(dir: string, name: string): Promise<void> {
-        try {
-            await git.deleteRemote({ fs, dir, remote: name });
-        } catch (error) {
-            console.error(`Error removing remote ${name}:`, error);
-            // If the remote doesn't exist, that's fine
-            if (!(error instanceof Error && error.message.includes("remote does not exist"))) {
-                throw error;
-            }
-        }
-    }
-
     async hasGitRepository(dir: string): Promise<boolean> {
         try {
             await git.resolveRef({ fs, dir, ref: "HEAD" });
@@ -1447,10 +1447,6 @@ export class GitService {
 
     async setConfig(dir: string, path: string, value: string): Promise<void> {
         await git.setConfig({ fs, dir, path, value });
-    }
-
-    async getConfig(dir: string, path: string): Promise<string | void> {
-        return git.getConfig({ fs, dir, path });
     }
 
     async push(
@@ -1511,153 +1507,6 @@ export class GitService {
     private getRemoteRef(branch: string): string {
         return `refs/remotes/origin/${branch}`;
     }
-
-    /**
-     * Helper method to resolve a reference to a commit hash
-     * @param dir The repository directory
-     * @param ref The reference to resolve
-     * @returns The commit hash
-     */
-    private async resolveReference(dir: string, ref: string): Promise<string> {
-        return git.resolveRef({ fs, dir, ref });
-    }
-
-    /**
-     * Helper method to resolve a remote branch reference to a commit hash
-     * @param dir The repository directory
-     * @param branch The branch name
-     * @returns The commit hash of the remote branch
-     */
-    private async resolveRemoteReference(dir: string, branch: string): Promise<string> {
-        return this.resolveReference(dir, this.getRemoteRef(branch));
-    }
-
-    async fastForward(
-        dir: string,
-        currentBranch: string,
-        auth: { username: string; password: string }
-    ): Promise<boolean> {
-        try {
-            // Fetch the latest changes from the remote
-            await git.fetch({
-                fs,
-                http,
-                dir,
-                onAuth: () => auth,
-            });
-
-            // Get the current commit
-            const currentCommit = await git.resolveRef({
-                fs,
-                dir,
-                ref: currentBranch,
-            });
-
-            // Get the remote commit
-            const remoteRef = this.getRemoteRef(currentBranch);
-            const remoteCommit = await git.resolveRef({
-                fs,
-                dir,
-                ref: remoteRef,
-            });
-
-            // Fast-forward just updates local HEAD to match remote, no pushing needed
-            await git.fastForward({
-                fs,
-                http,
-                dir,
-                ref: currentBranch,
-                onAuth: () => auth,
-            });
-
-            return true;
-        } catch (error) {
-            console.log("Fast-forward failed, identifying conflicts");
-            return false;
-        }
-    }
-
-    async getRemoteBranchStatus(
-        dir: string,
-        currentBranch: string,
-        auth: { username: string; password: string }
-    ): Promise<RemoteBranchStatus> {
-        try {
-            // Fetch the latest changes from the remote
-            await git.fetch({
-                fs,
-                http,
-                dir,
-                onAuth: () => auth,
-            });
-
-            // Check if the remote branch exists
-            try {
-                await git.resolveRef({
-                    fs,
-                    dir,
-                    ref: this.getRemoteRef(currentBranch),
-                });
-            } catch (error) {
-                // Remote branch doesn't exist
-                return RemoteBranchStatus.NOT_FOUND;
-            }
-
-            return RemoteBranchStatus.FOUND;
-        } catch (error) {
-            console.error("Error getting remote branch status:", error);
-            return RemoteBranchStatus.ERROR;
-        }
-    }
-
-    async mergeRemote(
-        dir: string,
-        currentBranch: string,
-        auth: { username: string; password: string }
-    ): Promise<boolean> {
-        try {
-            // Merge the remote branch into the current branch
-            await git.merge({
-                fs,
-                dir,
-                ours: currentBranch,
-                theirs: this.getRemoteRef(currentBranch),
-                author: {
-                    name: "Genesis",
-                    email: "genesis@example.com",
-                },
-                message: `Merge branch '${this.getShortRemoteRef(currentBranch)}' into ${currentBranch}`,
-            });
-            return true;
-        } catch (error) {
-            console.error("Error merging remote branch:", error);
-            return false;
-        }
-    }
-
-    async checkoutRemote(dir: string, currentBranch: string): Promise<void> {
-        await git.checkout({
-            fs,
-            dir,
-            ref: this.getShortRemoteRef(currentBranch),
-        });
-    }
-
-    // Add this helper method to the GitService class
-    private areStatusEntriesEqual(
-        entry1?: [string, number, number, number],
-        entry2?: [string, number, number, number]
-    ): boolean {
-        if (!entry1 || !entry2) {
-            return false;
-        }
-        // Compare HEAD status (index 1)
-        return entry1[1] === entry2[1];
-    }
-
-    // =========================
-    // LFS INTEGRATION HELPERS
-    // =========================
 
     /**
      * Parse .gitattributes and return globs that have filter=lfs
@@ -1741,221 +1590,104 @@ export class GitService {
         return false;
     }
 
-    private sha256(buf: Buffer | Uint8Array): string {
-        return crypto.createHash("sha256").update(buf).digest("hex");
-    }
-
-    /** Get LFS batch endpoint from a standard remote URL */
-    private lfsBatchUrl(remoteUrl: string): string {
-        // LFS endpoints live under <repo>.git/info/lfs
-        const withGit = remoteUrl.endsWith(".git") ? remoteUrl : `${remoteUrl}.git`;
-        return `${withGit}/info/lfs/objects/batch`;
-    }
-
-    /** Remove embedded credentials from a remote URL (e.g., https://user:pass@host/...) */
-    private stripCredentialsFromUrl(remoteUrl: string): string {
-        console.log(`[GitService] Stripping credentials from ${remoteUrl} ben123`);
+    /** Parse LFS pointer text into { oid, size } */
+    private parseLfsPointer(pointerText: string): { oid: string; size: number } | null {
         try {
-            const u = new URL(remoteUrl);
-            u.username = "";
-            u.password = "";
-            return u.toString().replace(/\/$/, "");
+            const lines = pointerText.split(/\r?\n/).map((l) => l.trim());
+            if (!lines[0]?.includes("git-lfs.github.com/spec/v1")) {
+                return null;
+            }
+            const oidLine = lines.find((l) => l.startsWith("oid "));
+            const sizeLine = lines.find((l) => l.startsWith("size "));
+            if (!oidLine || !sizeLine) {
+                return null;
+            }
+            const oidMatch = oidLine.match(/oid\s+sha256:([0-9a-f]{64})/i);
+            const sizeMatch = sizeLine.match(/size\s+(\d+)/);
+            if (!oidMatch || !sizeMatch) {
+                return null;
+            }
+            return { oid: oidMatch[1], size: Number(sizeMatch[1]) };
         } catch {
-            // Fallback regex-based removal
-            return remoteUrl.replace(/^(https?:\/\/)[^@]+@/, "$1");
+            return null;
         }
     }
 
-    /**
-     * Basic auth header for GitLab using username + PAT (password)
-     */
-    private basicAuthHeader(auth: { username: string; password: string }): string {
-        const token = Buffer.from(`${auth.username}:${auth.password}`, "utf8").toString("base64");
-        return `Basic ${token}`;
-    }
-
-    /**
-     * Upload a single blob to LFS (idempotent).
-     * Returns { oid, size } – enough to build a pointer file.
-     */
-    private async lfsUploadOne(opts: {
-        remoteUrl: string;
-        auth: { username: string; password: string };
-        data: Uint8Array;
-    }): Promise<{ oid: string; size: number }> {
-        const { remoteUrl, auth, data } = opts;
-        const oid = this.sha256(data);
-        const size = data.byteLength;
-
-        const batchUrl = this.lfsBatchUrl(remoteUrl);
-        const headers = {
-            "Content-Type": "application/vnd.git-lfs+json",
-            Accept: "application/vnd.git-lfs+json",
-            Authorization: this.basicAuthHeader(auth),
-        };
-
-        // 1) Ask server about upload
-        const batchBody = JSON.stringify({
-            operation: "upload",
-            transfers: ["basic"],
-            objects: [{ oid, size }],
-        });
-
-        const batchRes = await fetch(batchUrl, { method: "POST", headers, body: batchBody });
-        if (!(batchRes as Response).ok) {
-            const t = await (batchRes as Response).text().catch(() => "");
-            throw new Error(
-                `LFS batch upload negotiation failed: ${(batchRes as Response).status} ${t}`
-            );
-        }
-
-        const batchJson: any = await (batchRes as Response).json();
-
-        if (!Array.isArray(batchJson.objects) || !batchJson.objects[0]) {
-            // If object array missing, assume already present
+    /** Compute { oid, size } for current worktree bytes using LFS pointer algorithm */
+    private async buildWorktreePointerInfo(
+        dir: string,
+        filepath: string
+    ): Promise<{ oid: string; size: number } | null> {
+        try {
+            const absPath = path.join(dir, filepath);
+            const bytes = await fs.promises.readFile(absPath);
+            const buildPointerInfo = (lfs as any).buildPointerInfo;
+            if (!buildPointerInfo) {
+                return null;
+            }
+            const info = await buildPointerInfo(bytes);
+            const oid = String((info as any).oid ?? "");
+            const size = Number((info as any).size ?? 0);
+            if (!oid) {
+                return null;
+            }
             return { oid, size };
+        } catch {
+            return null;
         }
-
-        const obj = batchJson.objects[0];
-        const actions = obj.actions || {};
-
-        // 2) If upload required, PUT the bytes to actions.upload.href
-        if (actions.upload?.href) {
-            const method = actions.upload.header?.["x-http-method"] ?? "PUT";
-            // Use only server-provided headers for the upload (presigned URLs often reject extra auth)
-            const putRes = await fetch(actions.upload.href, {
-                method,
-                headers: {
-                    ...(actions.upload.header || {}),
-                    "Content-Type": "application/octet-stream",
-                    "Content-Length": String(size),
-                },
-                body: data as any,
-            });
-            if (!(putRes as Response).ok) {
-                const t = await (putRes as Response).text().catch(() => "");
-                throw new Error(`LFS upload failed: ${(putRes as Response).status} ${t}`);
-            }
-        }
-
-        // 3) If verify step provided, POST it
-        if (actions.verify?.href) {
-            const verifyRes = await fetch(actions.verify.href, {
-                method: "POST",
-                headers: {
-                    // Many servers require a curl-like UA here
-                    "User-Agent": "curl/7.54",
-                    ...(actions.verify.header || {}),
-                    "Content-Type": "application/vnd.git-lfs+json",
-                },
-                body: JSON.stringify({ oid, size }),
-            });
-            if (!(verifyRes as Response).ok) {
-                const t = await (verifyRes as Response).text().catch(() => "");
-                throw new Error(`LFS verify failed: ${(verifyRes as Response).status} ${t}`);
-            }
-        }
-
-        return { oid, size };
     }
 
-    /** Build Git LFS pointer file text */
-    private buildLfsPointer(oidHex: string, size: number): string {
-        return [
-            "version https://git-lfs.github.com/spec/v1",
-            `oid sha256:${oidHex}`,
-            `size ${size}`,
-            "",
-        ].join("\n");
+    /** Read pointer from HEAD for a file, if the HEAD blob is a valid LFS pointer */
+    private async readHeadPointerInfo(
+        dir: string,
+        filepath: string
+    ): Promise<{ oid: string; size: number } | null> {
+        try {
+            const headOid = await git.resolveRef({ fs, dir, ref: "HEAD" });
+            const { blob } = await git.readBlob({ fs, dir, oid: headOid, filepath });
+            const text = new TextDecoder().decode(blob);
+            return this.parseLfsPointer(text);
+        } catch {
+            return null;
+        }
     }
+
+    /** Determine if LFS-tracked file's worktree bytes match the HEAD pointer */
+    private async isLfsWorktreeEquivalentToHeadPointer(
+        dir: string,
+        filepath: string
+    ): Promise<boolean> {
+        // Must be LFS-tracked, otherwise this equivalence does not apply
+        if (!(await this.isLfsTracked(dir, filepath))) {
+            return false;
+        }
+
+        const worktreePointer = await this.buildWorktreePointerInfo(dir, filepath);
+        if (!worktreePointer) {
+            return false;
+        }
+
+        const headPointer = await this.readHeadPointerInfo(dir, filepath);
+        if (!headPointer) {
+            return false;
+        }
+
+        const equal =
+            headPointer.oid === worktreePointer.oid && headPointer.size === worktreePointer.size;
+        if (!equal) {
+            this.debugLog("LFS pointer mismatch:", {
+                filepath,
+                headPointer,
+                worktreePointer,
+            });
+        }
+        return equal;
+    }
+
 
     /**
      * Upload a file to LFS and get pointer info
      */
-    static async uploadToLFS(
-        workspaceUri: vscode.Uri,
-        filePath: string,
-        fileContent: Uint8Array
-    ): Promise<{ success: boolean; pointerInfo?: any; error?: string }> {
-        try {
-            const workspaceFolder = workspaceUri.fsPath;
-
-            // Get remote URL for LFS operations
-            const remoteURL = await git.getConfig({
-                fs,
-                dir: workspaceFolder,
-                path: "remote.origin.url",
-            });
-
-            if (!remoteURL) {
-                return { success: false, error: "No remote URL configured" };
-            }
-
-            // Parse URL to extract credentials
-            const { cleanUrl, auth } = this.parseGitUrl(remoteURL);
-            console.log("[LFS] Using clean URL for upload:", cleanUrl);
-
-            // Upload blobs to LFS (uploadBlobs expects an array) - now using patched version
-            console.log(
-                "[LFS] Attempting upload with auth:",
-                auth ? "credentials provided" : "no auth"
-            );
-
-            const pointerInfos = await uploadBlobsToLFSBucket(
-                {
-                    url: cleanUrl,
-                    headers: {},
-                    auth, // Pass extracted credentials
-                },
-                [fileContent]
-            );
-
-            const pointerInfo = pointerInfos[0]; // Get first result since we uploaded one blob
-            console.log("[LFS] Upload successful, pointer info:", pointerInfo);
-
-            return { success: true, pointerInfo };
-        } catch (error) {
-            console.error("[LFS] Upload failed:", error);
-
-            // If LFS upload fails, let's fall back to adding the file normally to Git
-            // This ensures the user's workflow isn't completely blocked
-            console.warn("[LFS] Falling back to regular Git storage due to LFS upload failure");
-
-            const workspaceFolder = workspaceUri.fsPath;
-
-            try {
-                // Add file to Git normally (without LFS)
-                // Use filePath directly since it should already be relative to workspace
-                const relativePath = path.isAbsolute(filePath)
-                    ? path.relative(workspaceFolder, filePath)
-                    : filePath;
-
-                // Ensure the path doesn't go outside the workspace
-                if (relativePath.startsWith("..")) {
-                    throw new Error(`File path is outside workspace: ${relativePath}`);
-                }
-
-                await git.add({
-                    fs,
-                    dir: workspaceFolder,
-                    filepath: relativePath,
-                });
-
-                console.log("[LFS] File added to Git (without LFS) as fallback");
-
-                return {
-                    success: false,
-                    error: `LFS upload failed, file was added to Git normally instead: ${error instanceof Error ? error.message : String(error)}`,
-                };
-            } catch (gitError) {
-                console.error("[LFS] Fallback to Git also failed:", gitError);
-                return {
-                    success: false,
-                    error: `Both LFS upload and Git fallback failed: ${error instanceof Error ? error.message : String(error)}`,
-                };
-            }
-        }
-    }
 
     private static parseGitUrl(url: string): {
         cleanUrl: string;
