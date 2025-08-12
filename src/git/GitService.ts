@@ -323,6 +323,96 @@ async function uploadBlobsToLFSBucket(
     return infos;
 }
 
+/**
+ * Download a single LFS object using the batch API and returned download action
+ */
+async function downloadLFSObject(
+    {
+        headers = {},
+        url,
+        auth,
+    }: {
+        headers?: Record<string, string>;
+        url: string;
+        auth?: { username?: string; password?: string; token?: string };
+    },
+    object: { oid: string; size: number }
+): Promise<Uint8Array> {
+    const authHeaders: Record<string, string> = {
+        "User-Agent": "curl/7.54", // Helpful for certain servers [[memory:5628983]]
+    };
+
+    if (auth) {
+        if (auth.username && auth.password) {
+            const credentials = `${auth.username}:${auth.password}`;
+            authHeaders.Authorization = `Basic ${Buffer.from(credentials).toString("base64")}`;
+        } else if (auth.token) {
+            authHeaders.Authorization = `Bearer ${auth.token}`;
+        }
+    }
+
+    const batchBody: LFSBatchRequest = {
+        operation: "download",
+        transfers: ["basic"],
+        objects: [
+            {
+                oid: object.oid,
+                size: object.size,
+            },
+        ],
+    };
+
+    const batchResp = await fetch(`${url}/info/lfs/objects/batch`, {
+        method: "POST",
+        headers: {
+            ...headers,
+            ...authHeaders,
+            Accept: "application/vnd.git-lfs+json",
+            "Content-Type": "application/vnd.git-lfs+json",
+        },
+        body: JSON.stringify(batchBody),
+    });
+
+    if (!batchResp.ok) {
+        const errorText = await batchResp.text();
+        throw new Error(
+            `LFS download batch failed: ${batchResp.status} ${batchResp.statusText}\nResponse: ${errorText}`
+        );
+    }
+
+    const data = (await batchResp.json()) as LFSBatchResponse;
+    const obj = data.objects?.[0];
+    const download = obj?.actions?.download;
+    if (!download?.href) {
+        throw new Error("LFS download action missing in batch response");
+    }
+
+    const dlHeaders: Record<string, string> = {
+        ...headers,
+        ...(download.header ?? {}),
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300000);
+    const fileResp = await fetch(download.href, {
+        method: "GET",
+        headers: dlHeaders,
+        signal: controller.signal,
+        keepalive: false,
+    });
+    clearTimeout(timeoutId);
+
+    if (!fileResp.ok) {
+        const errorText = await fileResp.text();
+        throw new Error(
+            `LFS object download failed: ${fileResp.status} ${fileResp.statusText}\nResponse: ${errorText}`
+        );
+    }
+
+    const arr = new Uint8Array(await fileResp.arrayBuffer());
+    return arr;
+}
+
 export class GitService {
     private stateManager: StateManager;
     private debugLogging: boolean = false;
@@ -659,6 +749,13 @@ export class GitService {
                 console.log("[GitService] Fast-forward successful, pushing any local changes");
                 await this.safePush(dir, auth);
 
+                // After integrating remote changes, smudge any LFS pointers
+                try {
+                    await this.smudgeAllLfsPointers(dir, auth);
+                } catch (e) {
+                    console.warn("[GitService] LFS smudge after fast-forward failed:", e);
+                }
+
                 return { hadConflicts: false };
             } catch (err) {
                 console.log("[GitService] Fast-forward failed, analyzing conflicts:", {
@@ -690,6 +787,13 @@ export class GitService {
                     "Pre-conflict-analysis fetch"
                 );
                 console.log("[GitService] Pre-conflict-analysis fetch completed successfully");
+
+                // After refetch, we might have new LFS pointers in HEAD; smudge them
+                try {
+                    await this.smudgeAllLfsPointers(dir, auth);
+                } catch (e) {
+                    console.warn("[GitService] LFS smudge after refetch failed:", e);
+                }
 
                 // Update remoteHead reference after the new fetch
                 remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
@@ -1382,6 +1486,15 @@ export class GitService {
                 }
             }
         );
+
+        // After clone, attempt to smudge LFS pointers in the working tree
+        try {
+            if (auth) {
+                await this.smudgeAllLfsPointers(dir, auth);
+            }
+        } catch (e) {
+            console.warn("[GitService] LFS smudge after clone failed:", e);
+        }
     }
 
     async add(dir: string, filepath: string): Promise<void> {
@@ -1455,6 +1568,65 @@ export class GitService {
         options?: { force?: boolean }
     ): Promise<void> {
         await this.safePush(dir, auth, { force: options?.force });
+    }
+
+    /**
+     * Find files whose HEAD blob is an LFS pointer, ensure worktree contains real bytes.
+     * Called after clone and after we integrate remote updates.
+     */
+    private async smudgeAllLfsPointers(
+        dir: string,
+        auth: { username: string; password: string }
+    ): Promise<void> {
+        const status = await git.statusMatrix({ fs, dir });
+
+        // Determine LFS base URL and auth
+        const remoteUrl = await this.getRemoteUrl(dir);
+        if (!remoteUrl) {
+            return;
+        }
+        const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
+        const effectiveAuth = embedded ?? auth;
+        const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+
+        for (const [filepath] of status) {
+            // Only consider files tracked by LFS
+            if (!(await this.isLfsTracked(dir, filepath))) {
+                continue;
+            }
+
+            // Read HEAD blob and see if it is an LFS pointer
+            const headPointer = await this.readHeadPointerInfo(dir, filepath);
+            if (!headPointer) {
+                continue;
+            }
+
+            // Check worktree content; if it already equals the binary for pointer, skip.
+            // We conservatively download if the worktree isn't a valid pointer placeholder.
+            try {
+                const abs = path.join(dir, filepath);
+                const content = await fs.promises.readFile(abs);
+                const text = content.toString("utf8");
+                const parsed = this.parseLfsPointer(text);
+                if (!parsed) {
+                    // Not a pointer text in worktree; assume already smudged.
+                    continue;
+                }
+            } catch {
+                // If cannot read, continue to attempt download
+            }
+
+            try {
+                const bytes = await downloadLFSObject(
+                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                    { oid: headPointer.oid, size: headPointer.size }
+                );
+                const abs = path.join(dir, filepath);
+                await fs.promises.writeFile(abs, bytes);
+            } catch (err) {
+                console.warn(`[GitService] Failed to download LFS object for ${filepath}:`, err);
+            }
+        }
     }
 
     async isOnline(): Promise<boolean> {
