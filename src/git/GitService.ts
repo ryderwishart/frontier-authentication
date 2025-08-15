@@ -1453,7 +1453,18 @@ export class GitService {
             .map(([filepath]) => filepath);
 
         for (const filepath of modifiedFiles) {
-            await this.addWithLFS(dir, filepath, auth);
+            // If LFS-tracked and worktree bytes correspond to the same LFS pointer as HEAD,
+            // the file only appears modified due to smudging. Skip re-adding and re-uploading.
+            if (await this.isLfsTracked(dir, filepath)) {
+                if (await this.isLfsWorktreeEquivalentToHeadPointer(dir, filepath)) {
+                    continue;
+                }
+                await this.addWithLFS(dir, filepath, auth);
+                continue;
+            }
+
+            // Non-LFS files: regular add
+            await git.add({ fs, dir, filepath });
         }
     }
 
