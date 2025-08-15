@@ -54,7 +54,7 @@ export class SCMManager {
     private registerCommands(): void {
         // Manual sync command
         this.context.subscriptions.push(
-            vscode.commands.registerCommand("frontier.syncChanges", () => this.syncChanges())
+            vscode.commands.registerCommand("frontier.syncChanges", (options?: { commitMessage?: string }) => this.syncChanges(options))
         );
 
         // Toggle auto-sync command
@@ -347,7 +347,7 @@ export class SCMManager {
         });
     }
 
-    async syncChanges(): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
+    async syncChanges(options?: { commitMessage?: string }): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
         // Create or show the status bar item
         if (!this.syncStatusBarItem) {
             this.syncStatusBarItem = vscode.window.createStatusBarItem(
@@ -390,7 +390,7 @@ export class SCMManager {
             };
 
             // Try to sync and get result
-            const syncResult = await this.gitService.syncChanges(workspacePath, auth, author);
+            const syncResult = await this.gitService.syncChanges(workspacePath, auth, author, options);
 
             // If we have conflicts, return them to client
             if (syncResult.hadConflicts && syncResult.conflicts) {

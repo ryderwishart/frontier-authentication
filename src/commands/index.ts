@@ -325,6 +325,66 @@ export function registerCommands(
                     `Failed to refresh user info: ${error instanceof Error ? error.message : String(error)}`
                 );
             }
+        }),
+        // Redownload all LFS files into the working tree (smudge) without affecting index/history
+        vscode.commands.registerCommand("frontier.redownloadAllLfsFiles", async () => {
+            try {
+                const workspaceFolders = vscode.workspace.workspaceFolders;
+                if (!workspaceFolders || workspaceFolders.length === 0) {
+                    vscode.window.showErrorMessage("No workspace is open");
+                    return;
+                }
+                const dir = workspaceFolders[0].uri.fsPath;
+
+                if (!authProvider.isAuthenticated) {
+                    vscode.window.showErrorMessage("Not authenticated. Please log in first.");
+                    return;
+                }
+
+                const { GitLabService } = await import("../gitlab/GitLabService");
+                const gitlabService = new GitLabService(authProvider);
+                await gitlabService.initializeWithRetry();
+                const token = await gitlabService.getToken();
+                if (!token) {
+                    vscode.window.showErrorMessage("GitLab token not available");
+                    return;
+                }
+
+                const gs = gitService
+                    ? gitService
+                    : new (await import("../git/GitService")).GitService(
+                          (await import("../state")).StateManager.getInstance()
+                      );
+
+                await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: "Redownloading LFS files...",
+                        cancellable: false,
+                    },
+                    async () => {
+                        const result = await gs.redownloadAllLfsInWorktree(dir, {
+                            username: "oauth2",
+                            password: token,
+                        });
+                        if (result.errors.length > 0) {
+                            console.warn("LFS redownload errors:", result.errors);
+                            vscode.window.showWarningMessage(
+                                `Redownloaded ${result.processed} LFS files with ${result.errors.length} errors. Check Output/Console for details.`
+                            );
+                        } else {
+                            vscode.window.showInformationMessage(
+                                `Redownloaded ${result.processed} LFS files successfully.`
+                            );
+                        }
+                    }
+                );
+            } catch (error) {
+                console.error("Failed to redownload LFS files:", error);
+                vscode.window.showErrorMessage(
+                    `Failed to redownload LFS files: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
         })
     );
 }

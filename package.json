@@ -114,6 +114,11 @@
                 "command": "frontier.refreshUserInfo",
                 "title": "Refresh User Info Cache",
                 "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.redownloadAllLfsFiles",
+                "title": "Redownload All LFS Files",
+                "category": "Frontier"
             }
         ],
         "authentication": [

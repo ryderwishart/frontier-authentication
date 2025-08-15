@@ -336,7 +336,8 @@ async function downloadLFSObject(
         url: string;
         auth?: { username?: string; password?: string; token?: string };
     },
-    object: { oid: string; size: number }
+    object: { oid: string; size: number },
+    options?: { maxPointerDepth?: number }
 ): Promise<Uint8Array> {
     const authHeaders: Record<string, string> = {
         "User-Agent": "curl/7.54", // Helpful for certain servers [[memory:5628983]]
@@ -410,7 +411,37 @@ async function downloadLFSObject(
     }
 
     const arr = new Uint8Array(await fileResp.arrayBuffer());
-    return arr;
+
+    // Detect accidental nested LFS pointers (pointer stored as LFS content). If so, follow once or twice.
+    try {
+        const maxDepth = options?.maxPointerDepth ?? 2;
+        let depth = 0;
+        let bytes = arr;
+        // Only inspect small prefix as text to avoid heavy decode on large binaries
+        while (depth < maxDepth) {
+            const previewLength = Math.min(bytes.length, 600);
+            const preview = new TextDecoder().decode(bytes.subarray(0, previewLength));
+            // Quick check for LFS pointer signature
+            if (!/git-lfs\.github\.com\/spec\/v1/.test(preview)) {
+                break;
+            }
+            const oidMatch = preview.match(/\boid\s+sha256:([0-9a-f]{64})\b/i);
+            const sizeMatch = preview.match(/\bsize\s+(\d+)\b/);
+            if (!oidMatch || !sizeMatch) {
+                break;
+            }
+            const nested = { oid: oidMatch[1], size: Number(sizeMatch[1]) };
+            // Fetch the nested target
+            bytes = await downloadLFSObject({ headers, url, auth }, nested, {
+                maxPointerDepth: 0,
+            });
+            depth += 1;
+        }
+        return bytes;
+    } catch {
+        // If parsing or nested fetch fails, just return original bytes
+        return arr;
+    }
 }
 
 export class GitService {
@@ -747,7 +778,7 @@ export class GitService {
 
                 // Fast-forward worked, push any local changes
                 console.log("[GitService] Fast-forward successful, pushing any local changes");
-                await this.safePush(dir, auth);
+                await this.safePush(dir, auth); // checking here
 
                 // After integrating remote changes, smudge any LFS pointers
                 try {
@@ -1267,7 +1298,7 @@ export class GitService {
                 throw new Error("Not on any branch");
             }
 
-            // Stage the resolved files based on their resolution type
+            // Stage the resolved files based on their resolution type (LFS-aware)
             for (const { filepath, resolution } of resolvedFiles) {
                 this.debugLog(
                     `Processing resolved file: ${filepath} with resolution: ${resolution}`
@@ -1277,8 +1308,9 @@ export class GitService {
                     console.log(`Removing file from git: ${filepath}`);
                     await git.remove({ fs, dir, filepath });
                 } else {
-                    console.log(`Adding file to git: ${filepath}`);
-                    await git.add({ fs, dir, filepath });
+                    // LFS-aware add: smudge if pointer in HEAD; else add via LFS if tracked; else regular add
+                    console.log(`Adding file to git (LFS-aware): ${filepath}`);
+                    await this.stageResolvedFileWithLFS(dir, filepath, auth);
                 }
             }
 
@@ -1590,12 +1622,7 @@ export class GitService {
         const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
 
         for (const [filepath] of status) {
-            // Only consider files tracked by LFS
-            if (!(await this.isLfsTracked(dir, filepath))) {
-                continue;
-            }
-
-            // Read HEAD blob and see if it is an LFS pointer
+            // Read HEAD blob and see if it is an LFS pointer; smudge if so (even if .gitattributes is missing)
             const headPointer = await this.readHeadPointerInfo(dir, filepath);
             if (!headPointer) {
                 continue;
@@ -1627,6 +1654,159 @@ export class GitService {
                 console.warn(`[GitService] Failed to download LFS object for ${filepath}:`, err);
             }
         }
+    }
+
+    /**
+     * Force re-download of all LFS-managed files in the current worktree.
+     * For every file whose HEAD blob is a valid LFS pointer:
+     *  - restore the pointer content into the worktree (discard local blob changes for that file only)
+     *  - download the real bytes from LFS and overwrite the pointer content in the worktree
+     * Does not stage or commit anything; index remains with pointer content.
+     */
+    async redownloadAllLfsInWorktree(
+        dir: string,
+        auth: { username: string; password: string }
+    ): Promise<{ processed: number; errors: Array<{ filepath: string; error: string }> }> {
+        console.log(
+            `[GitService][redownload] Starting redownload of all LFS files in worktree: ${dir}`
+        );
+        const status = await git.statusMatrix({ fs, dir });
+        console.log(`[GitService][redownload] Found ${status.length} files in status matrix`);
+
+        const remoteUrl = await this.getRemoteUrl(dir);
+        if (!remoteUrl) {
+            console.error(
+                `[GitService][redownload] No remote URL configured for repository: ${dir}`
+            );
+            return {
+                processed: 0,
+                errors: [{ filepath: "<all>", error: "No remote URL configured" }],
+            };
+        }
+        const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
+        const effectiveAuth = embedded ?? auth;
+        const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+        console.log(`[GitService][redownload] Using LFS base URL: ${lfsBaseUrl}`);
+
+        let processed = 0;
+        const errors: Array<{ filepath: string; error: string }> = [];
+
+        const headOid = await git.resolveRef({ fs, dir, ref: "HEAD" });
+        console.log(`[GitService][redownload] HEAD OID: ${headOid}`);
+
+        for (const [filepath] of status) {
+            try {
+                // Read HEAD blob; if it's not a pointer, skip.
+                let blob: Uint8Array | undefined;
+                try {
+                    const { blob: b } = await git.readBlob({ fs, dir, oid: headOid, filepath });
+                    blob = b;
+                } catch {
+                    console.debug(
+                        `[GitService][redownload] Could not read blob for ${filepath}, skipping`
+                    );
+                    continue;
+                }
+                const text = new TextDecoder().decode(blob);
+                const pointer = this.parseLfsPointer(text);
+                if (!pointer) {
+                    // console.debug(`[GitService][redownload] ${filepath} is not an LFS pointer, skipping`);
+                    continue;
+                }
+                console.log(`[GitService][redownload]text ${filepath} text: ${text}`);
+
+                console.log(
+                    `[GitService][redownload] Processing LFS file: ${filepath} (OID: ${pointer.oid}, Size: ${pointer.size})`
+                );
+
+                const abs = path.join(dir, filepath);
+                // 1) Restore pointer content to worktree (discard local blob for this file)
+                // await fs.promises.writeFile(abs, Buffer.from(blob));
+                console.debug(
+                    `[GitService][redownload] Restored pointer content to worktree for ${filepath}`
+                );
+
+                // 2) Download real content and overwrite worktree
+                const bytes = await downloadLFSObject(
+                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                    { oid: pointer.oid, size: pointer.size }
+                );
+                const downloadedFile = new TextDecoder().decode(bytes);
+                console.log(`[GitService][redownload] downloaded: ${downloadedFile}`);
+                await fs.promises.writeFile(abs, bytes);
+                console.log(
+                    `[GitService][redownload] Successfully downloaded and wrote LFS object for ${filepath} (${bytes.length} bytes)`
+                );
+
+                processed += 1;
+            } catch (e: any) {
+                const errorMsg = e?.message ?? String(e);
+                console.error(
+                    `[GitService][redownload] Failed to process LFS file ${filepath}:`,
+                    errorMsg
+                );
+                errors.push({ filepath, error: errorMsg });
+            }
+        }
+
+        console.log(
+            `[GitService][redownload] Completed LFS redownload: processed ${processed} files, ${errors.length} errors`
+        );
+        return { processed, errors };
+    }
+
+    /** Smudge a single file if the HEAD blob is an LFS pointer: download real bytes and write to worktree */
+    private async smudgeSingleLfsPointer(
+        dir: string,
+        filepath: string,
+        auth: { username: string; password: string }
+    ): Promise<void> {
+        const remoteUrl = await this.getRemoteUrl(dir);
+        if (!remoteUrl) {
+            return;
+        }
+        const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
+        const effectiveAuth = embedded ?? auth;
+        const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+
+        const headPointer = await this.readHeadPointerInfo(dir, filepath);
+        if (!headPointer) {
+            return;
+        }
+
+        try {
+            const bytes = await downloadLFSObject(
+                { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                { oid: headPointer.oid, size: headPointer.size }
+            );
+            const abs = path.join(dir, filepath);
+            await fs.promises.writeFile(abs, bytes);
+        } catch (err) {
+            console.warn(`[GitService] Failed to smudge LFS object for ${filepath}:`, err);
+        }
+    }
+
+    /** Stage a resolved file in an LFS-aware way for merge completion */
+    private async stageResolvedFileWithLFS(
+        dir: string,
+        filepath: string,
+        auth: { username: string; password: string }
+    ): Promise<void> {
+        // If HEAD blob is a pointer, smudge to ensure real bytes in worktree, keep pointer in index/history
+        const headPointer = await this.readHeadPointerInfo(dir, filepath);
+        if (headPointer) {
+            await this.smudgeSingleLfsPointer(dir, filepath, auth);
+            return;
+        }
+
+        // Otherwise, if file should be tracked by LFS, add via LFS to stage pointer and keep real bytes in worktree
+        if (await this.isLfsTracked(dir, filepath)) {
+            await this.addWithLFS(dir, filepath, auth);
+            return;
+        }
+
+        // Fallback: regular add
+        await git.add({ fs, dir, filepath });
     }
 
     async isOnline(): Promise<boolean> {
@@ -1765,17 +1945,18 @@ export class GitService {
     /** Parse LFS pointer text into { oid, size } */
     private parseLfsPointer(pointerText: string): { oid: string; size: number } | null {
         try {
-            const lines = pointerText.split(/\r?\n/).map((l) => l.trim());
-            if (!lines[0]?.includes("git-lfs.github.com/spec/v1")) {
-                return null;
+            // Strip possible UTF-8 BOM and normalize
+            if (pointerText && pointerText.charCodeAt(0) === 0xfeff) {
+                pointerText = pointerText.slice(1);
             }
-            const oidLine = lines.find((l) => l.startsWith("oid "));
-            const sizeLine = lines.find((l) => l.startsWith("size "));
-            if (!oidLine || !sizeLine) {
-                return null;
-            }
-            const oidMatch = oidLine.match(/oid\s+sha256:([0-9a-f]{64})/i);
-            const sizeMatch = sizeLine.match(/size\s+(\d+)/);
+            const lines = pointerText
+                .split(/\r?\n/)
+                .map((l) => l.trim())
+                .filter((l) => l.length > 0);
+            const text = lines.join("\n");
+            // Be permissive: require only oid and size; version line can vary
+            const oidMatch = text.match(/\boid\s+sha256:([0-9a-f]{64})\b/i);
+            const sizeMatch = text.match(/\bsize\s+(\d+)\b/);
             if (!oidMatch || !sizeMatch) {
                 return null;
             }
