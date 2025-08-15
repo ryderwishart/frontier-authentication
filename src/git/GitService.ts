@@ -414,7 +414,7 @@ async function downloadLFSObject(
 
     // Detect accidental nested LFS pointers (pointer stored as LFS content). If so, follow once or twice.
     try {
-        const maxDepth = options?.maxPointerDepth ?? 2;
+        const maxDepth = options?.maxPointerDepth ?? 5;
         let depth = 0;
         let bytes = arr;
         // Only inspect small prefix as text to avoid heavy decode on large binaries
@@ -1375,6 +1375,10 @@ export class GitService {
                 // Try normal push first
                 await this.safePush(dir, auth, { ref: currentBranch });
                 console.log("Successfully pushed merge commit");
+
+                // After successful merge and push, check for newly created files that might be LFS pointers
+                console.log("Checking for newly created LFS pointer files after merge");
+                await this.smudgeNewLfsPointersAfterMerge(dir, resolvedFiles, auth);
             } catch (pushError) {
                 console.error("Error pushing merge commit:", pushError);
                 throw new Error(
@@ -1755,6 +1759,67 @@ export class GitService {
         return { processed, errors };
     }
 
+    /** Check newly created/modified files after merge for LFS pointers and smudge them */
+    private async smudgeNewLfsPointersAfterMerge(
+        dir: string,
+        resolvedFiles: Array<{ filepath: string; resolution: "deleted" | "created" | "modified" }>,
+        auth: { username: string; password: string }
+    ): Promise<void> {
+        const remoteUrl = await this.getRemoteUrl(dir);
+        if (!remoteUrl) {
+            return;
+        }
+        const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
+        const effectiveAuth = embedded ?? auth;
+        const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+
+        for (const { filepath, resolution } of resolvedFiles) {
+            // Only process newly created or modified files
+            if (resolution === "deleted") {
+                continue;
+            }
+
+            try {
+                // Check if this file should be tracked by LFS
+                if (!(await this.isLfsTracked(dir, filepath))) {
+                    continue;
+                }
+
+                const abs = path.join(dir, filepath);
+                const content = await fs.promises.readFile(abs, "utf8");
+                const pointer = this.parseLfsPointer(content);
+
+                if (!pointer) {
+                    // Not a pointer file, skip
+                    continue;
+                }
+
+                console.log(
+                    `[GitService] Found LFS pointer in newly created/modified file: ${filepath}`
+                );
+                console.log(
+                    `[GitService] Downloading LFS object: ${pointer.oid} (${pointer.size} bytes)`
+                );
+
+                // Download the real content and replace the pointer
+                const bytes = await downloadLFSObject(
+                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                    { oid: pointer.oid, size: pointer.size }
+                );
+
+                await fs.promises.writeFile(abs, bytes);
+                console.log(
+                    `[GitService] Successfully replaced pointer with LFS content for ${filepath}`
+                );
+            } catch (err) {
+                console.warn(
+                    `[GitService] Failed to process potential LFS pointer file ${filepath}:`,
+                    err
+                );
+            }
+        }
+    }
+
     /** Smudge a single file if the HEAD blob is an LFS pointer: download real bytes and write to worktree */
     private async smudgeSingleLfsPointer(
         dir: string,
@@ -2115,6 +2180,27 @@ export class GitService {
             await git.add({ fs, dir, filepath });
             return;
         }
+        // Check if HEAD already has this file as an LFS pointer with the same content
+        const headPointer = await this.readHeadPointerInfo(dir, filepath);
+        const currentPointer = await this.buildWorktreePointerInfo(dir, filepath);
+
+        if (
+            headPointer &&
+            currentPointer &&
+            headPointer.oid === currentPointer.oid &&
+            headPointer.size === currentPointer.size
+        ) {
+            console.log(
+                `[GitService] File ${filepath} already in LFS with same content, skipping upload`
+            );
+            // Just stage the existing pointer without re-uploading
+            const existingPointerBlob = lfs.formatPointerInfo(headPointer);
+            await fs.promises.writeFile(abs, Buffer.from(existingPointerBlob));
+            await git.add({ fs, dir, filepath });
+            await fs.promises.writeFile(abs, buf); // Restore original bytes
+            return;
+        }
+
         // Upload to LFS via our helper (handles batch, upload, verify and x-http-method)
         console.log(`[GitService] Uploading ${filepath} to LFS`);
         const pointerInfos = await uploadBlobsToLFSBucket(
