@@ -13,6 +13,23 @@ import {
     LfsPointerInfo,
 } from "../types/lfs";
 
+/**
+ * Standalone debug logging function that checks VS Code configuration
+ */
+function debugLog(message: string, data?: any): void {
+    const debugLogging = vscode.workspace
+        .getConfiguration("frontier")
+        .get("debugGitLogging", false);
+
+    if (debugLogging) {
+        if (data !== undefined) {
+            console.log(message, JSON.stringify(data));
+        } else {
+            console.log(message);
+        }
+    }
+}
+
 export interface ConflictedFile {
     filepath: string;
     ours: string;
@@ -54,7 +71,7 @@ function isValidLFSInfoResponseData(val: unknown): val is LFSBatchResponse {
 
         // If there are no actions, it means the server already has the file
         if (!obj.actions) {
-            console.log("[LFS Patch] Server already has file (no actions needed)");
+            debugLog("[LFS Patch] Server already has file (no actions needed)");
             return true;
         }
 
@@ -74,7 +91,7 @@ function isValidLFSInfoResponseData(val: unknown): val is LFSBatchResponse {
             return false;
         }
 
-        console.log("[LFS Patch] Response validation passed");
+        debugLog("[LFS Patch] Response validation passed");
         return true;
     } catch (error) {
         console.error("[LFS Patch] Error validating response:", error);
@@ -88,9 +105,9 @@ async function uploadBlobsToLFSBucket(
     { headers = {}, url, auth }: UploadBlobsOptions,
     contents: Uint8Array[]
 ): Promise<LfsPointerInfo[]> {
-    console.log("[LFS Patch] Using patched uploadBlobs function");
-    console.log("[LFS Patch] URL:", url);
-    console.log("[LFS Patch] Auth object:", auth);
+    debugLog("[LFS Patch] Using patched uploadBlobs function");
+    debugLog("[LFS Patch] URL:", url);
+    debugLog("[LFS Patch] Auth object:", auth);
 
     // Use the original library's buildPointerInfo function
     const buildPointerInfo = (lfs as any).buildPointerInfo;
@@ -111,18 +128,18 @@ async function uploadBlobsToLFSBucket(
             // Basic authentication
             const credentials = `${auth.username}:${auth.password}`;
             authHeaders.Authorization = `Basic ${Buffer.from(credentials).toString("base64")}`;
-            console.log("[LFS Patch] Using Basic auth for user:", auth.username);
+            debugLog("[LFS Patch] Using Basic auth for user:", auth.username);
         } else if (auth.token) {
             // Token authentication
             authHeaders.Authorization = `Bearer ${auth.token}`;
-            console.log("[LFS Patch] Using Bearer token auth");
+            debugLog("[LFS Patch] Using Bearer token auth");
         } else {
             // Try the library's getAuthHeader as fallback
             authHeaders = getAuthHeader(auth);
-            console.log("[LFS Patch] Using library's auth method");
+            debugLog("[LFS Patch] Using library's auth method");
         }
     } else {
-        console.log("[LFS Patch] No authentication provided");
+        debugLog("[LFS Patch] No authentication provided");
     }
 
     // Request LFS transfer
@@ -135,9 +152,9 @@ async function uploadBlobsToLFSBucket(
         })),
     };
 
-    console.log("[LFS Patch] Making request to:", `${url}/info/lfs/objects/batch`);
-    console.log("[LFS Patch] Request data:", lfsInfoRequestData);
-    console.log("[LFS Patch] Auth headers:", Object.keys(authHeaders));
+    debugLog("[LFS Patch] Making request to:", `${url}/info/lfs/objects/batch`);
+    debugLog("[LFS Patch] Request data:", lfsInfoRequestData);
+    debugLog("[LFS Patch] Auth headers:", Object.keys(authHeaders));
 
     const lfsInfoRes = await fetch(`${url}/info/lfs/objects/batch`, {
         method: "POST",
@@ -163,7 +180,7 @@ async function uploadBlobsToLFSBucket(
     }
 
     const lfsInfoResponseData = (await lfsInfoRes.json()) as unknown;
-    console.log("[LFS Patch] Server response:", lfsInfoResponseData);
+    debugLog("[LFS Patch] Server response:", lfsInfoResponseData);
 
     // Use our fixed validation
     if (!isValidLFSInfoResponseData(lfsInfoResponseData)) {
@@ -177,19 +194,19 @@ async function uploadBlobsToLFSBucket(
         responseData.objects.map(async (object, index: number) => {
             // Server already has file
             if (!object.actions) {
-                console.log(`[LFS Patch] Server already has file ${index}`);
+                debugLog(`[LFS Patch] Server already has file ${index}`);
                 return;
             }
 
             const { actions } = object;
             const upload = actions.upload;
             if (!upload?.href) {
-                console.log(`[LFS Patch] No upload action provided for file ${index}`);
+                debugLog(`[LFS Patch] No upload action provided for file ${index}`);
                 return;
             }
 
-            console.log(`[LFS Patch] Uploading file ${index} to:`, upload.href);
-            console.log(`[LFS Patch] Upload headers for file ${index}:`, {
+            debugLog(`[LFS Patch] Uploading file ${index} to:`, upload.href);
+            debugLog(`[LFS Patch] Upload headers for file ${index}:`, {
                 ...headers,
                 ...authHeaders,
                 ...(upload.header ?? {}),
@@ -198,7 +215,7 @@ async function uploadBlobsToLFSBucket(
                     ? {}
                     : { "Content-Type": "application/octet-stream" }),
             });
-            console.log(`[LFS Patch] File size:`, contents[index].length, "bytes");
+            debugLog(`[LFS Patch] File size:`, `${contents[index].length} bytes`);
 
             try {
                 // Use the specific headers provided by GitLab for the upload
@@ -217,7 +234,7 @@ async function uploadBlobsToLFSBucket(
                 delete uploadHeaders["Transfer-Encoding"];
                 delete uploadHeaders["Content-Length"];
 
-                console.log(`[LFS Patch] Final upload headers:`, uploadHeaders);
+                debugLog(`[LFS Patch] Final upload headers:`, uploadHeaders);
 
                 // Create AbortController for timeout handling
                 const controller = new AbortController();
@@ -244,7 +261,7 @@ async function uploadBlobsToLFSBucket(
                     );
                 }
 
-                console.log(`[LFS Patch] File ${index} uploaded successfully`);
+                debugLog(`[LFS Patch] File ${index} uploaded successfully`);
             } catch (fetchError: any) {
                 console.error(`[LFS Patch] Network error uploading file ${index}:`, fetchError);
                 console.error(`[LFS Patch] Error details:`, {
@@ -296,7 +313,7 @@ async function uploadBlobsToLFSBucket(
 
             // Handle verification if required
             if (actions.verify) {
-                console.log(`[LFS Patch] Verifying file ${index}`);
+                debugLog(`[LFS Patch] Verifying file ${index}`);
                 const verificationResp = await fetch(actions.verify.href, {
                     method: "POST",
                     headers: {
@@ -319,7 +336,7 @@ async function uploadBlobsToLFSBucket(
         })
     );
 
-    console.log("[LFS Patch] Upload completed successfully");
+    debugLog("[LFS Patch] Upload completed successfully");
     return infos;
 }
 
@@ -467,13 +484,7 @@ export class GitService {
      * Conditional debug logging - only logs if debug logging is enabled
      */
     private debugLog(message: string, data?: any): void {
-        if (this.debugLogging) {
-            if (data !== undefined) {
-                console.log(message, JSON.stringify(data));
-            } else {
-                console.log(message);
-            }
-        }
+        debugLog(message, data);
     }
 
     /**
@@ -485,7 +496,7 @@ export class GitService {
         operationName: string = "Git operation"
     ): Promise<T> {
         const startTime = Date.now();
-        console.log(`[GitService] Starting ${operationName} with ${timeoutMs}ms timeout`);
+        this.debugLog(`[GitService] Starting ${operationName} with ${timeoutMs}ms timeout`);
 
         const timeout = new Promise<never>((_, reject) => {
             setTimeout(() => {
@@ -496,7 +507,7 @@ export class GitService {
         try {
             const result = await Promise.race([operation, timeout]);
             const duration = Date.now() - startTime;
-            console.log(`[GitService] ${operationName} completed successfully in ${duration}ms`);
+            this.debugLog(`[GitService] ${operationName} completed successfully in ${duration}ms`);
             return result as T;
         } catch (error) {
             const duration = Date.now() - startTime;
@@ -544,7 +555,7 @@ export class GitService {
      * Logs network diagnostic information to help debug connectivity issues
      */
     private async logNetworkDiagnostics(): Promise<void> {
-        console.log(`[GitService] Running network diagnostics...`);
+        this.debugLog(`[GitService] Running network diagnostics...`);
 
         const diagnostics = {
             timestamp: new Date().toISOString(),
@@ -600,7 +611,7 @@ export class GitService {
     ): Promise<void> {
         const { force = false, ref, timeoutMs = 2 * 60 * 1000 } = options || {};
 
-        console.log(`[GitService] Starting push operation:`, {
+        this.debugLog(`[GitService] Starting push operation:`, {
             directory: dir,
             ref: ref || "HEAD",
             force,
@@ -617,7 +628,7 @@ export class GitService {
                 (entry) => entry[1] !== entry[2] || entry[2] !== entry[3]
             ).length;
 
-            console.log(`[GitService] Push context:`, {
+            this.debugLog(`[GitService] Push context:`, {
                 currentBranch,
                 remoteUrl,
                 changedFiles,
@@ -634,7 +645,7 @@ export class GitService {
             remote: "origin",
             ...(ref && { ref }),
             onAuth: () => {
-                console.log(`[GitService] Authentication requested for push operation`);
+                this.debugLog(`[GitService] Authentication requested for push operation`);
                 return auth;
             },
             ...(force && { force }),
@@ -642,7 +653,7 @@ export class GitService {
 
         try {
             await this.withTimeout(pushOperation, timeoutMs, "Push operation");
-            console.log(`[GitService] Push completed successfully`);
+            this.debugLog(`[GitService] Push completed successfully`);
         } catch (error) {
             console.error(`[GitService] Push operation failed:`, {
                 error: error instanceof Error ? error.message : String(error),
@@ -664,14 +675,14 @@ export class GitService {
     ): Promise<SyncResult> {
         // Check if sync is already in progress
         if (this.stateManager.isSyncLocked()) {
-            console.log("Sync already in progress, skipping this request");
+            this.debugLog("Sync already in progress, skipping this request");
             return { hadConflicts: false };
         }
 
         // Try to acquire the sync lock
         const lockAcquired = await this.stateManager.acquireSyncLock(dir);
         if (!lockAcquired) {
-            console.log("Failed to acquire sync lock, skipping this request");
+            this.debugLog("Failed to acquire sync lock, skipping this request");
             return { hadConflicts: false };
         }
 
@@ -685,7 +696,7 @@ export class GitService {
             const { isDirty, status: workingCopyStatusBeforeCommit } =
                 await this.getWorkingCopyState(dir);
             if (isDirty) {
-                console.log("Working copy is dirty, committing local changes (LFS-aware)");
+                this.debugLog("Working copy is dirty, committing local changes (LFS-aware)");
                 await this.addAllWithLFS(dir, auth);
                 await this.commit(dir, options?.commitMessage || "Local changes", author);
             }
@@ -696,7 +707,7 @@ export class GitService {
             }
 
             // 3. Fetch remote changes to get latest state
-            console.log("[GitService] Fetching remote changes");
+            this.debugLog("[GitService] Fetching remote changes");
             try {
                 await this.withTimeout(
                     git.fetch({
@@ -704,7 +715,7 @@ export class GitService {
                         http,
                         dir,
                         onAuth: () => {
-                            console.log(
+                            this.debugLog(
                                 "[GitService] Authentication requested for fetch operation"
                             );
                             return auth;
@@ -713,7 +724,7 @@ export class GitService {
                     2 * 60 * 1000,
                     "Fetch operation"
                 );
-                console.log("[GitService] Fetch completed successfully");
+                this.debugLog("[GitService] Fetch completed successfully");
             } catch (fetchError) {
                 console.error("[GitService] Fetch operation failed:", {
                     error: fetchError instanceof Error ? fetchError.message : String(fetchError),
@@ -734,7 +745,7 @@ export class GitService {
                 remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
             } catch (err) {
                 // Remote branch doesn't exist, just push our changes
-                console.log("Remote branch doesn't exist, pushing our changes");
+                this.debugLog("Remote branch doesn't exist, pushing our changes");
                 await this.safePush(dir, auth);
                 return { hadConflicts: false };
             }
@@ -747,14 +758,14 @@ export class GitService {
 
             // 6. If local and remote are identical, nothing to do
             if (localHead === remoteHead) {
-                console.log("Local and remote are already in sync");
+                this.debugLog("Local and remote are already in sync");
                 return { hadConflicts: false };
             }
 
             // 7. Try fast-forward first (simplest case)
             try {
-                console.log("[GitService] Attempting fast-forward merge");
-                console.log("[GitService] Fast-forward context:", {
+                this.debugLog("[GitService] Attempting fast-forward merge");
+                this.debugLog("[GitService] Fast-forward context:", {
                     localHead: localHead.substring(0, 8),
                     remoteHead: remoteHead.substring(0, 8),
                     currentBranch,
@@ -768,7 +779,7 @@ export class GitService {
                         dir,
                         ref: currentBranch,
                         onAuth: () => {
-                            console.log("[GitService] Authentication requested for fast-forward");
+                            this.debugLog("[GitService] Authentication requested for fast-forward");
                             return auth;
                         },
                     }),
@@ -777,7 +788,7 @@ export class GitService {
                 );
 
                 // Fast-forward worked, push any local changes
-                console.log("[GitService] Fast-forward successful, pushing any local changes");
+                this.debugLog("[GitService] Fast-forward successful, pushing any local changes");
                 await this.safePush(dir, auth); // checking here
 
                 // After integrating remote changes, smudge any LFS pointers
@@ -789,7 +800,7 @@ export class GitService {
 
                 return { hadConflicts: false };
             } catch (err) {
-                console.log("[GitService] Fast-forward failed, analyzing conflicts:", {
+                this.debugLog("[GitService] Fast-forward failed, analyzing conflicts:", {
                     error: err instanceof Error ? err.message : String(err),
                     localHead: localHead.substring(0, 8),
                     remoteHead: remoteHead.substring(0, 8),
@@ -797,10 +808,10 @@ export class GitService {
             }
 
             // 8. If we get here, we have divergent histories - check for conflicts
-            console.log("Fast-forward failed, need to handle conflicts");
+            this.debugLog("Fast-forward failed, need to handle conflicts");
 
             // Refetch to ensure we have the absolute latest remote state before analyzing conflicts
-            console.log("[GitService] Refetching remote changes before conflict analysis");
+            this.debugLog("[GitService] Refetching remote changes before conflict analysis");
             try {
                 await this.withTimeout(
                     git.fetch({
@@ -808,7 +819,7 @@ export class GitService {
                         http,
                         dir,
                         onAuth: () => {
-                            console.log(
+                            this.debugLog(
                                 "[GitService] Authentication requested for pre-conflict-analysis fetch"
                             );
                             return auth;
@@ -817,7 +828,7 @@ export class GitService {
                     2 * 60 * 1000,
                     "Pre-conflict-analysis fetch"
                 );
-                console.log("[GitService] Pre-conflict-analysis fetch completed successfully");
+                this.debugLog("[GitService] Pre-conflict-analysis fetch completed successfully");
 
                 // After refetch, we might have new LFS pointers in HEAD; smudge them
                 try {
@@ -828,7 +839,7 @@ export class GitService {
 
                 // Update remoteHead reference after the new fetch
                 remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
-                console.log(
+                this.debugLog(
                     "[GitService] Updated remote HEAD after refetch:",
                     remoteHead.substring(0, 8)
                 );
@@ -1144,7 +1155,7 @@ export class GitService {
                 )
             );
 
-            console.log(`Found ${conflicts.length} conflicts that need resolution`);
+            this.debugLog(`Found ${conflicts.length} conflicts that need resolution`);
             return { hadConflicts: true, conflicts };
         } catch (err) {
             // Enhanced error logging for sync operations
@@ -1218,7 +1229,7 @@ export class GitService {
      */
     private async getWorkingCopyState(dir: string): Promise<{ isDirty: boolean; status: any[] }> {
         const status = await git.statusMatrix({ fs, dir });
-        console.log(
+        this.debugLog(
             "Status before committing local changes:",
             JSON.stringify(
                 status.filter(
@@ -1276,14 +1287,14 @@ export class GitService {
     ): Promise<void> {
         // Check if sync is already in progress
         if (this.stateManager.isSyncLocked()) {
-            console.log("Sync already in progress, cannot complete merge");
+            this.debugLog("Sync already in progress, cannot complete merge");
             throw new Error("Sync operation already in progress. Please try again later.");
         }
 
         // Try to acquire the sync lock
         const lockAcquired = await this.stateManager.acquireSyncLock(dir);
         if (!lockAcquired) {
-            console.log("Failed to acquire sync lock, cannot complete merge");
+            this.debugLog("Failed to acquire sync lock, cannot complete merge");
             throw new Error("Failed to acquire sync lock. Please try again later.");
         }
 
@@ -1305,11 +1316,11 @@ export class GitService {
                 );
 
                 if (resolution === "deleted") {
-                    console.log(`Removing file from git: ${filepath}`);
+                    this.debugLog(`Removing file from git: ${filepath}`);
                     await git.remove({ fs, dir, filepath });
                 } else {
                     // LFS-aware add: smudge if pointer in HEAD; else add via LFS if tracked; else regular add
-                    console.log(`Adding file to git (LFS-aware): ${filepath}`);
+                    this.debugLog(`Adding file to git (LFS-aware): ${filepath}`);
                     await this.stageResolvedFileWithLFS(dir, filepath, auth);
                 }
             }
@@ -1320,14 +1331,14 @@ export class GitService {
             const remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
 
             // Fetch latest changes to ensure we have the most recent remote state
-            console.log("[GitService] Fetching latest changes before merge completion");
+            this.debugLog("[GitService] Fetching latest changes before merge completion");
             await this.withTimeout(
                 git.fetch({
                     fs,
                     http,
                     dir,
                     onAuth: () => {
-                        console.log("[GitService] Authentication requested for pre-merge fetch");
+                        this.debugLog("[GitService] Authentication requested for pre-merge fetch");
                         return auth;
                     },
                 }),
@@ -1335,7 +1346,7 @@ export class GitService {
                 "Pre-merge fetch operation"
             );
             const commitMessage = `Merge branch 'origin/${currentBranch}'`;
-            console.log(`Creating merge commit with message: ${commitMessage}`);
+            this.debugLog(`Creating merge commit with message: ${commitMessage}`);
 
             try {
                 // Create a merge commit with the two parents
@@ -1355,7 +1366,7 @@ export class GitService {
                 console.error("Error creating merge commit:", commitError);
 
                 // Create a regular commit instead
-                console.log("Attempting to create a regular commit with the resolved changes");
+                this.debugLog("Attempting to create a regular commit with the resolved changes");
                 await git.commit({
                     fs,
                     dir,
@@ -1370,14 +1381,14 @@ export class GitService {
             }
 
             // Push the merge commit with a more robust approach
-            console.log("Pushing merge commit");
+            this.debugLog("Pushing merge commit");
             try {
                 // Try normal push first
                 await this.safePush(dir, auth, { ref: currentBranch });
-                console.log("Successfully pushed merge commit");
+                this.debugLog("Successfully pushed merge commit");
 
                 // After successful merge and push, check for newly created files that might be LFS pointers
-                console.log("Checking for newly created LFS pointer files after merge");
+                this.debugLog("Checking for newly created LFS pointer files after merge");
                 await this.smudgeNewLfsPointersAfterMerge(dir, resolvedFiles, auth);
             } catch (pushError) {
                 console.error("Error pushing merge commit:", pushError);
@@ -1386,7 +1397,7 @@ export class GitService {
                 );
             }
 
-            console.log("=== completeMerge completed successfully ===");
+            this.debugLog("=== completeMerge completed successfully ===");
         } catch (error) {
             console.error("Complete merge error:", error);
             throw new Error(
@@ -1682,11 +1693,11 @@ export class GitService {
         dir: string,
         auth: { username: string; password: string }
     ): Promise<{ processed: number; errors: Array<{ filepath: string; error: string }> }> {
-        console.log(
+        this.debugLog(
             `[GitService][redownload] Starting redownload of all LFS files in worktree: ${dir}`
         );
         const status = await git.statusMatrix({ fs, dir });
-        console.log(`[GitService][redownload] Found ${status.length} files in status matrix`);
+        this.debugLog(`[GitService][redownload] Found ${status.length} files in status matrix`);
 
         const remoteUrl = await this.getRemoteUrl(dir);
         if (!remoteUrl) {
@@ -1701,13 +1712,13 @@ export class GitService {
         const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
         const effectiveAuth = embedded ?? auth;
         const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
-        console.log(`[GitService][redownload] Using LFS base URL: ${lfsBaseUrl}`);
+        this.debugLog(`[GitService][redownload] Using LFS base URL: ${lfsBaseUrl}`);
 
         let processed = 0;
         const errors: Array<{ filepath: string; error: string }> = [];
 
         const headOid = await git.resolveRef({ fs, dir, ref: "HEAD" });
-        console.log(`[GitService][redownload] HEAD OID: ${headOid}`);
+        this.debugLog(`[GitService][redownload] HEAD OID: ${headOid}`);
 
         for (const [filepath] of status) {
             try {
@@ -1728,9 +1739,9 @@ export class GitService {
                     // console.debug(`[GitService][redownload] ${filepath} is not an LFS pointer, skipping`);
                     continue;
                 }
-                console.log(`[GitService][redownload]text ${filepath} text: ${text}`);
+                this.debugLog(`[GitService][redownload]text ${filepath} text: ${text}`);
 
-                console.log(
+                this.debugLog(
                     `[GitService][redownload] Processing LFS file: ${filepath} (OID: ${pointer.oid}, Size: ${pointer.size})`
                 );
 
@@ -1747,9 +1758,9 @@ export class GitService {
                     { oid: pointer.oid, size: pointer.size }
                 );
                 const downloadedFile = new TextDecoder().decode(bytes);
-                console.log(`[GitService][redownload] downloaded: ${downloadedFile}`);
+                this.debugLog(`[GitService][redownload] downloaded: ${downloadedFile}`);
                 await fs.promises.writeFile(abs, bytes);
-                console.log(
+                this.debugLog(
                     `[GitService][redownload] Successfully downloaded and wrote LFS object for ${filepath} (${bytes.length} bytes)`
                 );
 
@@ -1764,7 +1775,7 @@ export class GitService {
             }
         }
 
-        console.log(
+        this.debugLog(
             `[GitService][redownload] Completed LFS redownload: processed ${processed} files, ${errors.length} errors`
         );
         return { processed, errors };
@@ -1805,10 +1816,10 @@ export class GitService {
                     continue;
                 }
 
-                console.log(
+                this.debugLog(
                     `[GitService] Found LFS pointer in newly created/modified file: ${filepath}`
                 );
-                console.log(
+                this.debugLog(
                     `[GitService] Downloading LFS object: ${pointer.oid} (${pointer.size} bytes)`
                 );
 
@@ -1819,7 +1830,7 @@ export class GitService {
                 );
 
                 await fs.promises.writeFile(abs, bytes);
-                console.log(
+                this.debugLog(
                     `[GitService] Successfully replaced pointer with LFS content for ${filepath}`
                 );
             } catch (err) {
@@ -1897,7 +1908,7 @@ export class GitService {
 
             const apiIsOnline = await fetch("https://api.frontierrnd.com")
                 .then((res) => {
-                    console.log("apiIsOnline", { res });
+                    this.debugLog("apiIsOnline", { res });
                     return (res as Response).status === 200;
                 })
                 .catch(() => false);
@@ -2014,7 +2025,7 @@ export class GitService {
                 return true;
             }
         }
-        console.log(`[GitService] ${filepath} re.test(rel) false`);
+        this.debugLog(`[GitService] ${filepath} re.test(rel) false`);
         return false;
     }
 
@@ -2157,11 +2168,11 @@ export class GitService {
     ): Promise<void> {
         // If not LFS-tracked, do normal add
         if (!(await this.isLfsTracked(dir, filepath))) {
-            console.log(`[GitService] ${filepath} is not LFS-tracked; adding as normal`);
+            this.debugLog(`[GitService] ${filepath} is not LFS-tracked; adding as normal`);
             await git.add({ fs, dir, filepath });
             return;
         }
-        console.log(`[GitService] ${filepath} is LFS-tracked; adding as LFS`);
+        this.debugLog(`[GitService] ${filepath} is LFS-tracked; adding as LFS`);
         // Read original bytes
         const abs = path.join(dir, filepath);
         const buf = await fs.promises.readFile(abs);
@@ -2181,8 +2192,8 @@ export class GitService {
         // Ensure repo URL includes .git to hit correct LFS endpoints on some servers
         const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
 
-        console.log(`[GitService] LFS base URL: ${lfsBaseUrl}`);
-        console.log(
+        this.debugLog(`[GitService] LFS base URL: ${lfsBaseUrl}`);
+        this.debugLog(
             `[GitService] Using ${auth ? "embedded" : authFromCaller ? "provided" : "no"} auth for LFS`
         );
 
@@ -2201,7 +2212,7 @@ export class GitService {
             headPointer.oid === currentPointer.oid &&
             headPointer.size === currentPointer.size
         ) {
-            console.log(
+            this.debugLog(
                 `[GitService] File ${filepath} already in LFS with same content, skipping upload`
             );
             // Just stage the existing pointer without re-uploading
@@ -2213,7 +2224,7 @@ export class GitService {
         }
 
         // Upload to LFS via our helper (handles batch, upload, verify and x-http-method)
-        console.log(`[GitService] Uploading ${filepath} to LFS`);
+        this.debugLog(`[GitService] Uploading ${filepath} to LFS`);
         const pointerInfos = await uploadBlobsToLFSBucket(
             {
                 url: lfsBaseUrl,
