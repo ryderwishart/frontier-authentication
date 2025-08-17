@@ -1654,28 +1654,40 @@ export class GitService {
                 continue;
             }
 
-            // Check worktree content; if it already equals the binary for pointer, skip.
-            // We conservatively download if the worktree isn't a valid pointer placeholder.
             try {
-                const abs = path.join(dir, filepath);
-                const content = await fs.promises.readFile(abs);
-                const text = content.toString("utf8");
-                const parsed = this.parseLfsPointer(text);
-                if (!parsed) {
-                    // Not a pointer text in worktree; assume already smudged.
-                    continue;
+                // For pointers directory, materialize bytes into the parallel files directory
+                if (this.isPointerPath(filepath)) {
+                    const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                    try {
+                        const st = await fs.promises.stat(filesAbs);
+                        if (st.size > 0) {
+                            continue; // already present
+                        }
+                    } catch {}
+                    const bytes = await downloadLFSObject(
+                        { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                        { oid: headPointer.oid, size: headPointer.size }
+                    );
+                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                    await fs.promises.writeFile(filesAbs, bytes);
+                } else {
+                    // Legacy behavior: write bytes into the worktree file location
+                    // Only if worktree currently contains pointer text
+                    try {
+                        const abs = path.join(dir, filepath);
+                        const content = await fs.promises.readFile(abs);
+                        const text = content.toString("utf8");
+                        const parsed = this.parseLfsPointer(text);
+                        if (!parsed) {
+                            continue;
+                        }
+                        const bytes = await downloadLFSObject(
+                            { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                            { oid: headPointer.oid, size: headPointer.size }
+                        );
+                        await fs.promises.writeFile(abs, bytes);
+                    } catch {}
                 }
-            } catch {
-                // If cannot read, continue to attempt download
-            }
-
-            try {
-                const bytes = await downloadLFSObject(
-                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                    { oid: headPointer.oid, size: headPointer.size }
-                );
-                const abs = path.join(dir, filepath);
-                await fs.promises.writeFile(abs, bytes);
             } catch (err) {
                 console.warn(`[GitService] Failed to download LFS object for ${filepath}:`, err);
             }
@@ -1745,24 +1757,30 @@ export class GitService {
                     `[GitService][redownload] Processing LFS file: ${filepath} (OID: ${pointer.oid}, Size: ${pointer.size})`
                 );
 
-                const abs = path.join(dir, filepath);
-                // 1) Restore pointer content to worktree (discard local blob for this file)
-                // await fs.promises.writeFile(abs, Buffer.from(blob));
-                console.debug(
-                    `[GitService][redownload] Restored pointer content to worktree for ${filepath}`
-                );
-
-                // 2) Download real content and overwrite worktree
-                const bytes = await downloadLFSObject(
-                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                    { oid: pointer.oid, size: pointer.size }
-                );
-                const downloadedFile = new TextDecoder().decode(bytes);
-                this.debugLog(`[GitService][redownload] downloaded: ${downloadedFile}`);
-                await fs.promises.writeFile(abs, bytes);
-                this.debugLog(
-                    `[GitService][redownload] Successfully downloaded and wrote LFS object for ${filepath} (${bytes.length} bytes)`
-                );
+                if (this.isPointerPath(filepath)) {
+                    // Download into parallel files directory
+                    const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                    const bytes = await downloadLFSObject(
+                        { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                        { oid: pointer.oid, size: pointer.size }
+                    );
+                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                    await fs.promises.writeFile(filesAbs, bytes);
+                    this.debugLog(
+                        `[GitService][redownload] Wrote LFS object to files dir for ${filepath} (${bytes.length} bytes)`
+                    );
+                } else {
+                    // Legacy overwrite worktree path
+                    const abs = path.join(dir, filepath);
+                    const bytes = await downloadLFSObject(
+                        { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                        { oid: pointer.oid, size: pointer.size }
+                    );
+                    await fs.promises.writeFile(abs, bytes);
+                    this.debugLog(
+                        `[GitService][redownload] Overwrote worktree for ${filepath} (${bytes.length} bytes)`
+                    );
+                }
 
                 processed += 1;
             } catch (e: any) {
@@ -1862,12 +1880,24 @@ export class GitService {
         }
 
         try {
-            const bytes = await downloadLFSObject(
-                { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                { oid: headPointer.oid, size: headPointer.size }
-            );
-            const abs = path.join(dir, filepath);
-            await fs.promises.writeFile(abs, bytes);
+            if (this.isPointerPath(filepath)) {
+                // Write to parallel files directory
+                const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                const bytes = await downloadLFSObject(
+                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                    { oid: headPointer.oid, size: headPointer.size }
+                );
+                await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                await fs.promises.writeFile(filesAbs, bytes);
+            } else {
+                // Legacy overwrite on worktree
+                const abs = path.join(dir, filepath);
+                const bytes = await downloadLFSObject(
+                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                    { oid: headPointer.oid, size: headPointer.size }
+                );
+                await fs.promises.writeFile(abs, bytes);
+            }
         } catch (err) {
             console.warn(`[GitService] Failed to smudge LFS object for ${filepath}:`, err);
         }
@@ -1886,7 +1916,7 @@ export class GitService {
             return;
         }
 
-        // Otherwise, if file should be tracked by LFS, add via LFS to stage pointer and keep real bytes in worktree
+        // Otherwise, if file should be tracked by LFS, add via LFS to stage pointer and ensure real bytes are in files dir when applicable
         if (await this.isLfsTracked(dir, filepath)) {
             await this.addWithLFS(dir, filepath, auth);
             return;
@@ -2003,6 +2033,22 @@ export class GitService {
         return new RegExp("^" + s + "$");
     }
 
+    /** Returns true if a repo-relative path is inside the pointers directory */
+    private isPointerPath(filepath: string): boolean {
+        const normalized = filepath.replace(/\\/g, "/");
+        return normalized.includes("/.project/attachments/pointers/");
+    }
+
+    /** Maps a repo-relative pointers path to its files counterpart absolute path */
+    private getFilesPathForPointer(dir: string, pointerRelativePath: string): string {
+        const normalized = pointerRelativePath.replace(/\\/g, "/");
+        const filesRelative = normalized.replace(
+            "/.project/attachments/pointers/",
+            "/.project/attachments/files/"
+        );
+        return path.join(dir, filesRelative);
+    }
+
     private async isLfsTracked(dir: string, filepath: string): Promise<boolean> {
         const globs = await this.getLfsGlobs(dir);
         // console.log(`[GitService] ${filepath} is LFS-tracked: ${globs.length > 0}`);
@@ -2097,6 +2143,10 @@ export class GitService {
         dir: string,
         filepath: string
     ): Promise<boolean> {
+        // New model: pointers directory keeps pointer text; do not treat as smudged-equals-head
+        if (this.isPointerPath(filepath)) {
+            return false;
+        }
         // Must be LFS-tracked, otherwise this equivalence does not apply
         if (!(await this.isLfsTracked(dir, filepath))) {
             return false;
@@ -2235,9 +2285,21 @@ export class GitService {
         );
         const pointerBlob = lfs.formatPointerInfo(pointerInfos[0]);
 
-        // Write pointer, stage it, then restore original bytes locally
+        // Write pointer and stage it
         await fs.promises.writeFile(abs, Buffer.from(pointerBlob));
         await git.add({ fs, dir, filepath });
-        await fs.promises.writeFile(abs, buf);
+        // If the pointer lives under pointers directory, ensure materialized bytes exist in files directory
+        if (this.isPointerPath(filepath)) {
+            const filesAbs = this.getFilesPathForPointer(dir, filepath);
+            await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+            try {
+                await fs.promises.access(filesAbs, fs.constants.F_OK);
+            } catch {
+                await fs.promises.writeFile(filesAbs, buf);
+            }
+        } else {
+            // Legacy: restore original bytes in worktree
+            await fs.promises.writeFile(abs, buf);
+        }
     }
 }
