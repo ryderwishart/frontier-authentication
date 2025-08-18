@@ -508,7 +508,7 @@ export class GitService {
 
             const pointer = this.parseLfsPointer(text);
             if (!pointer) {
-                // Blob accidentally placed in pointers dir → upload and rewrite pointer
+                // Blob placed in pointers dir → upload and rewrite pointer
                 try {
                     const bytes = await fs.promises.readFile(absolutePathToFill);
                     const infos = await uploadBlobsToLFSBucket(
@@ -520,7 +520,15 @@ export class GitService {
                     await git.add({ fs, dir, filepath });
                     const filesAbs = this.getFilesPathForPointer(dir, filepath);
                     await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                    await fs.promises.writeFile(filesAbs, bytes);
+                    // Only write if the file doesn't already exist in files directory
+                    try {
+                        await fs.promises.access(filesAbs, fs.constants.F_OK);
+                        this.debugLog(
+                            `[GitService] Files dir already has ${filepath}, not overwriting`
+                        );
+                    } catch {
+                        await fs.promises.writeFile(filesAbs, bytes);
+                    }
                     this.debugLog(
                         `[GitService] Converted blob to pointer and wrote files dir for ${filepath}`
                     );
@@ -1707,7 +1715,15 @@ export class GitService {
                     { oid: headPointer.oid, size: headPointer.size }
                 );
                 await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                await fs.promises.writeFile(filesAbs, bytes);
+                // Only write if the file doesn't already exist in files directory
+                try {
+                    await fs.promises.access(filesAbs, fs.constants.F_OK);
+                    this.debugLog(
+                        `[GitService] Files dir already has ${filepath}, not overwriting`
+                    );
+                } catch {
+                    await fs.promises.writeFile(filesAbs, bytes);
+                }
             } else {
                 // Non-pointer path: do nothing (no smudging)
             }
@@ -2094,6 +2110,9 @@ export class GitService {
                     let hasFile = true;
                     try {
                         await fs.promises.access(absolutePathToBlobFill, fs.constants.F_OK);
+                        this.debugLog(
+                            `[GitService] Files dir already has ${filepath}, not overwriting`
+                        );
                     } catch {
                         hasFile = false;
                     }
@@ -2139,6 +2158,7 @@ export class GitService {
             await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
             try {
                 await fs.promises.access(filesAbs, fs.constants.F_OK);
+                this.debugLog(`[GitService] Files dir already has ${filepath}, not overwriting`);
             } catch {
                 await fs.promises.writeFile(filesAbs, buf);
             }
