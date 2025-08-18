@@ -1326,39 +1326,7 @@ export class GitService {
             )
         );
 
-        // Apply LFS-aware cleanliness: treat LFS-tracked files as clean if the
-        // worktree bytes hash to the same LFS pointer {oid,size} as HEAD.
-        const lfsAwareChanges: Array<[string, number, number, number]> = [];
-
-        for (const entry of status) {
-            const [filepath, head, workdir, stage] = entry as [string, number, number, number];
-
-            // If there are no changes at all, preserve as-is
-            if (!this.fileStatus.isAnyChange(entry)) {
-                continue;
-            }
-
-            // Only consider LFS override when it's a modification (not new/deleted) and
-            // the difference is specifically in the workdir vs HEAD content.
-            const isPotentialLfsCleanCase =
-                head === 1 && // exists in HEAD
-                workdir !== head && // workdir differs from HEAD
-                !this.fileStatus.isNew(entry) &&
-                !this.fileStatus.isDeleted(entry);
-
-            if (
-                isPotentialLfsCleanCase &&
-                (await this.isLfsWorktreeEquivalentToHeadPointer(dir, filepath))
-            ) {
-                // Skip adding to changes: treat as clean in the working tree
-                continue;
-            }
-
-            lfsAwareChanges.push(entry);
-        }
-
-        const isDirty = lfsAwareChanges.some((entry) => this.fileStatus.isAnyChange(entry));
-        return { isDirty, status };
+        return { isDirty: status.some((entry) => this.fileStatus.isAnyChange(entry)), status };
     }
 
     /**
@@ -1710,100 +1678,6 @@ export class GitService {
         options?: { force?: boolean }
     ): Promise<void> {
         await this.safePush(dir, auth, { force: options?.force });
-    }
-
-    /**
-     * Force re-download of all LFS-managed files in the current worktree.
-     * For every file whose HEAD blob is a valid LFS pointer:
-     *  - restore the pointer content into the worktree (discard local blob changes for that file only)
-     *  - download the real bytes from LFS and overwrite the pointer content in the worktree
-     * Does not stage or commit anything; index remains with pointer content.
-     */
-    async redownloadAllLfsInWorktree(
-        dir: string,
-        auth: { username: string; password: string }
-    ): Promise<{ processed: number; errors: Array<{ filepath: string; error: string }> }> {
-        this.debugLog(`[GitService][redownload] Starting pointer/files reconciliation: ${dir}`);
-        const status = await git.statusMatrix({ fs, dir });
-        this.debugLog(`[GitService][redownload] Found ${status.length} files in status matrix`);
-
-        const remoteUrl = await this.getRemoteUrl(dir);
-        if (!remoteUrl) {
-            console.error(
-                `[GitService][redownload] No remote URL configured for repository: ${dir}`
-            );
-            return {
-                processed: 0,
-                errors: [{ filepath: "<all>", error: "No remote URL configured" }],
-            };
-        }
-        const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
-        const effectiveAuth = embedded ?? auth;
-        const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
-        this.debugLog(`[GitService][redownload] Using LFS base URL: ${lfsBaseUrl}`);
-
-        let processed = 0;
-        const errors: Array<{ filepath: string; error: string }> = [];
-
-        const headOid = await git.resolveRef({ fs, dir, ref: "HEAD" });
-        this.debugLog(`[GitService][redownload] HEAD OID: ${headOid}`);
-
-        for (const [filepath] of status) {
-            try {
-                // Read HEAD blob; if it's not a pointer, skip.
-                let blob: Uint8Array | undefined;
-                try {
-                    const { blob: b } = await git.readBlob({ fs, dir, oid: headOid, filepath });
-                    blob = b;
-                } catch {
-                    console.debug(
-                        `[GitService][redownload] Could not read blob for ${filepath}, skipping`
-                    );
-                    continue;
-                }
-                const text = new TextDecoder().decode(blob);
-                const pointer = this.parseLfsPointer(text);
-                if (!pointer) {
-                    // console.debug(`[GitService][redownload] ${filepath} is not an LFS pointer, skipping`);
-                    continue;
-                }
-                this.debugLog(`[GitService][redownload] pointer text ${filepath}: ${text}`);
-
-                this.debugLog(
-                    `[GitService][redownload] Processing LFS file: ${filepath} (OID: ${pointer.oid}, Size: ${pointer.size})`
-                );
-
-                if (this.isPointerPath(filepath)) {
-                    // Download into parallel files directory
-                    const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                    const bytes = await downloadLFSObject(
-                        { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                        { oid: pointer.oid, size: pointer.size }
-                    );
-                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                    await fs.promises.writeFile(filesAbs, bytes);
-                    this.debugLog(
-                        `[GitService][redownload] ensured files dir for ${filepath} (${bytes.length} bytes)`
-                    );
-                } else {
-                    // Non-pointer path: do nothing (no smudging)
-                }
-
-                processed += 1;
-            } catch (e: any) {
-                const errorMsg = e?.message ?? String(e);
-                console.error(
-                    `[GitService][redownload] Failed to process LFS file ${filepath}:`,
-                    errorMsg
-                );
-                errors.push({ filepath, error: errorMsg });
-            }
-        }
-
-        this.debugLog(
-            `[GitService][redownload] Completed LFS redownload: processed ${processed} files, ${errors.length} errors`
-        );
-        return { processed, errors };
     }
 
     private async ensureSingleLfsPointerHasMatchingFile(
