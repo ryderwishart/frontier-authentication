@@ -238,7 +238,7 @@ async function uploadBlobsToLFSBucket(
 
                 // Create AbortController for timeout handling
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
+                const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
 
                 const resp = await fetch(upload.href, {
                     method: "PUT",
@@ -411,7 +411,7 @@ async function downloadLFSObject(
     };
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000);
+    const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
     const fileResp = await fetch(download.href, {
         method: "GET",
         headers: dlHeaders,
@@ -585,7 +585,7 @@ export class GitService {
      */
     private async withTimeout<T>(
         operation: Promise<T>,
-        timeoutMs: number = 2 * 60 * 1000, // 2 minutes
+        timeoutMs: number = 10 * 60 * 1000, // 10 minutes
         operationName: string = "Git operation"
     ): Promise<T> {
         const startTime = Date.now();
@@ -702,7 +702,7 @@ export class GitService {
         auth: { username: string; password: string },
         options?: { force?: boolean; ref?: string; timeoutMs?: number }
     ): Promise<void> {
-        const { force = false, ref, timeoutMs = 2 * 60 * 1000 } = options || {};
+        const { force = false, ref, timeoutMs = 10 * 60 * 1000 } = options || {};
 
         this.debugLog(`[GitService] Starting push operation:`, {
             directory: dir,
