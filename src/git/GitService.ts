@@ -482,89 +482,174 @@ export class GitService {
         dir: string,
         auth: { username: string; password: string }
     ): Promise<void> {
-        const remoteUrl = await this.getRemoteUrl(dir);
-        if (!remoteUrl) {
-            return;
-        }
-        const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
-        const effectiveAuth = embedded ?? auth;
-        const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: "📂 ",
+                cancellable: false,
+            },
+            async (progress) => {
+                this.debugLog("[GitService] Starting reconcilePointersFilesystem", { dir });
 
-        const status = await git.statusMatrix({ fs, dir });
-        const headOid = await git.resolveRef({ fs, dir, ref: "HEAD" });
+                const remoteUrl = await this.getRemoteUrl(dir);
+                if (!remoteUrl) {
+                    this.debugLog("[GitService] No remote URL found, skipping reconciliation");
+                    return;
+                }
 
-        for (const [filepath] of status) {
-            if (!this.isPointerPath(filepath)) {
-                continue;
-            }
-            const absolutePathToFill = path.join(dir, filepath);
-            let text: string | undefined;
-            try {
-                const content = await fs.promises.readFile(absolutePathToFill, "utf8");
-                text = content;
-            } catch {
-                continue;
-            }
+                const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
+                const effectiveAuth = embedded ?? auth;
+                const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+                this.debugLog("[GitService] Reconciliation config", {
+                    cleanUrl,
+                    lfsBaseUrl,
+                    hasEmbeddedAuth: !!embedded,
+                });
 
-            const pointer = this.parseLfsPointer(text);
-            if (!pointer) {
-                // Blob placed in pointers dir → upload and rewrite pointer
-                try {
-                    const bytes = await fs.promises.readFile(absolutePathToFill);
-                    const infos = await uploadBlobsToLFSBucket(
-                        { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                        [bytes]
-                    );
-                    const pointerBlob = lfs.formatPointerInfo(infos[0]);
-                    await fs.promises.writeFile(absolutePathToFill, Buffer.from(pointerBlob));
-                    await git.add({ fs, dir, filepath });
-                    const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                    // Only write if the file doesn't already exist in files directory
+                const status = await git.statusMatrix({ fs, dir });
+                const headOid = await git.resolveRef({ fs, dir, ref: "HEAD" });
+                this.debugLog("[GitService] Repository status", {
+                    statusEntries: status.length,
+                    headOid: headOid.substring(0, 8),
+                });
+
+                const pointerPaths = status.filter(([filepath]) => this.isPointerPath(filepath));
+                const totalFiles = pointerPaths.length;
+
+                if (totalFiles === 0) {
+                    this.debugLog("[GitService] Completed reconcilePointersFilesystem");
+                    return;
+                }
+
+                for (let i = 0; i < totalFiles; i++) {
+                    const [filepath] = pointerPaths[i];
+                    const progressPercent = ((i + 1) / totalFiles) * 100;
+
+                    progress.report({
+                        message: `📎 ${i + 1}/${totalFiles}`,
+                        increment: i === 0 ? 0 : 100 / totalFiles,
+                    });
+
+                    this.debugLog("[GitService] Processing pointer path", { filepath });
+
+                    const absolutePathToFill = path.join(dir, filepath);
+                    let text: string | undefined;
                     try {
-                        await fs.promises.access(filesAbs, fs.constants.F_OK);
-                        this.debugLog(
-                            `[GitService] Files dir already has ${filepath}, not overwriting`
-                        );
-                    } catch {
-                        await fs.promises.writeFile(filesAbs, bytes);
+                        const content = await fs.promises.readFile(absolutePathToFill, "utf8");
+                        text = content;
+                        this.debugLog("[GitService] Read file content", {
+                            filepath,
+                            contentLength: content.length,
+                        });
+                    } catch (error) {
+                        this.debugLog("[GitService] Failed to read file", { filepath, error });
+                        continue;
                     }
-                    this.debugLog(
-                        `[GitService] Converted blob to pointer and wrote files dir for ${filepath}`
-                    );
-                } catch (e) {
-                    console.warn(
-                        `[GitService] Failed to convert blob in pointers dir for ${filepath}:`,
-                        e
-                    );
-                }
-                continue;
-            }
 
-            // Pointer text present → ensure files dir has bytes
-            try {
-                const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                let present = true;
-                try {
-                    await fs.promises.access(filesAbs, fs.constants.F_OK);
-                } catch {
-                    present = false;
+                    const pointer = this.parseLfsPointer(text);
+                    if (!pointer) {
+                        // Blob placed in pointers dir → upload and rewrite pointer
+                        this.debugLog("[GitService] File is not a pointer, converting to LFS", {
+                            filepath,
+                        });
+                        try {
+                            const bytes = await fs.promises.readFile(absolutePathToFill);
+                            this.debugLog("[GitService] Read blob bytes", {
+                                filepath,
+                                size: bytes.length,
+                            });
+
+                            const infos = await uploadBlobsToLFSBucket(
+                                { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                                [bytes]
+                            );
+                            this.debugLog("[GitService] Uploaded blob to LFS", {
+                                filepath,
+                                oid: infos[0].oid,
+                            });
+
+                            const pointerBlob = lfs.formatPointerInfo(infos[0]);
+                            await fs.promises.writeFile(
+                                absolutePathToFill,
+                                Buffer.from(pointerBlob)
+                            );
+                            await git.add({ fs, dir, filepath });
+                            this.debugLog("[GitService] Wrote pointer and staged", { filepath });
+
+                            const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                            await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                            // Only write if the file doesn't already exist in files directory
+                            try {
+                                await fs.promises.access(filesAbs, fs.constants.F_OK);
+                                this.debugLog(
+                                    `[GitService] Files dir already has ${filepath}, not overwriting`
+                                );
+                            } catch {
+                                await fs.promises.writeFile(filesAbs, bytes);
+                                this.debugLog("[GitService] Wrote bytes to files dir", {
+                                    filesAbs,
+                                });
+                            }
+                            this.debugLog(
+                                `[GitService] Converted blob to pointer and wrote files dir for ${filepath}`
+                            );
+                        } catch (e) {
+                            console.warn(
+                                `[GitService] Failed to convert blob in pointers dir for ${filepath}:`,
+                                e
+                            );
+                            this.debugLog("[GitService] Failed to convert blob to pointer", {
+                                filepath,
+                                error: e,
+                            });
+                        }
+                        continue;
+                    }
+
+                    // Pointer text present → ensure files dir has bytes
+                    this.debugLog("[GitService] File is a pointer, ensuring files dir has bytes", {
+                        filepath,
+                        oid: pointer.oid,
+                        size: pointer.size,
+                    });
+
+                    try {
+                        const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                        await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                        let present = true;
+                        try {
+                            await fs.promises.access(filesAbs, fs.constants.F_OK);
+                            this.debugLog("[GitService] Files dir already has bytes", { filesAbs });
+                        } catch {
+                            present = false;
+                            this.debugLog("[GitService] Files dir missing bytes, downloading", {
+                                filesAbs,
+                            });
+                        }
+                        if (!present) {
+                            const bytes = await downloadLFSObject(
+                                { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                                { oid: pointer.oid, size: pointer.size }
+                            );
+                            await fs.promises.writeFile(filesAbs, bytes);
+                            this.debugLog(
+                                `[GitService] Downloaded missing bytes for ${filepath} into files dir`,
+                                { size: bytes.length, filesAbs }
+                            );
+                        }
+                    } catch (e) {
+                        console.warn(`[GitService] Failed ensuring files dir for ${filepath}:`, e);
+                        this.debugLog("[GitService] Failed ensuring files dir", {
+                            filepath,
+                            error: e,
+                        });
+                    }
                 }
-                if (!present) {
-                    const bytes = await downloadLFSObject(
-                        { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                        { oid: pointer.oid, size: pointer.size }
-                    );
-                    await fs.promises.writeFile(filesAbs, bytes);
-                    this.debugLog(
-                        `[GitService] Downloaded missing bytes for ${filepath} into files dir`
-                    );
-                }
-            } catch (e) {
-                console.warn(`[GitService] Failed ensuring files dir for ${filepath}:`, e);
+
+                progress.report({ message: "📎 100%" });
+                this.debugLog("[GitService] Completed reconcilePointersFilesystem");
             }
-        }
+        );
     }
     /**
      * Enable or disable debug logging for git operations
@@ -851,7 +936,8 @@ export class GitService {
 
             // 6. If local and remote are identical, nothing to do
             if (localHead === remoteHead) {
-                this.debugLog("Local and remote are already in sync");
+                this.debugLog("Local and remote are already in sync"); // this is the last log
+                await this.reconcilePointersFilesystem(dir, auth);
                 return { hadConflicts: false };
             }
 
