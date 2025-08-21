@@ -521,15 +521,14 @@ export class GitService {
                     return;
                 }
 
+                // Phase 1: scan and prepare work
+                progress.report({ message: "📎 Scanning LFS pointers...", increment: 0 });
+
+                // Map of oid -> array of targets to write (deduplicates identical content)
+                const oidToTargets = new Map<string, { filesAbs: string; filepath: string; size: number }[]>();
+
                 for (let i = 0; i < totalFiles; i++) {
                     const [filepath] = pointerPaths[i];
-                    const progressPercent = ((i + 1) / totalFiles) * 100;
-
-                    progress.report({
-                        message: `📎 Downloading file ${i + 1} of ${totalFiles}`,
-                        increment: i === 0 ? 0 : 100 / totalFiles,
-                    });
-
                     this.debugLog("[GitService] Processing pointer path", { filepath });
 
                     const absolutePathToFill = path.join(dir, filepath);
@@ -548,103 +547,169 @@ export class GitService {
 
                     const pointer = this.parseLfsPointer(text);
                     if (!pointer) {
-                        // Blob placed in pointers dir → upload and rewrite pointer
-                        this.debugLog("[GitService] File is not a pointer, converting to LFS", {
-                            filepath,
-                        });
+                        // Blob placed in pointers dir → upload and rewrite pointer (local work, not a download)
+                        this.debugLog("[GitService] File is not a pointer, converting to LFS", { filepath });
                         try {
                             const bytes = await fs.promises.readFile(absolutePathToFill);
-                            this.debugLog("[GitService] Read blob bytes", {
-                                filepath,
-                                size: bytes.length,
-                            });
+                            this.debugLog("[GitService] Read blob bytes", { filepath, size: bytes.length });
 
                             const infos = await uploadBlobsToLFSBucket(
                                 { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
                                 [bytes]
                             );
-                            this.debugLog("[GitService] Uploaded blob to LFS", {
-                                filepath,
-                                oid: infos[0].oid,
-                            });
+                            this.debugLog("[GitService] Uploaded blob to LFS", { filepath, oid: infos[0].oid });
 
                             const pointerBlob = lfs.formatPointerInfo(infos[0]);
-                            await fs.promises.writeFile(
-                                absolutePathToFill,
-                                Buffer.from(pointerBlob)
-                            );
+                            await fs.promises.writeFile(absolutePathToFill, Buffer.from(pointerBlob));
                             await git.add({ fs, dir, filepath });
                             this.debugLog("[GitService] Wrote pointer and staged", { filepath });
 
                             const filesAbs = this.getFilesPathForPointer(dir, filepath);
                             await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                            // Only write if the file doesn't already exist in files directory
                             try {
                                 await fs.promises.access(filesAbs, fs.constants.F_OK);
-                                this.debugLog(
-                                    `[GitService] Files dir already has ${filepath}, not overwriting`
-                                );
+                                this.debugLog(`[GitService] Files dir already has ${filepath}, not overwriting`);
                             } catch {
                                 await fs.promises.writeFile(filesAbs, bytes);
-                                this.debugLog("[GitService] Wrote bytes to files dir", {
-                                    filesAbs,
-                                });
+                                this.debugLog("[GitService] Wrote bytes to files dir", { filesAbs });
                             }
-                            this.debugLog(
-                                `[GitService] Converted blob to pointer and wrote files dir for ${filepath}`
-                            );
+                            this.debugLog(`[GitService] Converted blob to pointer and wrote files dir for ${filepath}`);
                         } catch (e) {
-                            console.warn(
-                                `[GitService] Failed to convert blob in pointers dir for ${filepath}:`,
-                                e
-                            );
-                            this.debugLog("[GitService] Failed to convert blob to pointer", {
-                                filepath,
-                                error: e,
-                            });
+                            console.warn(`[GitService] Failed to convert blob in pointers dir for ${filepath}:`, e);
+                            this.debugLog("[GitService] Failed to convert blob to pointer", { filepath, error: e });
                         }
                         continue;
                     }
 
-                    // Pointer text present → ensure files dir has bytes
-                    this.debugLog("[GitService] File is a pointer, ensuring files dir has bytes", {
-                        filepath,
-                        oid: pointer.oid,
-                        size: pointer.size,
-                    });
-
+                    // Pointer text present → ensure files dir has bytes (collect missing for batch download)
+                    const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                    let present = true;
                     try {
-                        const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                        await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                        let present = true;
-                        try {
-                            await fs.promises.access(filesAbs, fs.constants.F_OK);
-                            this.debugLog("[GitService] Files dir already has bytes", { filesAbs });
-                        } catch {
-                            present = false;
-                            this.debugLog("[GitService] Files dir missing bytes, downloading", {
-                                filesAbs,
-                            });
-                        }
-                        if (!present) {
-                            const bytes = await downloadLFSObject(
-                                { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                                { oid: pointer.oid, size: pointer.size }
-                            );
-                            await fs.promises.writeFile(filesAbs, bytes);
-                            this.debugLog(
-                                `[GitService] Downloaded missing bytes for ${filepath} into files dir`,
-                                { size: bytes.length, filesAbs }
-                            );
-                        }
-                    } catch (e) {
-                        console.warn(`[GitService] Failed ensuring files dir for ${filepath}:`, e);
-                        this.debugLog("[GitService] Failed ensuring files dir", {
-                            filepath,
-                            error: e,
-                        });
+                        await fs.promises.access(filesAbs, fs.constants.F_OK);
+                        this.debugLog("[GitService] Files dir already has bytes", { filesAbs });
+                    } catch {
+                        present = false;
+                        this.debugLog("[GitService] Files dir missing bytes, scheduling download", { filesAbs });
+                    }
+                    if (!present) {
+                        const targets = oidToTargets.get(pointer.oid) ?? [];
+                        targets.push({ filesAbs, filepath, size: pointer.size });
+                        oidToTargets.set(pointer.oid, targets);
                     }
                 }
+
+                const oidsToDownload = Array.from(oidToTargets.keys());
+                if (oidsToDownload.length === 0) {
+                    progress.report({ message: "📎 File download complete" });
+                    this.debugLog("[GitService] Completed reconcilePointersFilesystem (no downloads needed)");
+                    return;
+                }
+
+                // Phase 2: single LFS batch request for all objects
+                const authHeaders: Record<string, string> = { "User-Agent": "curl/7.54" };
+                if (effectiveAuth) {
+                    if ((effectiveAuth as any).username && (effectiveAuth as any).password) {
+                        const credentials = `${(effectiveAuth as any).username}:${(effectiveAuth as any).password}`;
+                        authHeaders.Authorization = `Basic ${Buffer.from(credentials).toString("base64")}`;
+                    }
+                }
+
+                const batchBody: LFSBatchRequest = {
+                    operation: "download",
+                    transfers: ["basic"],
+                    objects: oidsToDownload.map((oid) => ({ oid, size: (oidToTargets.get(oid)?.[0]?.size ?? 0) })),
+                };
+
+                const batchResp = await fetch(`${lfsBaseUrl}/info/lfs/objects/batch`, {
+                    method: "POST",
+                    headers: {
+                        ...authHeaders,
+                        Accept: "application/vnd.git-lfs+json",
+                        "Content-Type": "application/vnd.git-lfs+json",
+                    },
+                    body: JSON.stringify(batchBody),
+                });
+
+                if (!batchResp.ok) {
+                    const errorText = await batchResp.text();
+                    throw new Error(
+                        `LFS download batch failed: ${batchResp.status} ${batchResp.statusText}\nResponse: ${errorText}`
+                    );
+                }
+
+                const batchData = (await batchResp.json()) as LFSBatchResponse;
+                const actionByOid = new Map<string, { href: string; header?: Record<string, string> }>();
+                for (const obj of batchData.objects ?? []) {
+                    const dl = obj.actions?.download;
+                    if (obj.oid && dl?.href) {
+                        actionByOid.set(obj.oid, { href: dl.href, header: dl.header });
+                    }
+                }
+
+                // Phase 3: concurrent downloads with progress and connection reuse by origin
+                const totalToDownload = oidsToDownload.length;
+                let completed = 0;
+                const concurrency = vscode.workspace
+                    .getConfiguration("frontier")
+                    .get<number>("lfsDownloadConcurrency", 12);
+
+                progress.report({ message: `📎 Preparing to download ${totalToDownload} files` });
+
+                const queue = [...oidsToDownload];
+                const runWorker = async () => {
+                    for (;;) {
+                        const oid = queue.shift();
+                        if (!oid) return;
+                        const action = actionByOid.get(oid);
+                        if (!action?.href) {
+                            this.debugLog(`[GitService] Missing download action for oid ${oid}`);
+                            completed += 1;
+                            progress.report({ message: `📎 Downloading file ${completed} of ${totalToDownload}` });
+                            continue;
+                        }
+
+                        try {
+                            const dlHeaders: Record<string, string> = { ...(action.header ?? {}) };
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
+                            const fileResp = await fetch(action.href, {
+                                method: "GET",
+                                headers: dlHeaders,
+                                signal: controller.signal,
+                                keepalive: false,
+                            });
+                            clearTimeout(timeoutId);
+                            if (!fileResp.ok) {
+                                const errorText = await fileResp.text();
+                                throw new Error(
+                                    `LFS object download failed: ${fileResp.status} ${fileResp.statusText}\nResponse: ${errorText}`
+                                );
+                            }
+                            const bytes = new Uint8Array(await fileResp.arrayBuffer());
+                            const targets = oidToTargets.get(oid) ?? [];
+                            await Promise.all(
+                                targets.map(async (t) => {
+                                    await fs.promises.mkdir(path.dirname(t.filesAbs), { recursive: true });
+                                    await fs.promises.writeFile(t.filesAbs, bytes);
+                                })
+                            );
+                            this.debugLog("[GitService] Downloaded LFS object", {
+                                oid,
+                                size: bytes.length,
+                                targetCount: (oidToTargets.get(oid) ?? []).length,
+                            });
+                        } catch (e) {
+                            this.debugLog(`[GitService] Failed downloading oid ${oid}:`, e);
+                        } finally {
+                            completed += 1;
+                            progress.report({ message: `📎 Downloading file ${completed} of ${totalToDownload}` });
+                        }
+                    }
+                };
+
+                const workers = Array.from({ length: Math.max(1, concurrency) }, () => runWorker());
+                await Promise.all(workers);
 
                 progress.report({ message: "📎 File download complete" });
                 this.debugLog("[GitService] Completed reconcilePointersFilesystem");
