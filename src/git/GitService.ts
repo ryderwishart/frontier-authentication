@@ -526,7 +526,7 @@ export class GitService {
                     const progressPercent = ((i + 1) / totalFiles) * 100;
 
                     progress.report({
-                        message: `📎 ${i + 1}/${totalFiles}`,
+                        message: `📎 Downloading file ${i + 1} of ${totalFiles}`,
                         increment: i === 0 ? 0 : 100 / totalFiles,
                     });
 
@@ -646,7 +646,7 @@ export class GitService {
                     }
                 }
 
-                progress.report({ message: "📎 100%" });
+                progress.report({ message: "📎 File download complete" });
                 this.debugLog("[GitService] Completed reconcilePointersFilesystem");
             }
         );
