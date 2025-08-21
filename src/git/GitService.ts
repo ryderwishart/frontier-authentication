@@ -521,9 +521,6 @@ export class GitService {
                     return;
                 }
 
-                // Phase 1: scan and prepare work
-                progress.report({ message: "📎 Scanning LFS pointers...", increment: 0 });
-
                 // Map of oid -> array of targets to write (deduplicates identical content)
                 const oidToTargets = new Map<string, { filesAbs: string; filepath: string; size: number }[]>();
 
