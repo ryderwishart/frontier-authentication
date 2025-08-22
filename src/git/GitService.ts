@@ -598,7 +598,7 @@ export class GitService {
 
                 const oidsToDownload = Array.from(oidToTargets.keys());
                 if (oidsToDownload.length === 0) {
-                    progress.report({ message: "📎 File download complete" });
+                    progress.report({ message: "✅ All files up to date" });
                     this.debugLog("[GitService] Completed reconcilePointersFilesystem (no downloads needed)");
                     return;
                 }
