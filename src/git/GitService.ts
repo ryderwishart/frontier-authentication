@@ -58,6 +58,8 @@ function isValidLFSInfoResponseData(val: unknown): val is LFSBatchResponse {
     try {
         // Check if response has the expected structure
         const maybe = val as Partial<LFSBatchResponse> | undefined;
+        debugLog("[LFS Patch] isValidLFSInfoResponseData", { maybe });
+
         if (!maybe || !Array.isArray(maybe.objects)) {
             console.warn("[LFS Patch] Invalid response structure:", val);
             return false;
@@ -522,7 +524,10 @@ export class GitService {
                 }
 
                 // Map of oid -> array of targets to write (deduplicates identical content)
-                const oidToTargets = new Map<string, { filesAbs: string; filepath: string; size: number }[]>();
+                const oidToTargets = new Map<
+                    string,
+                    { filesAbs: string; filepath: string; size: number }[]
+                >();
 
                 for (let i = 0; i < totalFiles; i++) {
                     const [filepath] = pointerPaths[i];
@@ -545,19 +550,30 @@ export class GitService {
                     const pointer = this.parseLfsPointer(text);
                     if (!pointer) {
                         // Blob placed in pointers dir → upload and rewrite pointer (local work, not a download)
-                        this.debugLog("[GitService] File is not a pointer, converting to LFS", { filepath });
+                        this.debugLog("[GitService] File is not a pointer, converting to LFS", {
+                            filepath,
+                        });
                         try {
                             const bytes = await fs.promises.readFile(absolutePathToFill);
-                            this.debugLog("[GitService] Read blob bytes", { filepath, size: bytes.length });
+                            this.debugLog("[GitService] Read blob bytes", {
+                                filepath,
+                                size: bytes.length,
+                            });
 
                             const infos = await uploadBlobsToLFSBucket(
                                 { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
                                 [bytes]
                             );
-                            this.debugLog("[GitService] Uploaded blob to LFS", { filepath, oid: infos[0].oid });
+                            this.debugLog("[GitService] Uploaded blob to LFS", {
+                                filepath,
+                                oid: infos[0].oid,
+                            });
 
                             const pointerBlob = lfs.formatPointerInfo(infos[0]);
-                            await fs.promises.writeFile(absolutePathToFill, Buffer.from(pointerBlob));
+                            await fs.promises.writeFile(
+                                absolutePathToFill,
+                                Buffer.from(pointerBlob)
+                            );
                             await git.add({ fs, dir, filepath });
                             this.debugLog("[GitService] Wrote pointer and staged", { filepath });
 
@@ -565,15 +581,27 @@ export class GitService {
                             await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
                             try {
                                 await fs.promises.access(filesAbs, fs.constants.F_OK);
-                                this.debugLog(`[GitService] Files dir already has ${filepath}, not overwriting`);
+                                this.debugLog(
+                                    `[GitService] Files dir already has ${filepath}, not overwriting`
+                                );
                             } catch {
                                 await fs.promises.writeFile(filesAbs, bytes);
-                                this.debugLog("[GitService] Wrote bytes to files dir", { filesAbs });
+                                this.debugLog("[GitService] Wrote bytes to files dir", {
+                                    filesAbs,
+                                });
                             }
-                            this.debugLog(`[GitService] Converted blob to pointer and wrote files dir for ${filepath}`);
+                            this.debugLog(
+                                `[GitService] Converted blob to pointer and wrote files dir for ${filepath}`
+                            );
                         } catch (e) {
-                            console.warn(`[GitService] Failed to convert blob in pointers dir for ${filepath}:`, e);
-                            this.debugLog("[GitService] Failed to convert blob to pointer", { filepath, error: e });
+                            console.warn(
+                                `[GitService] Failed to convert blob in pointers dir for ${filepath}:`,
+                                e
+                            );
+                            this.debugLog("[GitService] Failed to convert blob to pointer", {
+                                filepath,
+                                error: e,
+                            });
                         }
                         continue;
                     }
@@ -587,7 +615,9 @@ export class GitService {
                         this.debugLog("[GitService] Files dir already has bytes", { filesAbs });
                     } catch {
                         present = false;
-                        this.debugLog("[GitService] Files dir missing bytes, scheduling download", { filesAbs });
+                        this.debugLog("[GitService] Files dir missing bytes, scheduling download", {
+                            filesAbs,
+                        });
                     }
                     if (!present) {
                         const targets = oidToTargets.get(pointer.oid) ?? [];
@@ -599,7 +629,9 @@ export class GitService {
                 const oidsToDownload = Array.from(oidToTargets.keys());
                 if (oidsToDownload.length === 0) {
                     progress.report({ message: "✅ All files up to date" });
-                    this.debugLog("[GitService] Completed reconcilePointersFilesystem (no downloads needed)");
+                    this.debugLog(
+                        "[GitService] Completed reconcilePointersFilesystem (no downloads needed)"
+                    );
                     return;
                 }
 
@@ -615,7 +647,10 @@ export class GitService {
                 const batchBody: LFSBatchRequest = {
                     operation: "download",
                     transfers: ["basic"],
-                    objects: oidsToDownload.map((oid) => ({ oid, size: (oidToTargets.get(oid)?.[0]?.size ?? 0) })),
+                    objects: oidsToDownload.map((oid) => ({
+                        oid,
+                        size: oidToTargets.get(oid)?.[0]?.size ?? 0,
+                    })),
                 };
 
                 const batchResp = await fetch(`${lfsBaseUrl}/info/lfs/objects/batch`, {
@@ -636,7 +671,10 @@ export class GitService {
                 }
 
                 const batchData = (await batchResp.json()) as LFSBatchResponse;
-                const actionByOid = new Map<string, { href: string; header?: Record<string, string> }>();
+                const actionByOid = new Map<
+                    string,
+                    { href: string; header?: Record<string, string> }
+                >();
                 for (const obj of batchData.objects ?? []) {
                     const dl = obj.actions?.download;
                     if (obj.oid && dl?.href) {
@@ -662,7 +700,9 @@ export class GitService {
                         if (!action?.href) {
                             this.debugLog(`[GitService] Missing download action for oid ${oid}`);
                             completed += 1;
-                            progress.report({ message: `📎 Downloading file ${completed} of ${totalToDownload}` });
+                            progress.report({
+                                message: `📎 Downloading file ${completed} of ${totalToDownload}`,
+                            });
                             continue;
                         }
 
@@ -687,7 +727,9 @@ export class GitService {
                             const targets = oidToTargets.get(oid) ?? [];
                             await Promise.all(
                                 targets.map(async (t) => {
-                                    await fs.promises.mkdir(path.dirname(t.filesAbs), { recursive: true });
+                                    await fs.promises.mkdir(path.dirname(t.filesAbs), {
+                                        recursive: true,
+                                    });
                                     await fs.promises.writeFile(t.filesAbs, bytes);
                                 })
                             );
@@ -700,7 +742,9 @@ export class GitService {
                             this.debugLog(`[GitService] Failed downloading oid ${oid}:`, e);
                         } finally {
                             completed += 1;
-                            progress.report({ message: `📎 Downloading file ${completed} of ${totalToDownload}` });
+                            progress.report({
+                                message: `📎 Downloading file ${completed} of ${totalToDownload}`,
+                            });
                         }
                     }
                 };
@@ -2202,7 +2246,7 @@ export class GitService {
         this.debugLog(`[GitService] ${filepath} is LFS-tracked; adding as LFS`);
         // Read original bytes
         const absolutePathToPointerFill = path.join(dir, filepath);
-        const buf = await fs.promises.readFile(absolutePathToPointerFill);
+        let buf = await fs.promises.readFile(absolutePathToPointerFill);
 
         // Resolve remote URL
         const remoteUrl = await this.getRemoteUrl(dir);
@@ -2232,7 +2276,34 @@ export class GitService {
 
         // If the worktree file already contains an LFS pointer, avoid re-uploading.
         try {
-            const asText = buf.toString("utf8");
+            let asText = buf.toString("utf8");
+            if (asText.length === 0) {
+                // Recovery path: if this is a pointer path and there is a matching file in the files dir,
+                // replace the empty pointer content with the file's content and continue normal flow.
+                if (this.isPointerPath(filepath)) {
+                    const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                    try {
+                        const recovered = await fs.promises.readFile(filesAbs);
+                        if (recovered.length > 0) {
+                            await fs.promises.writeFile(absolutePathToPointerFill, recovered);
+                            buf = recovered;
+                            asText = buf.toString("utf8");
+                            this.debugLog(
+                                `[GitService] Recovered empty pointer ${filepath} from files dir; proceeding with LFS handling`
+                            );
+                        }
+                    } catch {
+                        // No matching file; fall back to prior behavior (stage as normal without LFS)
+                    }
+                }
+                if (asText.length === 0) {
+                    this.debugLog(
+                        `[GitService] ${filepath} is an empty file with no recovery; skipping LFS`
+                    );
+                    await git.add({ fs, dir, filepath });
+                    return;
+                }
+            }
             const existingPointer = this.parseLfsPointer(asText);
             if (existingPointer) {
                 this.debugLog(
