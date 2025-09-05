@@ -10,6 +10,11 @@ export interface UploadBlobsOptions {
     headers?: Record<string, string>;
     url: string;
     auth?: LfsAuth;
+    // Optional context for empty-pointer recovery and corrupted-record creation
+    recovery?: {
+        dir: string;
+        filepaths: string[];
+    };
 }
 
 export interface LFSAction {

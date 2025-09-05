@@ -104,12 +104,174 @@ function isValidLFSInfoResponseData(val: unknown): val is LFSBatchResponse {
  * replace @fetsorn/isogit-lfs uploadBlobs function with corrected validation
  */
 async function uploadBlobsToLFSBucket(
-    { headers = {}, url, auth }: UploadBlobsOptions,
+    {
+        headers = {},
+        url,
+        auth,
+        recovery,
+    }: UploadBlobsOptions & { recovery?: { dir: string; filepaths: string[] } },
     contents: Uint8Array[]
 ): Promise<LfsPointerInfo[]> {
     debugLog("[LFS Patch] Using patched uploadBlobs function");
     debugLog("[LFS Patch] URL:", url);
     debugLog("[LFS Patch] Auth object:", auth);
+
+    // Local helpers for pointer/files mapping
+    const isPointerPathLocal = (filepath: string): boolean => {
+        const normalized = filepath.replace(/\\/g, "/");
+        return normalized.includes(".project/attachments/pointers");
+    };
+    const getFilesPathForPointerLocal = (dir: string, pointerRelativePath: string): string => {
+        const normalized = pointerRelativePath.replace(/\\/g, "/");
+        const filesRelative = normalized
+            .replace("/.project/attachments/pointers/", "/.project/attachments/files/")
+            .replace(".project/attachments/pointers/", ".project/attachments/files/");
+        return path.join(dir, filesRelative);
+    };
+
+    // Attempt recovery for empty contents using files dir; record unrecoverable as corrupted
+    const skipIndices = new Set<number>();
+    if (recovery && Array.isArray(recovery.filepaths)) {
+        const dir = recovery.dir;
+        const filesRoot = path.join(dir, ".project/attachments/files");
+        const pointersRoot = path.join(dir, ".project/attachments/pointers");
+        const recovered: Uint8Array[] = [];
+        for (let i = 0; i < contents.length; i++) {
+            const buf = contents[i];
+            const filepath = recovery.filepaths[i];
+            if (!filepath) {
+                recovered.push(buf);
+                continue;
+            }
+            if (buf.length > 0) {
+                recovered.push(buf);
+                continue;
+            }
+            let replaced: Uint8Array | null = null;
+            let fileWasEmpty = false;
+            try {
+                if (isPointerPathLocal(filepath)) {
+                    const filesAbs = getFilesPathForPointerLocal(dir, filepath);
+                    try {
+                        const rec = await fs.promises.readFile(filesAbs);
+                        if (rec.length > 0) {
+                            replaced = rec;
+                            debugLog(
+                                `[LFS Patch] Recovered empty pointer ${filepath} from files dir; proceeding with upload`
+                            );
+                        } else {
+                            // The corresponding file exists but is empty as well
+                            fileWasEmpty = true;
+                        }
+                    } catch {
+                        // no recovered file
+                    }
+                }
+                if (!replaced) {
+                    // Pointer empty/corrupted → move it to files/corrupted/pointers and remove from pointers dir
+                    let corruptedPointerAbs: string;
+                    let corruptedFileAbs: string | undefined;
+                    if (isPointerPathLocal(filepath)) {
+                        const filesAbs = getFilesPathForPointerLocal(dir, filepath);
+                        const pointerAbs = path.join(dir, filepath);
+                        const relUnderPointers = path.relative(pointersRoot, pointerAbs);
+                        const relUnderFiles = path.relative(filesRoot, filesAbs);
+                        corruptedPointerAbs = path.join(
+                            filesRoot,
+                            "corrupted",
+                            "pointers",
+                            relUnderPointers
+                        );
+                        corruptedFileAbs = path.join(
+                            filesRoot,
+                            "corrupted",
+                            "files",
+                            relUnderFiles
+                        );
+                        await fs.promises.mkdir(path.dirname(corruptedPointerAbs), {
+                            recursive: true,
+                        });
+                        try {
+                            await fs.promises.rename(pointerAbs, corruptedPointerAbs);
+                            debugLog(
+                                `[LFS Patch] Moved corrupted pointer ${filepath} to: ${corruptedPointerAbs}`
+                            );
+                        } catch (renameErr) {
+                            // Fallback: copy then unlink
+                            try {
+                                await fs.promises.writeFile(corruptedPointerAbs, buf);
+                                await fs.promises.unlink(pointerAbs);
+                                debugLog(
+                                    `[LFS Patch] Copied then removed corrupted pointer ${filepath} to: ${corruptedPointerAbs}`
+                                );
+                            } catch (copyErr) {
+                                console.warn(
+                                    `[LFS Patch] Failed to move corrupted pointer ${filepath} to ${corruptedPointerAbs}:`,
+                                    renameErr,
+                                    copyErr
+                                );
+                            }
+                        }
+
+                        // If the corresponding files entry exists and is empty, move it to corrupted/files as well
+                        if (fileWasEmpty) {
+                            try {
+                                await fs.promises.mkdir(path.dirname(corruptedFileAbs!), {
+                                    recursive: true,
+                                });
+                                try {
+                                    await fs.promises.rename(filesAbs, corruptedFileAbs!);
+                                    debugLog(
+                                        `[LFS Patch] Moved empty files entry for ${filepath} to: ${corruptedFileAbs}`
+                                    );
+                                } catch (renameFileErr) {
+                                    // Fallback: write empty and unlink
+                                    try {
+                                        await fs.promises.writeFile(
+                                            corruptedFileAbs!,
+                                            new Uint8Array()
+                                        );
+                                        await fs.promises.unlink(filesAbs);
+                                        debugLog(
+                                            `[LFS Patch] Copied then removed empty files entry for ${filepath} to: ${corruptedFileAbs}`
+                                        );
+                                    } catch (copyFileErr) {
+                                        console.warn(
+                                            `[LFS Patch] Failed to move empty files entry for ${filepath} to ${corruptedFileAbs}:`,
+                                            renameFileErr,
+                                            copyFileErr
+                                        );
+                                    }
+                                }
+                            } catch (mkErr) {
+                                console.warn(
+                                    `[LFS Patch] Failed to prepare corrupted/files path for ${filepath}:`,
+                                    mkErr
+                                );
+                            }
+                        }
+                    } else {
+                        // Non-pointer empty file → record to files/corrupted but leave source in place
+                        const normalized = filepath.replace(/\\/g, "/");
+                        const corruptedAbs = path.join(filesRoot, "corrupted", normalized);
+                        await fs.promises.mkdir(path.dirname(corruptedAbs), { recursive: true });
+                        await fs.promises.writeFile(corruptedAbs, buf);
+                        debugLog(
+                            `[LFS Patch] Wrote empty file record to files/corrupted for ${filepath}: ${corruptedAbs}`
+                        );
+                    }
+                    skipIndices.add(i);
+                    recovered.push(buf);
+                } else {
+                    recovered.push(replaced);
+                }
+            } catch (e) {
+                console.warn(`[LFS Patch] Error during empty-pointer recovery for ${filepath}:`, e);
+                recovered.push(buf);
+            }
+        }
+        contents = recovered;
+    }
 
     // Use the original library's buildPointerInfo function
     const buildPointerInfo = (lfs as any).buildPointerInfo;
@@ -119,8 +281,10 @@ async function uploadBlobsToLFSBucket(
         throw new Error("Unable to access buildPointerInfo from LFS library");
     }
 
+    // Filter out skipped indices before building pointer infos
+    const effectiveContents: Uint8Array[] = contents.filter((_, i) => !skipIndices.has(i));
     const infos = (await Promise.all(
-        contents.map((c: Uint8Array) => buildPointerInfo(c))
+        effectiveContents.map((c: Uint8Array) => buildPointerInfo(c))
     )) as LfsPointerInfo[];
 
     // Build authentication headers - handle the auth object properly
@@ -145,6 +309,11 @@ async function uploadBlobsToLFSBucket(
     }
 
     // Request LFS transfer
+    // If everything was skipped, return empty result
+    if (effectiveContents.length === 0) {
+        return [] as unknown as LfsPointerInfo[];
+    }
+
     const lfsInfoRequestData: LFSBatchRequest = {
         operation: "upload",
         transfers: ["basic"],
@@ -561,7 +730,12 @@ export class GitService {
                             });
 
                             const infos = await uploadBlobsToLFSBucket(
-                                { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                                {
+                                    url: lfsBaseUrl,
+                                    headers: {},
+                                    auth: effectiveAuth,
+                                    recovery: { dir, filepaths: [filepath] },
+                                },
                                 [bytes]
                             );
                             this.debugLog("[GitService] Uploaded blob to LFS", {
@@ -2278,31 +2452,10 @@ export class GitService {
         try {
             let asText = buf.toString("utf8");
             if (asText.length === 0) {
-                // Recovery path: if this is a pointer path and there is a matching file in the files dir,
-                // replace the empty pointer content with the file's content and continue normal flow.
-                if (this.isPointerPath(filepath)) {
-                    const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                    try {
-                        const recovered = await fs.promises.readFile(filesAbs);
-                        if (recovered.length > 0) {
-                            await fs.promises.writeFile(absolutePathToPointerFill, recovered);
-                            buf = recovered;
-                            asText = buf.toString("utf8");
-                            this.debugLog(
-                                `[GitService] Recovered empty pointer ${filepath} from files dir; proceeding with LFS handling`
-                            );
-                        }
-                    } catch {
-                        // No matching file; fall back to prior behavior (stage as normal without LFS)
-                    }
-                }
-                if (asText.length === 0) {
-                    this.debugLog(
-                        `[GitService] ${filepath} is an empty file with no recovery; skipping LFS`
-                    );
-                    await git.add({ fs, dir, filepath });
-                    return;
-                }
+                // Defer empty-pointer handling to upload helper via recovery context
+                this.debugLog(
+                    `[GitService] ${filepath} is empty; delegating recovery/corruption handling to upload helper`
+                );
             }
             const existingPointer = this.parseLfsPointer(asText);
             if (existingPointer) {
@@ -2363,9 +2516,16 @@ export class GitService {
                 url: lfsBaseUrl,
                 headers: {},
                 auth: effectiveAuth, // Pass credentials (embedded or provided)
+                recovery: { dir, filepaths: [filepath] },
             },
             [buf]
         );
+        if (!pointerInfos || pointerInfos.length === 0) {
+            this.debugLog(
+                `[GitService] Upload skipped or produced no pointer (likely empty/unrecoverable) for ${filepath}`
+            );
+            return;
+        }
         const pointerBlob = lfs.formatPointerInfo(pointerInfos[0]);
 
         // Write pointer and stage it
