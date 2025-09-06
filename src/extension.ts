@@ -6,6 +6,7 @@ import { registerCommands } from "./commands";
 import { registerGitLabCommands } from "./commands/gitlabCommands";
 import { registerProgressCommands } from "./commands/progressCommands";
 import { registerSCMCommands } from "./commands/scmCommands";
+import { registerVersionCheckCommands, resetVersionModalCooldown } from "./utils/extensionVersionChecker";
 import { initialState, StateManager } from "./state";
 import { AuthState } from "./types/state";
 import { ConflictedFile } from "./git/GitService";
@@ -175,9 +176,13 @@ export async function activate(context: vscode.ExtensionContext) {
     registerGitLabCommands(context, authenticationProvider);
     registerSCMCommands(context, authenticationProvider);
     registerProgressCommands(context, authenticationProvider);
+    registerVersionCheckCommands(context);
 
     // Store API endpoint for use by other components
     context.globalState.update("frontierApiEndpoint", API_ENDPOINT);
+
+    // Reset version modal cooldown on extension activation
+    await resetVersionModalCooldown(context);
 
     // Create and register status bar item immediately
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);

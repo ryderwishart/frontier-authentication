@@ -1,11 +1,22 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs";
 import { ConflictedFile, GitService } from "../git/GitService";
 import { GitLabService } from "../gitlab/GitLabService";
 import * as git from "isomorphic-git";
+import http from "isomorphic-git/http/node";
 import { PublishWorkspaceOptions } from "../commands/scmCommands";
 import { StateManager } from "../state";
 import { ResolvedFile } from "../extension";
+import {
+    checkMetadataVersionsForSync,
+} from "../utils/extensionVersionChecker";
+import {
+    compareVersions,
+    getInstalledExtensionVersions,
+    handleOutdatedExtensionsForSync,
+    ExtensionVersionInfo,
+} from "../utils/extensionVersionChecker";
 
 export class SCMManager {
     private scmProvider: vscode.SourceControl;
@@ -54,7 +65,10 @@ export class SCMManager {
     private registerCommands(): void {
         // Manual sync command
         this.context.subscriptions.push(
-            vscode.commands.registerCommand("frontier.syncChanges", (options?: { commitMessage?: string }) => this.syncChanges(options))
+            vscode.commands.registerCommand(
+                "frontier.syncChanges",
+                (options?: { commitMessage?: string }) => this.syncChanges(options, true)
+            )
         );
 
         // Toggle auto-sync command
@@ -347,7 +361,16 @@ export class SCMManager {
         });
     }
 
-    async syncChanges(options?: { commitMessage?: string }): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
+    async syncChanges(
+        options?: { commitMessage?: string },
+        isManualSync: boolean = false
+    ): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
+        // Check extension version compatibility with project metadata before syncing
+        const canSync = await checkMetadataVersionsForSync(this.context, isManualSync);
+        if (!canSync) {
+            return { hasConflicts: false };
+        }
+
         // Create or show the status bar item
         if (!this.syncStatusBarItem) {
             this.syncStatusBarItem = vscode.window.createStatusBarItem(
@@ -388,6 +411,98 @@ export class SCMManager {
                 name: user.name || user.username,
                 email: user.email || `${user.username}@users.noreply.gitlab.com`,
             };
+
+            // Fetch and check remote metadata.json requirements without merging
+            try {
+                // Fetch latest remote refs
+                await git.fetch({
+                    fs,
+                    http,
+                    dir: workspacePath,
+                    onAuth: () => auth,
+                });
+
+                const currentBranch = await git.currentBranch({ fs, dir: workspacePath });
+                if (currentBranch) {
+                    const remoteRef = `refs/remotes/origin/${currentBranch}`;
+                    let remoteHead: string | undefined;
+                    try {
+                        remoteHead = await git.resolveRef({ fs, dir: workspacePath, ref: remoteRef });
+                    } catch (e) {
+                        // No remote branch yet; skip remote metadata check
+                    }
+
+                    if (remoteHead) {
+                        try {
+                            const result = await git.readBlob({
+                                fs,
+                                dir: workspacePath,
+                                oid: remoteHead,
+                                filepath: "metadata.json",
+                            });
+                            const text = new TextDecoder().decode(result.blob);
+                            const remoteMetadata = JSON.parse(text) as {
+                                meta?: { requiredExtensions?: { codexEditor?: string; frontierAuthentication?: string } };
+                            };
+
+                            const required = remoteMetadata.meta?.requiredExtensions;
+                            if (required) {
+                                const { codexEditorVersion, frontierAuthVersion } =
+                                    getInstalledExtensionVersions();
+                                const outdated: ExtensionVersionInfo[] = [];
+
+                                if (
+                                    required.codexEditor &&
+                                    codexEditorVersion &&
+                                    compareVersions(codexEditorVersion, required.codexEditor) < 0
+                                ) {
+                                    outdated.push({
+                                        extensionId: "project-accelerate.codex-editor-extension",
+                                        currentVersion: codexEditorVersion,
+                                        latestVersion: required.codexEditor,
+                                        isOutdated: true,
+                                        downloadUrl: "",
+                                        displayName: "Codex Editor",
+                                    });
+                                }
+
+                                if (
+                                    required.frontierAuthentication &&
+                                    frontierAuthVersion &&
+                                    compareVersions(
+                                        frontierAuthVersion,
+                                        required.frontierAuthentication
+                                    ) < 0
+                                ) {
+                                    outdated.push({
+                                        extensionId: "frontier-rnd.frontier-authentication",
+                                        currentVersion: frontierAuthVersion,
+                                        latestVersion: required.frontierAuthentication,
+                                        isOutdated: true,
+                                        downloadUrl: "",
+                                        displayName: "Frontier Authentication",
+                                    });
+                                }
+
+                                if (outdated.length > 0) {
+                                    const allow = await handleOutdatedExtensionsForSync(
+                                        this.context,
+                                        outdated,
+                                        isManualSync
+                                    );
+                                    if (!allow) {
+                                        return { hasConflicts: false };
+                                    }
+                                }
+                            }
+                        } catch (readErr) {
+                            // No metadata.json on remote or parse failure; proceed
+                        }
+                    }
+                }
+            } catch (remoteCheckErr) {
+                // Remote fetch failed; continue to normal sync path
+            }
 
             // Try to sync and get result
             const syncResult = await this.gitService.syncChanges(workspacePath, auth, author, options);
