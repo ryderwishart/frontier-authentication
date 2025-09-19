@@ -223,11 +223,9 @@ export async function activate(context: vscode.ExtensionContext) {
         }, 1000); // Small delay to ensure initialization is complete
     }
 
-    // Dispose existing providers if they exist
-    if (authenticationProvider) {
-        // Removed dispose call here
-        authenticationProvider.dispose();
-    }
+    // Do not dispose the freshly created authentication provider here.
+    // Disposing would unregister its event emitters and prevent VS Code's
+    // Accounts UI from receiving session change events (e.g., on logout).
 
     // Register status bar item
     // Removed redundant registration here
