@@ -507,6 +507,22 @@ export class SCMManager {
             // Try to sync and get result
             const syncResult = await this.gitService.syncChanges(workspacePath, auth, author, options);
 
+            // If sync was skipped due to a lock, inform the user and do not show "Synced"
+            if (syncResult.skippedDueToLock) {
+                clearInterval(animationInterval);
+                if (this.syncStatusBarItem) {
+                    this.syncStatusBarItem.text = `$(lock) Sync skipped (another sync in progress)`;
+                    this.syncStatusBarItem.show();
+                    setTimeout(() => {
+                        this.syncStatusBarItem?.hide();
+                    }, 4000);
+                }
+                vscode.window.showWarningMessage(
+                    "Sync skipped: another synchronization appears to be in progress. If this persists, ensure .git/frontier-sync.lock does not exist."
+                );
+                return { hasConflicts: false };
+            }
+
             // If we have conflicts, return them to client
             if (syncResult.hadConflicts && syncResult.conflicts) {
                 return {

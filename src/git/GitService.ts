@@ -43,6 +43,7 @@ export interface SyncResult {
     hadConflicts: boolean;
     conflicts?: ConflictedFile[];
     offline?: boolean;
+    skippedDueToLock?: boolean;
 }
 
 export enum RemoteBranchStatus {
@@ -1134,14 +1135,14 @@ export class GitService {
         // Check if sync is already in progress
         if (this.stateManager.isSyncLocked()) {
             this.debugLog("Sync already in progress, skipping this request");
-            return { hadConflicts: false };
+            return { hadConflicts: false, skippedDueToLock: true };
         }
 
         // Try to acquire the sync lock
         const lockAcquired = await this.stateManager.acquireSyncLock(dir);
         if (!lockAcquired) {
             this.debugLog("Failed to acquire sync lock, skipping this request");
-            return { hadConflicts: false };
+            return { hadConflicts: false, skippedDueToLock: true };
         }
 
         try {

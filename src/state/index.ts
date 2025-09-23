@@ -19,6 +19,20 @@ export class StateManager {
     private state: GlobalState;
     private readonly stateKey = "frontier.globalState";
     private lockFilePath: string | undefined;
+    private hasAcquiredLock: boolean = false;
+    private isPidAlive(pid: number): boolean {
+        try {
+            // Signal 0 checks for existence without killing the process
+            process.kill(pid, 0);
+            return true;
+        } catch (err: any) {
+            if (err && (err.code === "ESRCH" || err.code === "ENOENT")) {
+                return false; // no such process
+            }
+            // EPERM or others mean it exists but we don't have permission
+            return true;
+        }
+    }
 
     private constructor(private context: vscode.ExtensionContext) {
         // Initialize with stored state or defaults
@@ -100,27 +114,53 @@ export class StateManager {
                 return false;
             }
         }
-        // Create lock file path in .git directory
+        // Create lock file path in .git directory (do not mark acquired yet)
         const gitDir = path.join(workspacePath, ".git");
-        this.lockFilePath = path.join(gitDir, "frontier-sync.lock");
+        const lockPath = path.join(gitDir, "frontier-sync.lock");
 
         try {
             // Try to create the lock file
-            await fs.promises.writeFile(this.lockFilePath, Date.now().toString(), { flag: "wx" });
+            const payload = JSON.stringify({ pid: process.pid, timestamp: Date.now() });
+            await fs.promises.writeFile(lockPath, payload, { flag: "wx" });
+            // Only now mark the lock as acquired and record the path
+            this.lockFilePath = lockPath;
+            this.hasAcquiredLock = true;
             console.log("Sync lock acquired");
             return true;
         } catch (error) {
             // Check if lock is stale (older than 5 minutes)
             try {
-                const lockContent = await fs.promises.readFile(this.lockFilePath, "utf8");
-                const lockTime = parseInt(lockContent);
+                const lockContent = await fs.promises.readFile(lockPath, "utf8");
+                let lockTime: number | undefined;
+                let lockPid: number | undefined;
+                try {
+                    const parsed = JSON.parse(lockContent);
+                    lockTime = typeof parsed.timestamp === "number" ? parsed.timestamp : undefined;
+                    lockPid = typeof parsed.pid === "number" ? parsed.pid : undefined;
+                } catch {
+                    // Legacy format: content is just the timestamp
+                    const legacy = parseInt(lockContent);
+                    lockTime = isNaN(legacy) ? undefined : legacy;
+                }
                 const now = Date.now();
                 const fiveMinutesInMs = 5 * 60 * 1000;
 
-                if (now - lockTime > fiveMinutesInMs) {
+                const isStale = typeof lockTime === "number" && now - lockTime > fiveMinutesInMs;
+                const ownerGone = typeof lockPid === "number" ? !this.isPidAlive(lockPid) : false;
+
+                if (isStale || ownerGone) {
                     // Lock is stale, force release it
-                    console.log("Stale sync lock detected, releasing it");
-                    await this.releaseSyncLock();
+                    console.log(
+                        ownerGone
+                            ? "Orphaned sync lock detected (owner process gone), releasing it"
+                            : "Stale sync lock detected, releasing it"
+                    );
+                    // Directly remove stale file (we don't own an acquired lock here)
+                    try {
+                        await fs.promises.unlink(lockPath);
+                    } catch (unlinkErr) {
+                        console.log("Error removing stale lock file:", unlinkErr);
+                    }
                     // Try to acquire lock again
                     return this.acquireSyncLock(workspacePath);
                 }
@@ -129,16 +169,18 @@ export class StateManager {
             }
 
             console.log("Sync already in progress, cannot acquire lock");
+            this.hasAcquiredLock = false;
             return false;
         }
     }
 
     async releaseSyncLock(): Promise<void> {
-        if (this.lockFilePath) {
+        if (this.hasAcquiredLock && this.lockFilePath) {
             try {
                 // Remove the lock file
                 await fs.promises.unlink(this.lockFilePath);
                 this.lockFilePath = undefined;
+                this.hasAcquiredLock = false;
                 console.log("Sync lock released");
             } catch (error) {
                 console.log("Error releasing sync lock:", error);
@@ -147,7 +189,7 @@ export class StateManager {
     }
 
     isSyncLocked(): boolean {
-        return this.lockFilePath !== undefined;
+        return this.hasAcquiredLock === true;
     }
 
     private readonly stateChangeEmitter = new vscode.EventEmitter<void>();
@@ -172,13 +214,28 @@ export class StateManager {
 
             // Read lock file content
             const lockContent = await fs.promises.readFile(lockFilePath, "utf8");
-            const lockTime = parseInt(lockContent);
+            let lockTime: number | undefined;
+            let lockPid: number | undefined;
+            try {
+                const parsed = JSON.parse(lockContent);
+                lockTime = typeof parsed.timestamp === "number" ? parsed.timestamp : undefined;
+                lockPid = typeof parsed.pid === "number" ? parsed.pid : undefined;
+            } catch {
+                const legacy = parseInt(lockContent);
+                lockTime = isNaN(legacy) ? undefined : legacy;
+            }
             const now = Date.now();
             const fiveMinutesInMs = 5 * 60 * 1000;
 
             // If lock is stale (older than 5 minutes), remove it
-            if (now - lockTime > fiveMinutesInMs) {
-                console.log("Cleaning up stale lock file during initialization");
+            const isStale = typeof lockTime === "number" && now - lockTime > fiveMinutesInMs;
+            const ownerGone = typeof lockPid === "number" ? !this.isPidAlive(lockPid) : false;
+            if (isStale || ownerGone) {
+                console.log(
+                    ownerGone
+                        ? "Cleaning up orphaned lock file during initialization (owner process gone)"
+                        : "Cleaning up stale lock file during initialization"
+                );
                 await fs.promises.unlink(lockFilePath);
             }
         } catch (error) {
