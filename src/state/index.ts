@@ -147,13 +147,14 @@ export class StateManager {
 
                 const isStale = typeof lockTime === "number" && now - lockTime > fiveMinutesInMs;
                 const ownerGone = typeof lockPid === "number" ? !this.isPidAlive(lockPid) : false;
+                const legacyAndStale = (typeof lockPid !== "number") && isStale;
 
-                if (isStale || ownerGone) {
+                if (ownerGone || legacyAndStale) {
                     // Lock is stale, force release it
                     console.log(
                         ownerGone
                             ? "Orphaned sync lock detected (owner process gone), releasing it"
-                            : "Stale sync lock detected, releasing it"
+                            : "Legacy stale sync lock detected, releasing it"
                     );
                     // Directly remove stale file (we don't own an acquired lock here)
                     try {
@@ -179,11 +180,18 @@ export class StateManager {
             try {
                 // Remove the lock file
                 await fs.promises.unlink(this.lockFilePath);
+                console.log("Sync lock released");
+            } catch (error: any) {
+                if (error && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
+                    // File already removed externally; treat as released
+                    console.log("Lock file already removed; clearing in-memory lock state");
+                } else {
+                    console.log("Error releasing sync lock:", error);
+                    // For non-ENOENT errors, still clear in-memory lock to avoid wedging the session
+                }
+            } finally {
                 this.lockFilePath = undefined;
                 this.hasAcquiredLock = false;
-                console.log("Sync lock released");
-            } catch (error) {
-                console.log("Error releasing sync lock:", error);
             }
         }
     }
@@ -227,14 +235,15 @@ export class StateManager {
             const now = Date.now();
             const fiveMinutesInMs = 5 * 60 * 1000;
 
-            // If lock is stale (older than 5 minutes), remove it
+            // If lock is orphaned or legacy-stale, remove it
             const isStale = typeof lockTime === "number" && now - lockTime > fiveMinutesInMs;
             const ownerGone = typeof lockPid === "number" ? !this.isPidAlive(lockPid) : false;
-            if (isStale || ownerGone) {
+            const legacyAndStale = (typeof lockPid !== "number") && isStale;
+            if (ownerGone || legacyAndStale) {
                 console.log(
                     ownerGone
                         ? "Cleaning up orphaned lock file during initialization (owner process gone)"
-                        : "Cleaning up stale lock file during initialization"
+                        : "Cleaning up legacy stale lock file during initialization"
                 );
                 await fs.promises.unlink(lockFilePath);
             }
