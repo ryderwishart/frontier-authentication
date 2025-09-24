@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { MetadataManager } from "./metadataManager";
 // Lightweight version comparator to avoid external semver dependency
 export function compareVersions(a: string, b: string): number {
     const normalize = (v: string) => v.trim().replace(/^v/i, "");
@@ -89,19 +90,6 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
             return { canSync: false, metadataUpdated: false, reason: "No workspace folder" };
         }
 
-        const metadataPath = vscode.Uri.joinPath(workspaceFolder.uri, "metadata.json");
-
-        let metadata: ProjectMetadata;
-        try {
-            const metadataContent = await vscode.workspace.fs.readFile(metadataPath);
-            metadata = JSON.parse(new TextDecoder().decode(metadataContent));
-        } catch (error) {
-            console.warn("[MetadataVersionChecker] ❌ Could not read metadata.json:", error);
-            return { canSync: false, metadataUpdated: false, reason: "Could not read metadata file" };
-        }
-
-        const meta = (metadata.meta ??= {} as MetaSection);
-
         const codexEditorVersion = getCurrentExtensionVersion("project-accelerate.codex-editor-extension");
         const frontierAuthVersion = getCurrentExtensionVersion("frontier-rnd.frontier-authentication");
 
@@ -125,28 +113,32 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
             };
         }
 
-        if (!meta.requiredExtensions) {
-            debug("[MetadataVersionChecker] ➕ Adding extension version requirements to metadata");
-            meta.requiredExtensions = {
-                codexEditor: codexEditorVersion,
-                frontierAuthentication: frontierAuthVersion,
-            };
-
-            await saveMetadata(metadataPath, metadata);
-
-            debug("[MetadataVersionChecker] ✅ Added current extension versions to metadata");
-            return { canSync: true, metadataUpdated: true };
+        // Use MetadataManager to safely read current versions
+        const currentVersionsResult = await MetadataManager.getExtensionVersions(workspaceFolder.uri);
+        if (!currentVersionsResult.success) {
+            console.warn("[MetadataVersionChecker] ❌ Could not read metadata.json:", currentVersionsResult.error);
+            return { canSync: false, metadataUpdated: false, reason: "Could not read metadata file" };
         }
 
-        const metadataCodexVersion = meta.requiredExtensions.codexEditor;
-        const metadataFrontierVersion = meta.requiredExtensions.frontierAuthentication;
+        const currentVersions = currentVersionsResult.versions || {};
+        const metadataCodexVersion = currentVersions.codexEditor;
+        const metadataFrontierVersion = currentVersions.frontierAuthentication;
 
         debug("[MetadataVersionChecker] 📋 Metadata requires:");
         debug(`  - Codex Editor: ${metadataCodexVersion || "not set"}`);
         debug(`  - Frontier Authentication: ${metadataFrontierVersion || "not set"}`);
 
-        let metadataUpdated = false;
+        let needsUpdate = false;
         const outdatedExtensions: ExtensionVersionInfo[] = [];
+        const versionsToUpdate: { codexEditor?: string; frontierAuthentication?: string } = {};
+
+        // Check if versions need updating
+        if (!metadataCodexVersion || !metadataFrontierVersion) {
+            debug("[MetadataVersionChecker] ➕ Adding missing extension version requirements to metadata");
+            needsUpdate = true;
+            if (!metadataCodexVersion) versionsToUpdate.codexEditor = codexEditorVersion;
+            if (!metadataFrontierVersion) versionsToUpdate.frontierAuthentication = frontierAuthVersion;
+        }
 
         if (metadataCodexVersion) {
             if (compareVersions(codexEditorVersion, metadataCodexVersion) < 0) {
@@ -165,14 +157,9 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
                 debug(
                     `[MetadataVersionChecker] 🚀 Updating Codex Editor version: ${metadataCodexVersion} → ${codexEditorVersion}`
                 );
-                meta.requiredExtensions.codexEditor = codexEditorVersion;
-                metadataUpdated = true;
+                versionsToUpdate.codexEditor = codexEditorVersion;
+                needsUpdate = true;
             }
-        } else {
-            debug("[MetadataVersionChecker] ➕ Setting Codex Editor version in metadata");
-            meta.requiredExtensions = meta.requiredExtensions || {};
-            meta.requiredExtensions.codexEditor = codexEditorVersion;
-            metadataUpdated = true;
         }
 
         if (metadataFrontierVersion) {
@@ -192,18 +179,22 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
                 debug(
                     `[MetadataVersionChecker] 🚀 Updating Frontier Authentication version: ${metadataFrontierVersion} → ${frontierAuthVersion}`
                 );
-                meta.requiredExtensions.frontierAuthentication = frontierAuthVersion;
-                metadataUpdated = true;
+                versionsToUpdate.frontierAuthentication = frontierAuthVersion;
+                needsUpdate = true;
             }
-        } else {
-            debug("[MetadataVersionChecker] ➕ Setting Frontier Authentication version in metadata");
-            meta.requiredExtensions = meta.requiredExtensions || {};
-            meta.requiredExtensions.frontierAuthentication = frontierAuthVersion;
-            metadataUpdated = true;
         }
 
-        if (metadataUpdated) {
-            await saveMetadata(metadataPath, metadata);
+        // Safely update metadata if needed
+        if (needsUpdate) {
+            const updateResult = await MetadataManager.updateExtensionVersions(workspaceFolder.uri, versionsToUpdate);
+            if (!updateResult.success) {
+                console.error("[MetadataVersionChecker] ❌ Failed to update metadata:", updateResult.error);
+                return {
+                    canSync: false,
+                    metadataUpdated: false,
+                    reason: `Failed to update metadata: ${updateResult.error}`,
+                };
+            }
             debug("[MetadataVersionChecker] 💾 Metadata updated with latest extension versions");
         }
 
@@ -214,7 +205,7 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
             );
             return {
                 canSync: false,
-                metadataUpdated,
+                metadataUpdated: needsUpdate,
                 reason: `Extensions need updating: ${outdatedExtensions
                     .map((ext) => `${ext.displayName} (${ext.currentVersion} → ${ext.latestVersion})`)
                     .join(", ")}`,
@@ -224,7 +215,7 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
         }
 
         debug("[MetadataVersionChecker] ✅ All extension versions compatible with metadata");
-        return { canSync: true, metadataUpdated };
+        return { canSync: true, metadataUpdated: needsUpdate };
     } catch (error) {
         console.error("[MetadataVersionChecker] ❌ Error during metadata version check:", error);
         return {
@@ -237,10 +228,7 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
     }
 }
 
-async function saveMetadata(metadataPath: vscode.Uri, metadata: ProjectMetadata): Promise<void> {
-    const metadataContent = JSON.stringify(metadata, null, 4);
-    await vscode.workspace.fs.writeFile(metadataPath, new TextEncoder().encode(metadataContent));
-}
+// saveMetadata function removed - now using MetadataManager for thread-safe operations
 
 function shouldShowVersionModal(context: vscode.ExtensionContext, isManualSync: boolean): boolean {
     if (isManualSync) {
