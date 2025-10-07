@@ -325,6 +325,43 @@ export function registerCommands(
                     `Failed to refresh user info: ${error instanceof Error ? error.message : String(error)}`
                 );
             }
+        }),
+
+        // Add command to pack repository objects for optimization
+        vscode.commands.registerCommand("frontier.packRepository", async (workspacePath?: string) => {
+            try {
+                if (!gitService) {
+                    vscode.window.showErrorMessage("Git service not available");
+                    return;
+                }
+
+                // Use provided workspace path or get current workspace
+                const dir = workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                if (!dir) {
+                    vscode.window.showErrorMessage("No workspace folder found");
+                    return;
+                }
+
+                // Show progress indicator
+                await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: "Optimizing repository...",
+                        cancellable: false,
+                    },
+                    async (progress) => {
+                        progress.report({ message: "Packing objects..." });
+                        await gitService.packObjects(dir);
+                        progress.report({ message: "Pack complete!" });
+                    }
+                );
+
+                vscode.window.showInformationMessage("Repository optimized successfully!");
+            } catch (error) {
+                vscode.window.showErrorMessage(
+                    `Failed to pack repository: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
         })
     );
 }
