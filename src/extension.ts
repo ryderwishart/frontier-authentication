@@ -133,9 +133,6 @@ export interface FrontierAPI {
             stage: string;
         }>;
     }>;
-
-    // Repository optimization
-    packRepository: (workspacePath?: string, silent?: boolean) => Promise<void>;
 }
 
 export interface ResolvedFile {
@@ -371,9 +368,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     stage: string;
                 }>;
             }>,
-
-        packRepository: async (workspacePath?: string, silent?: boolean) =>
-            vscode.commands.executeCommand("frontier.packRepository", workspacePath, silent) as Promise<void>,
     };
 
     return frontierAPI;
