@@ -357,7 +357,7 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             // Transform HTTPS endpoint to WSS for WebSocket
             const wsUrl = API_ENDPOINT.replace('https://', 'wss://').replace('http://', 'ws://');
-            return `${wsUrl}/ws/asr`;
+            return `${wsUrl}/ws/asr?source=codex`;
         },
         syncChanges: async (options?: { commitMessage?: string }) =>
             vscode.commands.executeCommand("frontier.syncChanges", options) as Promise<{
