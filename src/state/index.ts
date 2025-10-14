@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { GlobalState, AuthState, GitLabInfo, GitLabCredentials, UserInfo } from "../types/state";
+import { GlobalState, AuthState, GitLabInfo, GitLabCredentials, UserInfo, MediaFilesStrategy } from "../types/state";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -102,6 +102,18 @@ export class StateManager {
 
     getUserInfo(): UserInfo | undefined {
         return this.state.auth.userInfo;
+    }
+
+    // ========== Media Strategy per repository ==========
+    getRepoStrategy(workspacePath: string): MediaFilesStrategy | undefined {
+        return this.state.repoStrategies?.[workspacePath];
+    }
+
+    async setRepoStrategy(workspacePath: string, strategy: MediaFilesStrategy): Promise<void> {
+        const existing = this.state.repoStrategies || {};
+        this.state.repoStrategies = { ...existing, [workspacePath]: strategy };
+        await this.persistState();
+        this.notifyStateChange();
     }
 
     // Sync lock methods

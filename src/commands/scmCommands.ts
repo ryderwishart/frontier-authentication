@@ -234,8 +234,8 @@ export function registerSCMCommands(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "frontier.cloneRepository",
-            async (url?: string, cloneToPath?: string, openWorkspace: boolean = true) => {
-                console.log("cloneRepository123", { url, cloneToPath, openWorkspace });
+            async (url?: string, cloneToPath?: string, openWorkspace: boolean = true, mediaStrategy?: string) => {
+                console.log("cloneRepository123", { url, cloneToPath, openWorkspace, mediaStrategy });
                 try {
                     // Initialize GitLab service
                     await gitLabService.initializeWithRetry();
@@ -278,7 +278,8 @@ export function registerSCMCommands(
                     await scmManager.cloneExistingRepository(
                         repositoryUrl,
                         cloneToPath,
-                        openWorkspace
+                        openWorkspace,
+                        mediaStrategy as "auto-download" | "stream-and-save" | "stream-only" | undefined
                     );
                     return true;
                 } catch (error) {

@@ -325,6 +325,57 @@ export function registerCommands(
                     `Failed to refresh user info: ${error instanceof Error ? error.message : String(error)}`
                 );
             }
+        }),
+
+        // Add command to pack repository objects for optimization
+        vscode.commands.registerCommand("frontier.packRepository", async (workspacePath?: string, silent: boolean = false) => {
+            try {
+                if (!gitService) {
+                    if (!silent) {
+                        vscode.window.showErrorMessage("Git service not available");
+                    }
+                    console.error("[frontier.packRepository] Git service not available");
+                    return;
+                }
+
+                // Use provided workspace path or get current workspace
+                const dir = workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                if (!dir) {
+                    if (!silent) {
+                        vscode.window.showErrorMessage("No workspace folder found");
+                    }
+                    console.error("[frontier.packRepository] No workspace folder found");
+                    return;
+                }
+
+                // Show progress indicator only if not silent
+                if (!silent) {
+                    await vscode.window.withProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: "Optimizing repository...",
+                            cancellable: false,
+                        },
+                        async (progress) => {
+                            progress.report({ message: "Packing objects..." });
+                            await gitService.packObjects(dir);
+                            progress.report({ message: "Pack complete!" });
+                        }
+                    );
+                    vscode.window.showInformationMessage("Repository optimized successfully!");
+                } else {
+                    // Silent mode: just do the operation without UI feedback
+                    console.log("[frontier.packRepository] Starting silent pack operation");
+                    await gitService.packObjects(dir);
+                    console.log("[frontier.packRepository] Pack operation completed silently");
+                }
+            } catch (error) {
+                const errorMessage = `Failed to pack repository: ${error instanceof Error ? error.message : String(error)}`;
+                if (!silent) {
+                    vscode.window.showErrorMessage(errorMessage);
+                }
+                console.error("[frontier.packRepository]", errorMessage);
+            }
         })
     );
 }

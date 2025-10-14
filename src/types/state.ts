@@ -9,6 +9,11 @@ export interface GitLabInfo {
     }>;
 }
 
+export type MediaFilesStrategy =
+    | "auto-download"
+    | "stream-and-save"
+    | "stream-only";
+
 export interface GitLabCredentials {
     token: string;
     url: string;
@@ -35,6 +40,8 @@ export interface AuthState {
 
 export interface GlobalState {
     auth: AuthState;
+    /** Per-repository media strategy keyed by absolute workspace path */
+    repoStrategies?: Record<string, MediaFilesStrategy>;
 }
 
 // Add some type guards for better type safety

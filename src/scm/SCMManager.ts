@@ -148,7 +148,8 @@ export class SCMManager {
     async cloneExistingRepository(
         repoUrl: string,
         cloneToPath?: string,
-        openWorkspace: boolean = true
+        openWorkspace: boolean = true,
+        mediaStrategy?: "auto-download" | "stream-and-save" | "stream-only"
     ): Promise<void> {
         try {
             // Ensure GitLab service is initialized
@@ -172,8 +173,8 @@ export class SCMManager {
                 throw new Error("No workspace path selected");
             }
 
-            // Clone the repository
-            await this.cloneRepository(url.toString(), workspacePath);
+            // Clone the repository with media strategy
+            await this.cloneRepository(url.toString(), workspacePath, mediaStrategy);
 
             // Conditionally open the workspace
             if (openWorkspace) {
@@ -223,7 +224,8 @@ export class SCMManager {
 
     private async cloneRepository(
         repoUrl: string,
-        workspacePath: string // this is the path to the local directory where the repository will be cloned
+        workspacePath: string, // this is the path to the local directory where the repository will be cloned
+        mediaStrategy?: "auto-download" | "stream-and-save" | "stream-only"
     ): Promise<void> {
         try {
             const url = new URL(repoUrl);
@@ -238,8 +240,15 @@ export class SCMManager {
                 password: gitlabToken,
             };
 
-            // Clone the repository
-            await this.gitService.clone(repoUrl, workspacePath, auth);
+            // Persist repo strategy (defaults handled downstream)
+            try {
+                if (mediaStrategy) {
+                    await this.stateManager.setRepoStrategy(workspacePath, mediaStrategy);
+                }
+            } catch {}
+
+            // Clone the repository with media strategy
+            await this.gitService.clone(repoUrl, workspacePath, auth, mediaStrategy);
 
             // Ensure remote is properly configured
             const remotes = await this.gitService.getRemotes(workspacePath);

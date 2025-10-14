@@ -54,6 +54,11 @@ export interface ProjectProgressReport {
     };
 }
 
+export type MediaFilesStrategy = 
+    | "auto-download"     // Download and save media files automatically
+    | "stream-and-save"   // Stream media files and save in background
+    | "stream-only";      // Stream media files without saving (read from network each time)
+
 export interface FrontierAPI {
     authProvider: FrontierAuthProvider;
     getAuthStatus: () => {
@@ -81,8 +86,11 @@ export interface FrontierAPI {
     cloneRepository: (
         repositoryUrl: string,
         cloneToPath?: string,
-        openWorkspace?: boolean
+        openWorkspace?: boolean,
+        mediaStrategy?: MediaFilesStrategy
     ) => Promise<boolean>;
+    /** Store per-repo media strategy preference */
+    setRepoMediaStrategy: (workspacePath: string, strategy: MediaFilesStrategy) => Promise<void>;
     publishWorkspace: (options: {
         name?: string;
         description?: string;
@@ -133,6 +141,23 @@ export interface FrontierAPI {
             stage: string;
         }>;
     }>;
+
+    // Repository optimization
+    packRepository: (workspacePath?: string, silent?: boolean) => Promise<void>;
+
+    /**
+     * Download a single LFS file by OID
+     * @param projectPath - Path to the git repository
+     * @param oid - SHA256 OID of the LFS object
+     * @param size - Expected size of the object in bytes
+     * @returns Buffer containing the file data
+     * @throws Error if not authenticated, no remote URL, or download fails
+     */
+    downloadLFSFile: (
+        projectPath: string,
+        oid: string,
+        size: number
+    ) => Promise<Buffer>;
 }
 
 export interface ResolvedFile {
@@ -273,13 +298,15 @@ export async function activate(context: vscode.ExtensionContext) {
         cloneRepository: async (
             repositoryUrl: string,
             cloneToPath?: string,
-            openWorkspace?: boolean
+            openWorkspace?: boolean,
+            mediaStrategy?: MediaFilesStrategy
         ) =>
             vscode.commands.executeCommand<boolean>(
                 "frontier.cloneRepository",
                 repositoryUrl,
                 cloneToPath,
-                openWorkspace
+                openWorkspace,
+                mediaStrategy
             ),
         publishWorkspace: async (options: {
             name?: string;
@@ -368,6 +395,93 @@ export async function activate(context: vscode.ExtensionContext) {
                     stage: string;
                 }>;
             }>,
+
+        packRepository: async (workspacePath?: string, silent?: boolean) =>
+            vscode.commands.executeCommand("frontier.packRepository", workspacePath, silent) as Promise<void>,
+
+        downloadLFSFile: async (projectPath: string, oid: string, size: number): Promise<Buffer> => {
+            // Import GitService and downloadLFSObject
+            const { GitService } = await import("./git/GitService");
+            const gitService = new GitService(stateManager);
+
+            // Validate inputs
+            if (!projectPath) {
+                throw new Error("Project path is required");
+            }
+            if (!oid || !/^[a-f0-9]{64}$/i.test(oid)) {
+                throw new Error("Invalid OID format (expected 64-character hex string)");
+            }
+            if (!size || size <= 0) {
+                throw new Error("Invalid size (must be positive number)");
+            }
+
+            // Get remote URL
+            const remoteUrl = await gitService.getRemoteUrl(projectPath);
+            if (!remoteUrl) {
+                throw new Error("No remote URL found for project. This project may not be connected to a remote repository.");
+            }
+
+            // Parse URL and prepare auth
+            const { GitService: GitServiceStatic } = await import("./git/GitService");
+            const { cleanUrl, auth: embedded } = GitServiceStatic.parseGitUrl(remoteUrl);
+            const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+
+            // Prefer embedded auth in remote URL if present; otherwise, fetch token from GitLabService
+            let auth: { username?: string; password?: string; token?: string } | undefined = embedded;
+            if (!auth || !auth.password) {
+                try {
+                    const { GitLabService } = await import("./gitlab/GitLabService");
+                    const gl = new GitLabService(authenticationProvider);
+                    // Ensure service is initialized (handles retries)
+                    await gl.initializeWithRetry?.();
+                    const token = await gl.getToken();
+                    if (!token) {
+                        throw new Error("Not authenticated. Please log in to download media files.");
+                    }
+                    auth = { username: "oauth2", password: token };
+                } catch (e) {
+                    throw new Error("Not authenticated. Please log in to download media files.");
+                }
+            }
+
+            // Download LFS object using the internal function
+            // We need to import and call downloadLFSObject directly
+            const { downloadLFSObject } = await import("./git/GitService");
+            
+            try {
+                const bytes = await downloadLFSObject(
+                    {
+                        url: lfsBaseUrl,
+                        headers: {},
+                        auth,
+                    },
+                    { oid, size }
+                );
+
+                return Buffer.from(bytes);
+            } catch (error) {
+                // Provide more context in error message
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                
+                if (errorMsg.includes("404") || errorMsg.includes("not found")) {
+                    throw new Error(`Media file not found on server (OID: ${oid.substring(0, 8)}...)`);
+                } else if (errorMsg.includes("401") || errorMsg.includes("403")) {
+                    throw new Error("Authentication failed. Please log in again.");
+                } else if (errorMsg.includes("timeout") || errorMsg.includes("ETIMEDOUT")) {
+                    throw new Error("Download timed out. Please check your internet connection.");
+                } else {
+                    throw new Error(`Failed to download media file: ${errorMsg}`);
+                }
+            }
+        },
+        setRepoMediaStrategy: async (workspacePath: string, strategy: MediaFilesStrategy): Promise<void> => {
+            try {
+                await stateManager.setRepoStrategy(workspacePath, strategy);
+            } catch (e) {
+                console.warn("Failed to set repo media strategy:", e);
+                throw e;
+            }
+        },
     };
 
     return frontierAPI;
