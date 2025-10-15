@@ -4,6 +4,10 @@
     "description": "Authentication extension for Frontier",
     "publisher": "frontier-rnd",
     "version": "0.4.15",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/frontier-rnd/frontier-authentication"
+  },
     "engines": {
         "vscode": "^1.87.0"
     },
