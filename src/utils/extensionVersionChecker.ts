@@ -265,15 +265,33 @@ export async function resetVersionModalCooldown(context: vscode.ExtensionContext
     debug("[VersionModalCooldown] Reset cooldown timestamp on extension activation");
 }
 
+export function buildOutdatedExtensionsMessage(outdatedExtensions: ExtensionVersionInfo[]): string {
+    if (outdatedExtensions.length === 1) {
+        const ext = outdatedExtensions[0];
+        return [
+            `The remote project is on v${ext.latestVersion}, you have v${ext.currentVersion} installed.`,
+            "",
+            `To enable syncing, please update ${ext.displayName}.`,
+        ].join("\n");
+    }
+
+    const sections = outdatedExtensions
+        .map((ext) =>
+            [
+                `The remote project is on v${ext.latestVersion}, you have v${ext.currentVersion} installed.`,
+                "",
+                `To enable syncing, please update ${ext.displayName}.`,
+            ].join("\n")
+        )
+        .join("\n\n");
+    return sections;
+}
+
 async function showMetadataVersionMismatchNotification(
     context: vscode.ExtensionContext,
     outdatedExtensions: ExtensionVersionInfo[]
 ): Promise<boolean> {
-    const extensionNames = outdatedExtensions.map((ext) => ext.displayName).join(" and ");
-    const message =
-        outdatedExtensions.length === 1
-            ? `${extensionNames} needs to be updated to enable syncing.`
-            : `${extensionNames} need to be updated to enable syncing.`;
+    const message = buildOutdatedExtensionsMessage(outdatedExtensions);
 
     const actions = ["Update Extensions"];
 
