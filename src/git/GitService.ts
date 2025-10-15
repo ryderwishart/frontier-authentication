@@ -679,12 +679,20 @@ export class GitService {
                     hasEmbeddedAuth: !!embedded,
                 });
 
-                // Respect per-repo media strategy: skip downloads in stream-only mode
+                // Respect per-repo media strategy for downloads:
+                // - stream-only: no downloads
+                // - stream-and-save: no bulk downloads (only convert local blobs); downloads happen on-demand in editor
+                // - auto-download: allow downloads
+                let enableDownloads = true;
                 try {
                     const strategy = this.stateManager.getRepoStrategy(dir);
                     if (strategy === "stream-only") {
-                        this.debugLog("[GitService] Stream-only mode: skipping reconcilePointersFilesystem downloads");
+                        this.debugLog("[GitService] Stream-only mode: skipping reconciliation (no downloads, no conversions)");
                         return;
+                    }
+                    if (strategy === "stream-and-save") {
+                        enableDownloads = false;
+                        this.debugLog("[GitService] Stream-and-save mode: will skip bulk downloads; will still convert local blobs to pointers");
                     }
                 } catch {}
 
@@ -811,7 +819,7 @@ export class GitService {
                     }
                 }
 
-                const oidsToDownload = Array.from(oidToTargets.keys());
+                const oidsToDownload = enableDownloads ? Array.from(oidToTargets.keys()) : [];
                 if (oidsToDownload.length === 0) {
                     progress.report({ message: "✅ All files up to date" });
                     this.debugLog(
