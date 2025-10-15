@@ -164,7 +164,18 @@ suite("Integration: clone respects mediaStrategy", () => {
         await scm.gitService.clone("https://example.com/repo.git", workspaceDir, { username: "oauth2", password: "mock-token" }, "auto-download");
 
         const filesAbs = path.join(workspaceDir, ".project/attachments/files/audio/clip.wav");
-        const bytes = await fs.promises.readFile(filesAbs);
-        assert.strictEqual(bytes.toString(), "hello-bytes");
+        // Wait for background reconcile to write bytes
+        const start = Date.now();
+        let bytes: Buffer | undefined;
+        while (Date.now() - start < 2000) { // up to 2s
+            try {
+                bytes = await fs.promises.readFile(filesAbs);
+                break;
+            } catch {
+                await new Promise((r) => setTimeout(r, 50));
+            }
+        }
+        assert.ok(bytes, "expected files bytes to be written by background reconcile");
+        assert.strictEqual(bytes!.toString(), "hello-bytes");
     });
 });

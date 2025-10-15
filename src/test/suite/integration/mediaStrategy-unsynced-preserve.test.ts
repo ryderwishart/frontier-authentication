@@ -129,8 +129,19 @@ suite("Integration: unsynced local media preserved across strategies", () => {
         await scm.gitService.clone("https://example.com/repo.git", workspaceDir, { username: "oauth2", password: "mock-token" }, "auto-download");
 
         const remoteFilesAbs = path.join(workspaceDir, ".project/attachments/files/audio/remote.wav");
-        const remoteBytes = await fs.promises.readFile(remoteFilesAbs);
-        assert.strictEqual(remoteBytes.toString(), "hello-remote");
+        // Wait for background reconcile to write downloaded bytes
+        const start = Date.now();
+        let remoteBytes: Buffer | undefined;
+        while (Date.now() - start < 2000) {
+            try {
+                remoteBytes = await fs.promises.readFile(remoteFilesAbs);
+                break;
+            } catch {
+                await new Promise((r) => setTimeout(r, 50));
+            }
+        }
+        assert.ok(remoteBytes, "expected remote pointer bytes to be written by background reconcile");
+        assert.strictEqual(remoteBytes!.toString(), "hello-remote");
 
         const localOnlyAbs = path.join(workspaceDir, ".project/attachments/files/audio/local-only.wav");
         const localBytes = await fs.promises.readFile(localOnlyAbs);

@@ -1991,8 +1991,10 @@ export class GitService {
                 
                 switch (strategy) {
                     case "auto-download":
-                        // Download and save media files automatically
-                        await this.reconcilePointersFilesystem(dir, auth);
+                        // Start LFS reconciliation in background so opening the project isn't blocked
+                        this.reconcilePointersFilesystem(dir, auth).catch((e: unknown) => {
+                            console.warn("[GitService] Background media download failed:", e);
+                        });
                         break;
                     
                     case "stream-and-save":
