@@ -103,6 +103,7 @@ export interface FrontierAPI {
         username: string;
     }>;
     getLlmEndpoint: () => Promise<string | undefined>;
+    getAsrEndpoint: () => Promise<string | undefined>;
     syncChanges: (options?: { commitMessage?: string }) => Promise<{
         hasConflicts: boolean;
         conflicts?: Array<ConflictedFile>;
@@ -349,6 +350,14 @@ export async function activate(context: vscode.ExtensionContext) {
         },
         getLlmEndpoint: async () => {
             return API_ENDPOINT;
+        },
+        getAsrEndpoint: async () => {
+            if (!authenticationProvider.isAuthenticated) {
+                return undefined;
+            }
+            // Transform HTTPS endpoint to WSS for WebSocket
+            const wsUrl = API_ENDPOINT.replace('https://', 'wss://').replace('http://', 'ws://');
+            return `${wsUrl}/ws/asr?source=codex`;
         },
         syncChanges: async (options?: { commitMessage?: string }) =>
             vscode.commands.executeCommand("frontier.syncChanges", options) as Promise<{
