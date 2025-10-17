@@ -372,8 +372,84 @@ export async function checkMetadataVersionsForSync(
     return false;
 }
 
-export function registerVersionCheckCommands(_context: vscode.ExtensionContext): void {
-    // Reserved for future commands related to version checking
+export function registerVersionCheckCommands(context: vscode.ExtensionContext): void {
+    // Generic check command that other extensions (e.g., Codex) can call
+    // to enforce the same blocking modal used for sync before performing
+    // media operations (download/stream) or other actions.
+    vscode.commands.registerCommand(
+        "frontier.checkMetadataVersionsForSync",
+        async (options?: { isManualSync?: boolean }): Promise<boolean> => {
+            const isManual = !!options?.isManualSync;
+            try {
+                const allowed = await checkMetadataVersionsForSync(context, isManual);
+                return !!allowed;
+            } catch (err) {
+                console.error("[VersionCheck] Error while checking metadata versions:", err);
+                return false;
+            }
+        }
+    );
+
+    // Lightweight command to check remote metadata.json for requiredExtensions
+    // and report whether the local installed extensions are behind remote.
+    // Returns boolean: true if mismatch detected (block), false if OK
+    vscode.commands.registerCommand(
+        "frontier.checkRemoteMetadataVersionMismatch",
+        async (): Promise<boolean> => {
+            try {
+                const { SCMManager } = await import("../scm/SCMManager");
+                // Create a temporary SCMManager-like instance to reuse logic
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                if (!workspacePath) return true;
+
+                // Mimic the remote metadata fetch/check from SCMManager.syncChanges
+                const { getInstalledExtensionVersions } = await import("./extensionVersionChecker");
+                const { compareVersions } = await import("./extensionVersionChecker");
+                const { GitService } = await import("../git/GitService");
+                const state = (await import("../state")).StateManager.getInstance();
+                const gitService = new GitService(state);
+
+                // Fetch remote refs and read remote metadata.json (best effort)
+                try {
+                    const git = await import("isomorphic-git");
+                    const fs = (await import("fs")).promises as any;
+                    const http = (await import("isomorphic-git/http/node")).default;
+                    // We don't have direct token access here; rely on default remote credentials if embedded
+                    await git.fetch({ fs, http, dir: workspacePath } as any);
+                } catch {}
+
+                let mismatch = false;
+                try {
+                    const git = await import("isomorphic-git");
+                    const fs = (await import("fs")).promises as any;
+                    const currentBranch = await git.currentBranch({ fs, dir: workspacePath });
+                    if (currentBranch) {
+                        const remoteRef = `refs/remotes/origin/${currentBranch}`;
+                        let remoteHead: string | undefined;
+                        try { remoteHead = await git.resolveRef({ fs, dir: workspacePath, ref: remoteRef }); } catch {}
+                        if (remoteHead) {
+                            try {
+                                const result = await git.readBlob({ fs, dir: workspacePath, oid: remoteHead, filepath: "metadata.json" });
+                                const text = new TextDecoder().decode(result.blob);
+                                const remoteMetadata = JSON.parse(text) as { meta?: { requiredExtensions?: { codexEditor?: string; frontierAuthentication?: string } } };
+                                const required = remoteMetadata.meta?.requiredExtensions;
+                                if (required) {
+                                    const { codexEditorVersion, frontierAuthVersion } = getInstalledExtensionVersions();
+                                    if (required.codexEditor && codexEditorVersion && compareVersions(codexEditorVersion, required.codexEditor) < 0) mismatch = true;
+                                    if (required.frontierAuthentication && frontierAuthVersion && compareVersions(frontierAuthVersion, required.frontierAuthentication) < 0) mismatch = true;
+                                }
+                            } catch {}
+                        }
+                    }
+                } catch {}
+
+                return mismatch;
+            } catch (err) {
+                console.warn("checkRemoteMetadataVersionMismatch failed:", err);
+                return true; // fail closed
+            }
+        }
+    );
 }
 
 

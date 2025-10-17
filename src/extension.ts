@@ -523,3 +523,8 @@ export function deactivate() {
         authenticationProvider.dispose();
     }
 }
+
+// Expose the current auth provider instance for internal utilities/commands
+export function getAuthProviderInstance(): FrontierAuthProvider | undefined {
+    return authenticationProvider;
+}
