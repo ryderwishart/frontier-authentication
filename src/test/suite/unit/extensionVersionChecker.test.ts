@@ -14,11 +14,9 @@ suite("extensionVersionChecker message builder", () => {
             },
         ];
         const msg = buildOutdatedExtensionsMessage(items);
-        assert.ok(msg.includes("The remote project is on v0.4.16"));
+        assert.ok(msg.includes("Frontier Authentication is on v0.4.16"));
         assert.ok(msg.includes("you have v0.4.15 installed"));
-        assert.ok(msg.includes("To enable syncing, please update Frontier Authentication."));
-        // Exactly one blank line between paragraphs
-        assert.ok(msg.includes("installed.\n\nTo enable syncing"));
+        assert.ok(msg.includes("To enable syncing, please update."));
     });
 
     test("multiple extensions stacked with blank line", () => {
@@ -42,10 +40,10 @@ suite("extensionVersionChecker message builder", () => {
         ];
         const msg = buildOutdatedExtensionsMessage(items);
         // Each section present
-        assert.ok(msg.includes("The remote project is on v0.6.21"));
-        assert.ok(msg.includes("update Codex Editor."));
-        assert.ok(msg.includes("The remote project is on v0.4.16"));
-        assert.ok(msg.includes("update Frontier Authentication."));
+        assert.ok(msg.includes("Codex Editor is on v0.6.21"));
+        assert.ok(msg.includes("To enable syncing, please update."));
+        assert.ok(msg.includes("Frontier Authentication is on v0.4.16"));
+        assert.ok(msg.includes("To enable syncing, please update."));
         // Sections separated by a blank line
         const parts = msg.split("\n\n");
         assert.ok(parts.length >= 2);
