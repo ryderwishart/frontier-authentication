@@ -1,5 +1,12 @@
 import * as vscode from "vscode";
-import { GlobalState, AuthState, GitLabInfo, GitLabCredentials, UserInfo, MediaFilesStrategy } from "../types/state";
+import {
+    GlobalState,
+    AuthState,
+    GitLabInfo,
+    GitLabCredentials,
+    UserInfo,
+    MediaFilesStrategy,
+} from "../types/state";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -11,6 +18,11 @@ export const initialState: GlobalState = {
         gitlabInfo: undefined,
         gitlabCredentials: undefined,
         lastSyncTimestamp: undefined,
+    },
+    metrics: {
+        lfsHealAttempted: 0,
+        lfsHealSucceeded: 0,
+        lfsHealFailed: 0,
     },
 };
 
@@ -104,6 +116,28 @@ export class StateManager {
         return this.state.auth.userInfo;
     }
 
+    // ========== Metrics ==========
+    incrementMetric(key: keyof NonNullable<GlobalState["metrics"]>): void {
+        const current = this.state.metrics || {
+            lfsHealAttempted: 0,
+            lfsHealSucceeded: 0,
+            lfsHealFailed: 0,
+        };
+        const value = (current[key] || 0) + 1;
+        this.state.metrics = { ...current, [key]: value } as any;
+        void this.persistState();
+        this.notifyStateChange();
+    }
+    getMetrics(): NonNullable<GlobalState["metrics"]> {
+        return (
+            this.state.metrics || {
+                lfsHealAttempted: 0,
+                lfsHealSucceeded: 0,
+                lfsHealFailed: 0,
+            }
+        );
+    }
+
     // ========== Media Strategy per repository ==========
     getRepoStrategy(workspacePath: string): MediaFilesStrategy | undefined {
         return this.state.repoStrategies?.[workspacePath];
@@ -159,7 +193,7 @@ export class StateManager {
 
                 const isStale = typeof lockTime === "number" && now - lockTime > fiveMinutesInMs;
                 const ownerGone = typeof lockPid === "number" ? !this.isPidAlive(lockPid) : false;
-                const legacyAndStale = (typeof lockPid !== "number") && isStale;
+                const legacyAndStale = typeof lockPid !== "number" && isStale;
 
                 if (ownerGone || legacyAndStale) {
                     // Lock is stale, force release it
@@ -250,7 +284,7 @@ export class StateManager {
             // If lock is orphaned or legacy-stale, remove it
             const isStale = typeof lockTime === "number" && now - lockTime > fiveMinutesInMs;
             const ownerGone = typeof lockPid === "number" ? !this.isPidAlive(lockPid) : false;
-            const legacyAndStale = (typeof lockPid !== "number") && isStale;
+            const legacyAndStale = typeof lockPid !== "number" && isStale;
             if (ownerGone || legacyAndStale) {
                 console.log(
                     ownerGone

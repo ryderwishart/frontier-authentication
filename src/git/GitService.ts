@@ -575,7 +575,13 @@ export async function downloadLFSObject(
     const obj = data.objects?.[0];
     const download = obj?.actions?.download;
     if (!download?.href) {
-        throw new Error("LFS download action missing in batch response");
+        const code = (obj as any)?.error?.code;
+        const msg = (obj as any)?.error?.message;
+        const details = [code, msg].filter(Boolean).join(" ");
+        const suffix = details ? ` (${details})` : "";
+        throw new Error(
+            `LFS download action missing in batch response for oid ${object.oid}${suffix}`
+        );
     }
 
     const dlHeaders: Record<string, string> = {
@@ -673,7 +679,7 @@ export class GitService {
                 }
 
                 const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
-                const effectiveAuth = embedded ?? auth;
+                const effectiveAuth = auth ?? embedded;
                 const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
                 this.debugLog("[GitService] Reconciliation config", {
                     cleanUrl,
@@ -881,6 +887,116 @@ export class GitService {
                     }
                 }
 
+                // Attempt healing for any missing download actions if we have local bytes (parallelized)
+                const healConcurrency = vscode.workspace
+                    .getConfiguration("frontier")
+                    .get<number>("lfsHealConcurrency", 8);
+                const healQueue = (batchData.objects ?? [])
+                    .filter((obj) => obj.oid && !obj.actions?.download?.href)
+                    .flatMap((obj) => {
+                        const targets = oidToTargets.get(obj.oid!) ?? [];
+                        return targets.map((t) => ({ oid: obj.oid!, target: t }));
+                    });
+
+                const runHealWorker = async () => {
+                    for (;;) {
+                        const item = healQueue.shift();
+                        if (!item) {
+                            return;
+                        }
+                        const { oid, target } = item;
+                        try {
+                            this.stateManager.incrementMetric("lfsHealAttempted");
+                            const exists = await fs.promises
+                                .access(target.filesAbs, fs.constants.F_OK)
+                                .then(() => true)
+                                .catch(() => false);
+                            if (!exists) {
+                                continue;
+                            }
+                            const localBytes = await fs.promises.readFile(target.filesAbs);
+                            if (localBytes.length === 0) {
+                                continue;
+                            }
+                            this.debugLog(
+                                `[GitService] Healing missing LFS object ${oid} by re-uploading from files dir`
+                            );
+                            await uploadBlobsToLFSBucket(
+                                {
+                                    url: lfsBaseUrl,
+                                    headers: {},
+                                    auth: effectiveAuth,
+                                    recovery: { dir, filepaths: [target.filepath] },
+                                },
+                                [localBytes]
+                            );
+                            this.stateManager.incrementMetric("lfsHealSucceeded");
+                        } catch (healErr) {
+                            console.warn(
+                                `[GitService] Failed to heal LFS object ${oid} for ${target.filepath}:`,
+                                healErr
+                            );
+                            this.stateManager.incrementMetric("lfsHealFailed");
+                        }
+                    }
+                };
+
+                if (healQueue.length > 0) {
+                    const workers = Array.from({ length: Math.max(1, healConcurrency) }, () =>
+                        runHealWorker()
+                    );
+                    await Promise.allSettled(workers);
+                }
+
+                // After healing attempts, refetch download actions for previously missing OIDs
+                const missingOids = oidsToDownload.filter((oid) => !actionByOid.has(oid));
+                if (missingOids.length > 0) {
+                    try {
+                        const retryBody: LFSBatchRequest = {
+                            operation: "download",
+                            transfers: ["basic"],
+                            objects: missingOids.map((oid) => ({
+                                oid,
+                                size: oidToTargets.get(oid)?.[0]?.size ?? 0,
+                            })),
+                        };
+                        const retryResp = await fetch(`${lfsBaseUrl}/info/lfs/objects/batch`, {
+                            method: "POST",
+                            headers: {
+                                ...authHeaders,
+                                Accept: "application/vnd.git-lfs+json",
+                                "Content-Type": "application/vnd.git-lfs+json",
+                            },
+                            body: JSON.stringify(retryBody),
+                        });
+                        if (retryResp.ok) {
+                            const retryData = (await retryResp.json()) as LFSBatchResponse;
+                            for (const obj of retryData.objects ?? []) {
+                                const dl = obj.actions?.download;
+                                if (obj.oid && dl?.href) {
+                                    actionByOid.set(obj.oid, { href: dl.href, header: dl.header });
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn("[GitService] Retry batch after healing failed:", e);
+                    }
+                }
+
+                // After retry, report any remaining missing OIDs with a single notification
+                const stillMissing = oidsToDownload.filter((oid) => !actionByOid.has(oid));
+                if (stillMissing.length > 0) {
+                    const sampleTargets = stillMissing
+                        .slice(0, 3)
+                        .flatMap((oid) => (oidToTargets.get(oid) ?? []).map((t) => t.filepath))
+                        .slice(0, 3);
+                    const sampleText =
+                        sampleTargets.length > 0 ? ` e.g. ${sampleTargets.join(", ")}` : "";
+                    vscode.window.showWarningMessage(
+                        `Some LFS objects are missing on the server and could not be healed automatically (${stillMissing.length} file(s))${sampleText}. Ask the original author to re-upload to heal pointers.`
+                    );
+                }
+
                 // Phase 3: concurrent downloads with progress and connection reuse by origin
                 const totalToDownload = oidsToDownload.length;
                 let completed = 0;
@@ -894,7 +1010,9 @@ export class GitService {
                 const runWorker = async () => {
                     for (;;) {
                         const oid = queue.shift();
-                        if (!oid) return;
+                        if (!oid) {
+                            return;
+                        }
                         const action = actionByOid.get(oid);
                         if (!action?.href) {
                             this.debugLog(`[GitService] Missing download action for oid ${oid}`);
@@ -1770,12 +1888,19 @@ export class GitService {
                     `Processing resolved file: ${filepath} with resolution: ${resolution}`
                 );
 
-                if (resolution === "deleted") {
-                    this.debugLog(`Removing file from git: ${filepath}`);
-                    await git.remove({ fs, dir, filepath });
-                } else {
-                    this.debugLog(`Adding file to git (LFS-aware): ${filepath}`);
-                    await this.stageResolvedFileWithLFS(dir, filepath, auth);
+                try {
+                    if (resolution === "deleted") {
+                        this.debugLog(`Removing file from git: ${filepath}`);
+                        await git.remove({ fs, dir, filepath });
+                    } else {
+                        this.debugLog(`Adding file to git (LFS-aware): ${filepath}`);
+                        await this.stageResolvedFileWithLFS(dir, filepath, auth);
+                    }
+                } catch (stageErr) {
+                    console.warn(
+                        `[GitService] Non-blocking staging error for ${filepath}; continuing merge:`,
+                        stageErr
+                    );
                 }
             }
 
@@ -2124,7 +2249,7 @@ export class GitService {
             return;
         }
         const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
-        const effectiveAuth = embedded ?? auth;
+        const effectiveAuth = auth ?? embedded;
         const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
 
         const headPointer = await this.readHeadPointerInfo(dir, filepath);
@@ -2136,19 +2261,80 @@ export class GitService {
             if (this.isPointerPath(filepath)) {
                 // Write to parallel files directory only
                 const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                const bytes = await downloadLFSObject(
-                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                    { oid: headPointer.oid, size: headPointer.size }
-                );
-                await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                // Only write if the file doesn't already exist in files directory
-                try {
-                    await fs.promises.access(filesAbs, fs.constants.F_OK);
-                    this.debugLog(
-                        `[GitService] Files dir already has ${filepath}, not overwriting`
+                const attemptDownload = async () => {
+                    const bytes = await downloadLFSObject(
+                        { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                        { oid: headPointer.oid, size: headPointer.size }
                     );
-                } catch {
-                    await fs.promises.writeFile(filesAbs, bytes);
+                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                    // Only write if the file doesn't already exist in files directory
+                    try {
+                        await fs.promises.access(filesAbs, fs.constants.F_OK);
+                        this.debugLog(
+                            `[GitService] Files dir already has ${filepath}, not overwriting`
+                        );
+                    } catch {
+                        await fs.promises.writeFile(filesAbs, bytes);
+                    }
+                };
+
+                try {
+                    await attemptDownload();
+                    return;
+                } catch (err) {
+                    console.warn(
+                        `[GitService] Failed to download LFS object for ${filepath}:`,
+                        err
+                    );
+                    const message = err instanceof Error ? err.message : String(err);
+                    // If batch response omitted download action (missing on server), try to heal from local files dir
+                    if (/LFS download action missing/i.test(message)) {
+                        try {
+                            this.stateManager.incrementMetric("lfsHealAttempted");
+                            const localFilesAbs = this.getFilesPathForPointer(dir, filepath);
+                            const exists = await fs.promises
+                                .access(localFilesAbs, fs.constants.F_OK)
+                                .then(() => true)
+                                .catch(() => false);
+                            if (exists) {
+                                const localBytes = await fs.promises.readFile(localFilesAbs);
+                                if (localBytes.length > 0) {
+                                    this.debugLog(
+                                        `[GitService] Healing LFS object by re-uploading from files dir for ${filepath}`
+                                    );
+                                    await uploadBlobsToLFSBucket(
+                                        {
+                                            url: lfsBaseUrl,
+                                            headers: {},
+                                            auth: effectiveAuth,
+                                            recovery: { dir, filepaths: [filepath] },
+                                        },
+                                        [localBytes]
+                                    );
+                                    // Retry once after healing
+                                    await attemptDownload();
+                                    this.debugLog(
+                                        `[GitService] Healed and re-downloaded LFS object for ${filepath}`
+                                    );
+                                    this.stateManager.incrementMetric("lfsHealSucceeded");
+                                    return;
+                                }
+                            }
+                            vscode.window.showWarningMessage(
+                                `Missing LFS content for ${filepath}. Ask the original author to re-upload the file to heal the pointer.`
+                            );
+                            this.stateManager.incrementMetric("lfsHealFailed");
+                        } catch (healErr) {
+                            console.warn(
+                                `[GitService] Healing attempt failed for ${filepath}:`,
+                                healErr
+                            );
+                            vscode.window.showWarningMessage(
+                                `Could not heal missing LFS object for ${filepath}. Please re-upload the original file.`
+                            );
+                            this.stateManager.incrementMetric("lfsHealFailed");
+                        }
+                    }
                 }
             } else {
                 // Non-pointer path: do nothing (no smudging)
@@ -2491,8 +2677,8 @@ export class GitService {
             return;
         }
         const { cleanUrl, auth } = GitService.parseGitUrl(remoteUrl);
-        // Prefer embedded auth if present; otherwise use the caller-provided auth (e.g. oauth2 + token)
-        const effectiveAuth = auth ?? authFromCaller;
+        // Prefer caller-provided auth over embedded auth to avoid stale embedded credentials
+        const effectiveAuth = authFromCaller ?? auth;
 
         // Ensure repo URL includes .git to hit correct LFS endpoints on some servers
         const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;

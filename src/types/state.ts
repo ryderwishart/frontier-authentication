@@ -9,10 +9,7 @@ export interface GitLabInfo {
     }>;
 }
 
-export type MediaFilesStrategy =
-    | "auto-download"
-    | "stream-and-save"
-    | "stream-only";
+export type MediaFilesStrategy = "auto-download" | "stream-and-save" | "stream-only";
 
 export interface GitLabCredentials {
     token: string;
@@ -42,6 +39,12 @@ export interface GlobalState {
     auth: AuthState;
     /** Per-repository media strategy keyed by absolute workspace path */
     repoStrategies?: Record<string, MediaFilesStrategy>;
+    /** Lightweight telemetry counters */
+    metrics?: {
+        lfsHealAttempted: number;
+        lfsHealSucceeded: number;
+        lfsHealFailed: number;
+    };
 }
 
 // Add some type guards for better type safety
@@ -57,4 +60,3 @@ export const isGitLabInfo = (obj: any): obj is GitLabInfo => {
 export const isGitLabCredentials = (obj: any): obj is GitLabCredentials => {
     return typeof obj === "object" && typeof obj.token === "string" && typeof obj.url === "string";
 };
-
