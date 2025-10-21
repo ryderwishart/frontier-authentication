@@ -24,7 +24,7 @@ suite("Integration: extensionVersionChecker", () => {
         (vscode.commands.executeCommand as any) = originalExecute;
     });
 
-    test("single outdated extension shows correct multi-line modal and opens extensions view", async () => {
+    test("single outdated extension shows minimal modal and opens extensions view", async () => {
         const outdated: ExtensionVersionInfo[] = [
             {
                 extensionId: "frontier-rnd.frontier-authentication",
@@ -55,7 +55,7 @@ suite("Integration: extensionVersionChecker", () => {
         assert.strictEqual(openedExtensions, true);
     });
 
-    test("both outdated show stacked sections separated by blank line", async () => {
+    test("both outdated show minimal plural modal", async () => {
         const outdated: ExtensionVersionInfo[] = [
             {
                 extensionId: "project-accelerate.codex-editor-extension",
@@ -84,9 +84,6 @@ suite("Integration: extensionVersionChecker", () => {
         await handleOutdatedExtensionsForSync({} as any, outdated, true);
         const expected = buildOutdatedExtensionsMessage(outdated);
         assert.strictEqual(shownMessage, expected);
-        // Ensure there is a blank line between sections
-        const parts = shownMessage!.split("\n\n");
-        assert.ok(parts.length >= 2);
     });
 });
 

@@ -14,12 +14,10 @@ suite("extensionVersionChecker message builder", () => {
             },
         ];
         const msg = buildOutdatedExtensionsMessage(items);
-        assert.ok(msg.includes("Frontier Authentication is on v0.4.16"));
-        assert.ok(msg.includes("you have v0.4.15 installed"));
-        assert.ok(msg.includes("To enable syncing, please update."));
+        assert.strictEqual(msg, "To sync, update:\n- Frontier Authentication");
     });
 
-    test("multiple extensions stacked with blank line", () => {
+    test("two extensions uses plural message and names", () => {
         const items: ExtensionVersionInfo[] = [
             {
                 extensionId: "project-accelerate.codex-editor-extension",
@@ -39,14 +37,7 @@ suite("extensionVersionChecker message builder", () => {
             },
         ];
         const msg = buildOutdatedExtensionsMessage(items);
-        // Each section present
-        assert.ok(msg.includes("Codex Editor is on v0.6.21"));
-        assert.ok(msg.includes("To enable syncing, please update."));
-        assert.ok(msg.includes("Frontier Authentication is on v0.4.16"));
-        assert.ok(msg.includes("To enable syncing, please update."));
-        // Sections separated by a blank line
-        const parts = msg.split("\n\n");
-        assert.ok(parts.length >= 2);
+        assert.strictEqual(msg, "To sync, update:\n- Codex Editor\n- Frontier Authentication");
     });
 });
 
