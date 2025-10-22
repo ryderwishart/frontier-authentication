@@ -351,9 +351,12 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!authenticationProvider.isAuthenticated) {
                 return undefined;
             }
-            // Transform HTTPS endpoint to WSS for WebSocket, removing /api/v1 as WS is at root
-            const wsUrl = API_ENDPOINT.replace("https://", "wss://").replace("http://", "ws://").replace("/api/v1", "");
-            return `${wsUrl}/ws/asr?source=codex`;
+            // Construct WebSocket URL: replace protocol and remove /api/v1 path
+            const url = new URL(API_ENDPOINT);
+            url.protocol = url.protocol.replace('http', 'ws');
+            url.pathname = '/ws/asr';
+            url.searchParams.set('source', 'codex');
+            return url.toString();
         },
         syncChanges: async (options?: { commitMessage?: string }) =>
             vscode.commands.executeCommand("frontier.syncChanges", options) as Promise<{
