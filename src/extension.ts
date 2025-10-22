@@ -351,8 +351,8 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!authenticationProvider.isAuthenticated) {
                 return undefined;
             }
-            // Transform HTTPS endpoint to WSS for WebSocket
-            const wsUrl = API_ENDPOINT.replace("https://", "wss://").replace("http://", "ws://");
+            // Transform HTTPS endpoint to WSS for WebSocket, removing /api/v1 as WS is at root
+            const wsUrl = API_ENDPOINT.replace("https://", "wss://").replace("http://", "ws://").replace("/api/v1", "");
             return `${wsUrl}/ws/asr?source=codex`;
         },
         syncChanges: async (options?: { commitMessage?: string }) =>
