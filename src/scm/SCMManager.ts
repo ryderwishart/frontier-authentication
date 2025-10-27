@@ -8,9 +8,7 @@ import http from "isomorphic-git/http/node";
 import { PublishWorkspaceOptions } from "../commands/scmCommands";
 import { StateManager } from "../state";
 import { ResolvedFile } from "../extension";
-import {
-    checkMetadataVersionsForSync,
-} from "../utils/extensionVersionChecker";
+import { checkMetadataVersionsForSync } from "../utils/extensionVersionChecker";
 import {
     compareVersions,
     getInstalledExtensionVersions,
@@ -436,7 +434,11 @@ export class SCMManager {
                     const remoteRef = `refs/remotes/origin/${currentBranch}`;
                     let remoteHead: string | undefined;
                     try {
-                        remoteHead = await git.resolveRef({ fs, dir: workspacePath, ref: remoteRef });
+                        remoteHead = await git.resolveRef({
+                            fs,
+                            dir: workspacePath,
+                            ref: remoteRef,
+                        });
                     } catch (e) {
                         // No remote branch yet; skip remote metadata check
                     }
@@ -451,7 +453,12 @@ export class SCMManager {
                             });
                             const text = new TextDecoder().decode(result.blob);
                             const remoteMetadata = JSON.parse(text) as {
-                                meta?: { requiredExtensions?: { codexEditor?: string; frontierAuthentication?: string } };
+                                meta?: {
+                                    requiredExtensions?: {
+                                        codexEditor?: string;
+                                        frontierAuthentication?: string;
+                                    };
+                                };
                             };
 
                             const required = remoteMetadata.meta?.requiredExtensions;
@@ -514,7 +521,12 @@ export class SCMManager {
             }
 
             // Try to sync and get result
-            const syncResult = await this.gitService.syncChanges(workspacePath, auth, author, options);
+            const syncResult = await this.gitService.syncChanges(
+                workspacePath,
+                auth,
+                author,
+                options
+            );
 
             // If sync was skipped due to a lock, inform the user and do not show "Synced"
             if (syncResult.skippedDueToLock) {
@@ -682,9 +694,18 @@ export class SCMManager {
                 await this.gitService.addRemote(workspacePath, "origin", project.url);
             }
 
-            // Add all files
-            console.log("Adding files to git...");
-            await this.gitService.addAll(workspacePath);
+            // Acquire GitLab token before staging so LFS uploads can authenticate
+            const gitlabToken = await this.gitLabService.getToken();
+            if (!gitlabToken) {
+                throw new Error("GitLab token not available");
+            }
+
+            // Add all files (LFS-aware)
+            console.log("Adding files to git (LFS-aware)...");
+            await this.gitService.addAllWithLFS(workspacePath, {
+                username: "oauth2",
+                password: gitlabToken,
+            });
 
             // Create initial commit
             console.log("Creating initial commit...");
@@ -694,12 +715,8 @@ export class SCMManager {
                 email: user.email || `${user.username}@users.noreply.gitlab.com`,
             });
 
-            // Push to remote
+            // Push to remote (reuse same token)
             console.log("Pushing to remote...");
-            const gitlabToken = await this.gitLabService.getToken();
-            if (!gitlabToken) {
-                throw new Error("GitLab token not available");
-            }
             await this.gitService.push(
                 workspacePath,
                 {

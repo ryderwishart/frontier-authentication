@@ -6,4 +6,4 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
-- Initial release
+- Fix: Publish now stages media with Git LFS just like Sync. Large audio and attachments are uploaded to LFS and pointers are committed during the initial publish.
