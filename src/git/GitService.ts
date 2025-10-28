@@ -1267,6 +1267,13 @@ export class GitService {
         }
     }
 
+    /**
+     * Check if a sync operation is currently in progress
+     */
+    isSyncLocked(): boolean {
+        return this.stateManager.isSyncLocked();
+    }
+
     // Below is a simplified version. It commits if dirty, fetches remote changes, tries pulling (which will error on merge conflicts), and then either pushes or returns a list of files that differ.
     async syncChanges(
         dir: string,

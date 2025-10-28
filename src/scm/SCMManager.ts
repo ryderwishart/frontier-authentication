@@ -380,7 +380,14 @@ export class SCMManager {
             return { hasConflicts: false };
         }
 
-        // Fire sync started event
+        // Check if another sync is already in progress before firing 'started' event
+        if (this.gitService.isSyncLocked()) {
+            this.syncEventEmitter.fire({ status: 'skipped', message: 'Sync already in progress' });
+            vscode.window.showInformationMessage('Sync already in progress. Please wait for the current synchronization to complete.');
+            return { hasConflicts: false };
+        }
+
+        // Fire sync started event (only if lock is free)
         this.syncEventEmitter.fire({ status: 'started', message: 'Synchronization started' });
 
         // Create or show the status bar item
