@@ -29,6 +29,8 @@ export class SCMManager {
     private readonly context: vscode.ExtensionContext;
     private stateManager: StateManager;
     private syncStatusBarItem: vscode.StatusBarItem | undefined;
+    private syncEventEmitter: vscode.EventEmitter<{ status: 'started' | 'completed' | 'error' | 'skipped', message?: string }> = new vscode.EventEmitter();
+    public readonly onSyncStatusChange = this.syncEventEmitter.event;
 
     constructor(gitLabService: GitLabService, context: vscode.ExtensionContext) {
         this.context = context;
@@ -378,6 +380,9 @@ export class SCMManager {
             return { hasConflicts: false };
         }
 
+        // Fire sync started event
+        this.syncEventEmitter.fire({ status: 'started', message: 'Synchronization started' });
+
         // Create or show the status bar item
         if (!this.syncStatusBarItem) {
             this.syncStatusBarItem = vscode.window.createStatusBarItem(
@@ -397,6 +402,7 @@ export class SCMManager {
             }
         }, 500);
 
+        let syncSucceeded = false;
         try {
             const token = await this.gitLabService.getToken();
             if (!token) {
@@ -541,6 +547,8 @@ export class SCMManager {
                 vscode.window.showWarningMessage(
                     "Sync skipped: another synchronization appears to be in progress. If this persists, ensure .git/frontier-sync.lock does not exist."
                 );
+                // Fire sync skipped event
+                this.syncEventEmitter.fire({ status: 'skipped', message: 'Sync skipped: another sync in progress' });
                 return { hasConflicts: false };
             }
 
@@ -553,9 +561,12 @@ export class SCMManager {
             }
 
             // Everything synced successfully
+            syncSucceeded = true;
             return { hasConflicts: false };
         } catch (error) {
             console.error("Sync error:", error);
+            // Fire sync error event
+            this.syncEventEmitter.fire({ status: 'error', message: error instanceof Error ? error.message : 'Sync error' });
             throw error;
         } finally {
             // Stop animation and update status
@@ -568,6 +579,10 @@ export class SCMManager {
                         this.syncStatusBarItem.hide();
                     }
                 }, 3000);
+            }
+            // Fire sync completed event only if sync succeeded
+            if (syncSucceeded) {
+                this.syncEventEmitter.fire({ status: 'completed', message: 'Synchronization complete' });
             }
         }
     }

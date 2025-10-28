@@ -5,7 +5,7 @@ import { FrontierAuthProvider } from "./auth/AuthenticationProvider";
 import { registerCommands } from "./commands";
 import { registerGitLabCommands } from "./commands/gitlabCommands";
 import { registerProgressCommands } from "./commands/progressCommands";
-import { registerSCMCommands } from "./commands/scmCommands";
+import { registerSCMCommands, getSCMManager } from "./commands/scmCommands";
 import {
     registerVersionCheckCommands,
     resetVersionModalCooldown,
@@ -116,6 +116,9 @@ export interface FrontierAPI {
         resolvedFiles: ResolvedFile[],
         workspacePath: string | undefined
     ) => Promise<void>;
+    onSyncStatusChange: (
+        callback: (status: { status: 'started' | 'completed' | 'error' | 'skipped', message?: string }) => void
+    ) => vscode.Disposable;
 
     // Project Progress Reporting API
     submitProgressReport: (
@@ -370,6 +373,14 @@ export async function activate(context: vscode.ExtensionContext) {
                 resolvedFiles,
                 workspacePath
             ) as Promise<void>,
+        onSyncStatusChange: (callback: (status: { status: 'started' | 'completed' | 'error' | 'skipped', message?: string }) => void) => {
+            const scmManager = getSCMManager();
+            if (!scmManager) {
+                console.warn("SCMManager not initialized, sync status events will not be available");
+                return { dispose: () => {} };
+            }
+            return scmManager.onSyncStatusChange(callback);
+        },
 
         // Project Progress Reporting API
         submitProgressReport: async (report: ProjectProgressReport) =>

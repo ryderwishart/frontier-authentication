@@ -11,12 +11,22 @@ export interface PublishWorkspaceOptions {
     force: boolean;
 }
 
+// Store the SCM manager instance for API access
+let scmManagerInstance: SCMManager | undefined;
+
+export function getSCMManager(): SCMManager | undefined {
+    return scmManagerInstance;
+}
+
 export function registerSCMCommands(
     context: vscode.ExtensionContext,
     authProvider: FrontierAuthProvider
 ) {
     const gitLabService = new GitLabService(authProvider);
     const scmManager = new SCMManager(gitLabService, context);
+    
+    // Store the instance for API access
+    scmManagerInstance = scmManager;
 
     // Register list projects command
     context.subscriptions.push(
