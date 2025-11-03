@@ -12,7 +12,14 @@ import {
 } from "./utils/extensionVersionChecker";
 import { initialState, StateManager } from "./state";
 import { AuthState } from "./types/state";
-import { ConflictedFile } from "./git/GitService";
+import { ConflictedFile, GitService as GitServiceClass } from "./git/GitService";
+
+// Module-level gitService instance
+let gitServiceInstance: GitServiceClass | undefined;
+
+export function getGitService(): GitServiceClass | undefined {
+    return gitServiceInstance;
+}
 
 export interface BookCompletionData {
     completionPercentage: number;
@@ -117,8 +124,36 @@ export interface FrontierAPI {
         workspacePath: string | undefined
     ) => Promise<void>;
     onSyncStatusChange: (
-        callback: (status: { status: 'started' | 'completed' | 'error' | 'skipped', message?: string }) => void
+        callback: (status: { 
+            status: 'started' | 'completed' | 'error' | 'skipped' | 'progress', 
+            message?: string;
+            progress?: {
+                phase: string;
+                loaded?: number;
+                total?: number;
+                description?: string;
+            };
+        }) => void
     ) => vscode.Disposable;
+
+    // Lock management API
+    checkSyncLock: () => Promise<{
+        exists: boolean;
+        isDead: boolean;
+        isStuck: boolean;
+        age: number;
+        progressAge: number;
+        pid?: number;
+        ownedByUs: boolean;
+        phase?: string;
+        progress?: { current: number; total: number; description?: string };
+        status: 'active' | 'stuck' | 'dead';
+    }>;
+    cleanupStaleLock: () => Promise<void>;
+    checkWorkingCopyState: (workspacePath: string) => Promise<{
+        isDirty: boolean;
+        status?: any;
+    }>;
 
     // Project Progress Reporting API
     submitProgressReport: (
@@ -194,10 +229,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // Create GitService for debug logging control
     const stateManagerInstance = StateManager.getInstance();
     const { GitService } = await import("./git/GitService");
-    const gitService = new GitService(stateManagerInstance);
+    gitServiceInstance = new GitService(stateManagerInstance);
 
     // Register commands - pass gitService for debug toggle
-    registerCommands(context, authenticationProvider, gitService);
+    registerCommands(context, authenticationProvider, gitServiceInstance);
     registerGitLabCommands(context, authenticationProvider);
     registerSCMCommands(context, authenticationProvider);
     registerProgressCommands(context, authenticationProvider);
@@ -373,13 +408,40 @@ export async function activate(context: vscode.ExtensionContext) {
                 resolvedFiles,
                 workspacePath
             ) as Promise<void>,
-        onSyncStatusChange: (callback: (status: { status: 'started' | 'completed' | 'error' | 'skipped', message?: string }) => void) => {
+        onSyncStatusChange: (callback: (status: { 
+            status: 'started' | 'completed' | 'error' | 'skipped' | 'progress', 
+            message?: string;
+            progress?: {
+                phase: string;
+                loaded?: number;
+                total?: number;
+                description?: string;
+            };
+        }) => void) => {
             const scmManager = getSCMManager();
             if (!scmManager) {
                 console.warn("SCMManager not initialized, sync status events will not be available");
                 return { dispose: () => {} };
             }
             return scmManager.onSyncStatusChange(callback);
+        },
+
+        // Lock management API
+        checkSyncLock: async () => {
+            const stateManager = StateManager.getInstance();
+            return await stateManager.checkFilesystemLock();
+        },
+        cleanupStaleLock: async () => {
+            const stateManager = StateManager.getInstance();
+            await stateManager.cleanupStaleLock();
+        },
+        checkWorkingCopyState: async (workspacePath: string) => {
+            const gitService = getGitService();
+            if (!gitService) {
+                return { isDirty: false };
+            }
+            const state = await gitService.getWorkingCopyState(workspacePath);
+            return { isDirty: state.isDirty, status: state.status };
         },
 
         // Project Progress Reporting API
@@ -539,7 +601,17 @@ function updateProgressStatusBar(statusBarItem: vscode.StatusBarItem, authState:
 }
 
 // This method is called when your extension is deactivated
-export function deactivate() {
+export async function deactivate() {
+    console.log("[Frontier] Extension deactivating...");
+    
+    try {
+        const stateManager = StateManager.getInstance();
+        await stateManager.releaseSyncLock();
+        console.log("[Frontier] Released sync lock on deactivation");
+    } catch (error) {
+        console.error("[Frontier] Error releasing sync lock on deactivation:", error);
+    }
+    
     if (authenticationProvider !== undefined) {
         authenticationProvider.dispose();
     }

@@ -29,7 +29,16 @@ export class SCMManager {
     private readonly context: vscode.ExtensionContext;
     private stateManager: StateManager;
     private syncStatusBarItem: vscode.StatusBarItem | undefined;
-    private syncEventEmitter: vscode.EventEmitter<{ status: 'started' | 'completed' | 'error' | 'skipped', message?: string }> = new vscode.EventEmitter();
+    private syncEventEmitter: vscode.EventEmitter<{ 
+        status: 'started' | 'completed' | 'error' | 'skipped' | 'progress', 
+        message?: string;
+        progress?: {
+            phase: string;
+            loaded?: number;
+            total?: number;
+            description?: string;
+        };
+    }> = new vscode.EventEmitter();
     public readonly onSyncStatusChange = this.syncEventEmitter.event;
 
     constructor(gitLabService: GitLabService, context: vscode.ExtensionContext) {
@@ -533,12 +542,27 @@ export class SCMManager {
                 // Remote fetch failed; continue to normal sync path
             }
 
-            // Try to sync and get result
+            // Try to sync and get result with progress reporting
             const syncResult = await this.gitService.syncChanges(
                 workspacePath,
                 auth,
                 author,
-                options
+                {
+                    ...options,
+                    onProgress: (phase, loaded, total, description) => {
+                        // Fire progress event to UI
+                        this.syncEventEmitter.fire({
+                            status: 'progress',
+                            message: description || `${phase}: ${loaded}/${total}`,
+                            progress: {
+                                phase,
+                                loaded,
+                                total,
+                                description
+                            }
+                        });
+                    }
+                }
             );
 
             // If sync was skipped due to a lock, inform the user and do not show "Synced"

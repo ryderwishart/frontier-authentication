@@ -10,6 +10,12 @@ import {
 import * as fs from "fs";
 import * as path from "path";
 
+// Lock detection thresholds
+export const HEARTBEAT_INTERVAL = 15 * 1000;           // 15 seconds
+const HEARTBEAT_DEAD_THRESHOLD = 45 * 1000;     // 3 missed heartbeats = DEAD
+const PROGRESS_STUCK_THRESHOLD = 2 * 60 * 1000; // 2 minutes no progress = STUCK
+const PHASE_GRACE_PERIOD = 3 * 60 * 1000;       // 3 minutes for CPU-bound phases
+
 export const initialState: GlobalState = {
     auth: {
         isAuthenticated: false,
@@ -263,39 +269,233 @@ export class StateManager {
         const lockFilePath = path.join(gitDir, "frontier-sync.lock");
 
         try {
-            // Check if lock file exists
+            // Check if file exists
             await fs.promises.access(lockFilePath);
-
-            // Read lock file content
-            const lockContent = await fs.promises.readFile(lockFilePath, "utf8");
-            let lockTime: number | undefined;
-            let lockPid: number | undefined;
+            
+            // UNCONDITIONALLY delete - syncs NEVER resume
+            // Reason: Sync doesn't resume after restart, it always restarts from scratch
+            // Any lock from previous session is obsolete
+            console.log("[StateManager] Removing sync lock from previous session (syncs restart from scratch)");
+            await fs.promises.unlink(lockFilePath);
+            console.log("[StateManager] ✓ Lock file cleaned up successfully");
+            
+        } catch (error: any) {
+            if (error.code === 'ENOENT') {
+                // File doesn't exist - perfect, nothing to do
+                return;
+            }
+            
+            // Other error - log but don't fail extension activation
+            console.warn("[StateManager] Error accessing lock file during cleanup:", error);
+            
+            // Try to delete anyway (might be permission issue on access but delete works)
             try {
-                const parsed = JSON.parse(lockContent);
-                lockTime = typeof parsed.timestamp === "number" ? parsed.timestamp : undefined;
-                lockPid = typeof parsed.pid === "number" ? parsed.pid : undefined;
-            } catch {
-                const legacy = parseInt(lockContent);
-                lockTime = isNaN(legacy) ? undefined : legacy;
-            }
-            const now = Date.now();
-            const fiveMinutesInMs = 5 * 60 * 1000;
-
-            // If lock is orphaned or legacy-stale, remove it
-            const isStale = typeof lockTime === "number" && now - lockTime > fiveMinutesInMs;
-            const ownerGone = typeof lockPid === "number" ? !this.isPidAlive(lockPid) : false;
-            const legacyAndStale = typeof lockPid !== "number" && isStale;
-            if (ownerGone || legacyAndStale) {
-                console.log(
-                    ownerGone
-                        ? "Cleaning up orphaned lock file during initialization (owner process gone)"
-                        : "Cleaning up legacy stale lock file during initialization"
-                );
                 await fs.promises.unlink(lockFilePath);
+                console.log("[StateManager] ✓ Lock deleted despite access error");
+            } catch (deleteError) {
+                console.error("[StateManager] ✗ Could not delete lock file:", deleteError);
             }
+        }
+    }
+
+    /**
+     * Check filesystem lock with two-tier detection
+     * Returns detailed lock status for decision-making
+     */
+    async checkFilesystemLock(workspacePath?: string): Promise<{
+        exists: boolean;
+        isDead: boolean;
+        isStuck: boolean;
+        age: number;
+        progressAge: number;
+        pid?: number;
+        ownedByUs: boolean;
+        phase?: string;
+        progress?: { current: number; total: number; description?: string };
+        status: 'active' | 'stuck' | 'dead';
+    }> {
+        if (!workspacePath) {
+            workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workspacePath) {
+                return { 
+                    exists: false, 
+                    isDead: false,
+                    isStuck: false,
+                    age: 0,
+                    progressAge: 0,
+                    ownedByUs: false,
+                    status: 'active'
+                };
+            }
+        }
+
+        const gitDir = path.join(workspacePath, ".git");
+        const lockPath = path.join(gitDir, "frontier-sync.lock");
+
+        try {
+            const lockContent = await fs.promises.readFile(lockPath, "utf8");
+            
+            let lockData: any;
+            try {
+                lockData = JSON.parse(lockContent);
+            } catch {
+                // Corrupted lock file - treat as dead
+                console.warn("[StateManager] Corrupted lock file, treating as dead");
+                return {
+                    exists: true,
+                    isDead: true,
+                    isStuck: false,
+                    age: Infinity,
+                    progressAge: Infinity,
+                    ownedByUs: false,
+                    status: 'dead'
+                };
+            }
+
+            const now = Date.now();
+            const heartbeatAge = lockData.timestamp ? now - lockData.timestamp : Infinity;
+            const progressAge = lockData.lastProgress ? now - lockData.lastProgress : heartbeatAge;
+            const phaseAge = lockData.phaseChangedAt ? now - lockData.phaseChangedAt : progressAge;
+            
+            // Check ownership
+            const ownedByUs = lockData.pid === process.pid && this.hasAcquiredLock;
+            
+            // TIER 1: Dead process detection (45 seconds)
+            if (heartbeatAge > HEARTBEAT_DEAD_THRESHOLD) {
+                return {
+                    exists: true,
+                    isDead: true,
+                    isStuck: false,
+                    age: heartbeatAge,
+                    progressAge,
+                    pid: lockData.pid,
+                    ownedByUs,
+                    phase: lockData.phase,
+                    progress: lockData.progress,
+                    status: 'dead'
+                };
+            }
+            
+            // TIER 2: Stuck detection (2 minutes no progress)
+            // Grace period for CPU-bound operations that don't report progress
+            const cpuBoundPhases = ['merging', 'analyzing', 'committing'];
+            const inGracePeriod = cpuBoundPhases.includes(lockData.phase) && 
+                                 phaseAge < PHASE_GRACE_PERIOD;
+            
+            if (progressAge > PROGRESS_STUCK_THRESHOLD && !inGracePeriod) {
+                return {
+                    exists: true,
+                    isDead: false,
+                    isStuck: true,
+                    age: heartbeatAge,
+                    progressAge,
+                    pid: lockData.pid,
+                    ownedByUs,
+                    phase: lockData.phase,
+                    progress: lockData.progress,
+                    status: 'stuck'
+                };
+            }
+            
+            // Active sync
+            return {
+                exists: true,
+                isDead: false,
+                isStuck: false,
+                age: heartbeatAge,
+                progressAge,
+                pid: lockData.pid,
+                ownedByUs,
+                phase: lockData.phase,
+                progress: lockData.progress,
+                status: 'active'
+            };
+            
+        } catch (error: any) {
+            if (error.code === 'ENOENT') {
+                return { 
+                    exists: false, 
+                    isDead: false,
+                    isStuck: false,
+                    age: 0,
+                    progressAge: 0,
+                    ownedByUs: false,
+                    status: 'active'
+                };
+            }
+            
+            console.error("[StateManager] Error reading lock file:", error);
+            throw error;
+        }
+    }
+
+    /**
+     * Force cleanup of a lock (called after stale/dead detection)
+     */
+    async cleanupStaleLock(workspacePath?: string): Promise<void> {
+        if (!workspacePath) {
+            workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workspacePath) {
+                return;
+            }
+        }
+        
+        const gitDir = path.join(workspacePath, ".git");
+        const lockPath = path.join(gitDir, "frontier-sync.lock");
+        
+        try {
+            await fs.promises.unlink(lockPath);
+            console.log("[StateManager] Cleaned up sync lock");
+        } catch (error: any) {
+            if (error.code !== 'ENOENT') {
+                console.error("[StateManager] Error cleaning up lock:", error);
+            }
+        }
+    }
+
+    /**
+     * Update lock with heartbeat and optional progress
+     * Called every 15 seconds and when progress is made
+     */
+    async updateLockHeartbeat(data?: {
+        timestamp?: number;
+        lastProgress?: number;
+        phase?: string;
+        progress?: { current: number; total: number; description?: string };
+    }): Promise<void> {
+        if (!this.hasAcquiredLock || !this.lockFilePath) {
+            return; // Don't write if we don't own the lock
+        }
+        
+        try {
+            // Read existing data (for merge)
+            let existingData: any = { pid: process.pid };
+            try {
+                const content = await fs.promises.readFile(this.lockFilePath, 'utf8');
+                existingData = JSON.parse(content);
+            } catch {
+                // File missing or corrupted - will create fresh
+            }
+            
+            // Merge new data
+            const payload = JSON.stringify({
+                ...existingData,
+                pid: process.pid, // Always our PID
+                timestamp: data?.timestamp || Date.now(),
+                lastProgress: data?.lastProgress || existingData.lastProgress || Date.now(),
+                phase: data?.phase || existingData.phase || 'syncing',
+                phaseChangedAt: (data?.phase && data.phase !== existingData.phase) 
+                    ? Date.now() 
+                    : existingData.phaseChangedAt || Date.now(),
+                ...(data?.progress && { progress: data.progress })
+            });
+            
+            // Write atomically (not append mode, full replace)
+            await fs.promises.writeFile(this.lockFilePath, payload, { encoding: 'utf8' });
+            
         } catch (error) {
-            // File doesn't exist or can't be accessed, which is fine
-            // We don't need to do anything in this case
+            console.error("[StateManager] Failed to update lock heartbeat:", error);
+            throw error; // Propagate so caller can track failures
         }
     }
 

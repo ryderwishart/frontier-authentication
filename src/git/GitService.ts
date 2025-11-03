@@ -5,7 +5,7 @@ import * as fs from "fs";
 import * as vscode from "vscode";
 import * as path from "path";
 
-import { StateManager } from "../state";
+import { StateManager, HEARTBEAT_INTERVAL } from "../state";
 import {
     UploadBlobsOptions,
     LFSBatchRequest,
@@ -645,6 +645,15 @@ export async function downloadLFSObject(
 export class GitService {
     private stateManager: StateManager;
     private debugLogging: boolean = false;
+    
+    // Progress tracking for heartbeat
+    private progressTracker?: {
+        lastProgressUpdate: number;
+        lastProgressValue: number;
+        currentPhase: string;
+    };
+    private heartbeatFailureCount: number = 0;
+    private progressCallback?: (phase: string, loaded?: number, total?: number, description?: string) => void;
 
     constructor(stateManager: StateManager) {
         this.stateManager = stateManager;
@@ -652,6 +661,64 @@ export class GitService {
         this.debugLogging = vscode.workspace
             .getConfiguration("frontier")
             .get("debugGitLogging", false);
+    }
+
+    /**
+     * Update sync progress for heartbeat and UI
+     */
+    private updateSyncProgress(phase: string, event: { loaded?: number; total?: number; phase?: string }): void {
+        const now = Date.now();
+        const current = event.loaded || 0;
+        const total = event.total || 0;
+        
+        // Build description: use event.phase if provided, otherwise use our phase with counts
+        // If event.phase exists (e.g., from git), append the counts to it
+        let description: string;
+        if (event.phase) {
+            // Git provides descriptive phase like "Receiving objects" - add counts if available
+            if (total > 0) {
+                description = `${event.phase}: ${current}/${total}`;
+            } else {
+                description = event.phase;
+            }
+        } else {
+            // Use our custom phase with counts if available
+            if (total > 0) {
+                description = `${phase}: ${current}/${total}`;
+            } else {
+                description = phase;
+            }
+        }
+        
+        // Track real progress
+        if (this.progressTracker && current > this.progressTracker.lastProgressValue) {
+            this.progressTracker.lastProgressUpdate = now;
+            this.progressTracker.lastProgressValue = current;
+        }
+        
+        // Update lock file with progress
+        this.stateManager.updateLockHeartbeat({
+            timestamp: now,
+            lastProgress: this.progressTracker?.lastProgressUpdate || now,
+            phase,
+            progress: {
+                current,
+                total,
+                description
+            }
+        }).catch(error => {
+            // Don't fail sync if heartbeat fails, just log
+            this.debugLog(`[GitService] Failed to update progress: ${error}`);
+        });
+        
+        // Call UI progress callback if provided
+        if (this.progressCallback) {
+            try {
+                this.progressCallback(phase, current, total, description);
+            } catch (error) {
+                this.debugLog(`[GitService] Failed to call progress callback: ${error}`);
+            }
+        }
     }
 
     /**
@@ -1239,12 +1306,21 @@ export class GitService {
             console.warn(`[GitService] Could not gather push context:`, contextError);
         }
 
+        console.log(`[GitService] ⬆️  Pushing changes to origin${ref ? ` (${ref})` : ''}`);
+        if (this.progressCallback) {
+            this.progressCallback('pushing', 0, 0, 'Uploading changes');
+        }
+        
         const pushOperation = git.push({
             fs,
             http,
             dir,
             remote: "origin",
             ...(ref && { ref }),
+            onProgress: (event) => {
+                console.log(`[GitService] ⬆️  Push progress: ${event.phase || 'uploading'} ${event.loaded || 0}/${event.total || 0}`);
+                this.updateSyncProgress('pushing', event);
+            },
             onAuth: () => {
                 this.debugLog(`[GitService] Authentication requested for push operation`);
                 return auth;
@@ -1254,16 +1330,38 @@ export class GitService {
 
         try {
             await this.withTimeout(pushOperation, timeoutMs, "Push operation");
+            console.log('[GitService] ✓ Push completed successfully');
             this.debugLog(`[GitService] Push completed successfully`);
+            if (this.progressCallback) {
+                this.progressCallback('pushing', 1, 1, 'Upload complete');
+            }
         } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
             console.error(`[GitService] Push operation failed:`, {
-                error: error instanceof Error ? error.message : String(error),
+                error: errorMessage,
                 directory: dir,
                 ref: ref || "HEAD",
                 force,
                 timestamp: new Date().toISOString(),
             });
-            throw error;
+            
+            // Provide more helpful error message
+            let userFriendlyMessage = 'push failed';
+            if (errorMessage.includes('ENOTFOUND') || errorMessage.includes('getaddrinfo')) {
+                userFriendlyMessage = 'push failed: Cannot reach server (check internet connection)';
+            } else if (errorMessage.includes('401') || errorMessage.includes('authentication')) {
+                userFriendlyMessage = 'push failed: Authentication failed (try logging out and back in)';
+            } else if (errorMessage.includes('403') || errorMessage.includes('forbidden')) {
+                userFriendlyMessage = 'push failed: Access denied (check repository permissions)';
+            } else if (errorMessage.includes('timeout') || errorMessage.includes('ETIMEDOUT')) {
+                userFriendlyMessage = 'push failed: Connection timeout (server not responding)';
+            } else if (errorMessage.includes('rejected') || errorMessage.includes('non-fast-forward')) {
+                userFriendlyMessage = 'push failed: Remote has changes (pull first, then try again)';
+            }
+            
+            const enhancedError = new Error(userFriendlyMessage);
+            (enhancedError as any).originalError = error;
+            throw enhancedError;
         }
     }
 
@@ -1279,7 +1377,10 @@ export class GitService {
         dir: string,
         auth: { username: string; password: string },
         author: { name: string; email: string },
-        options?: { commitMessage?: string }
+        options?: { 
+            commitMessage?: string;
+            onProgress?: (phase: string, loaded?: number, total?: number, description?: string) => void;
+        }
     ): Promise<SyncResult> {
         // Check if sync is already in progress
         if (this.stateManager.isSyncLocked()) {
@@ -1294,6 +1395,34 @@ export class GitService {
             return { hadConflicts: false, skippedDueToLock: true };
         }
 
+        // Initialize progress tracker and callback
+        this.progressTracker = {
+            lastProgressUpdate: Date.now(),
+            lastProgressValue: 0,
+            currentPhase: 'starting'
+        };
+        this.heartbeatFailureCount = 0;
+        this.progressCallback = options?.onProgress;
+
+        // Start heartbeat (updates every 15 seconds)
+        const lockHeartbeat = setInterval(async () => {
+            try {
+                await this.stateManager.updateLockHeartbeat({
+                    timestamp: Date.now(),
+                    lastProgress: this.progressTracker?.lastProgressUpdate || Date.now(),
+                    phase: this.progressTracker?.currentPhase || 'syncing'
+                });
+                this.heartbeatFailureCount = 0; // Reset on success
+                this.debugLog("[GitService] ✓ Heartbeat updated");
+            } catch (error) {
+                this.heartbeatFailureCount++;
+                console.error(`[GitService] ✗ Heartbeat failed (${this.heartbeatFailureCount}/3):`, error);
+                if (this.heartbeatFailureCount >= 3) {
+                    console.error("[GitService] CRITICAL: 3 consecutive heartbeat failures!");
+                }
+            }
+        }, HEARTBEAT_INTERVAL);
+
         try {
             const currentBranch = await git.currentBranch({ fs, dir });
             if (!currentBranch) {
@@ -1301,12 +1430,34 @@ export class GitService {
             }
 
             // 1. Commit local changes if needed
+            this.progressTracker.currentPhase = 'committing';
             const { isDirty, status: workingCopyStatusBeforeCommit } =
                 await this.getWorkingCopyState(dir);
             if (isDirty) {
-                this.debugLog("Working copy is dirty, committing local changes (LFS-aware)");
+                // Count changed files for progress reporting
+                const changedFiles = workingCopyStatusBeforeCommit.filter(entry => 
+                    entry[1] !== entry[2] || entry[2] !== entry[3]
+                ).length;
+                
+                console.log(`[GitService] 💾 Committing ${changedFiles} file${changedFiles !== 1 ? 's' : ''} to local repository`);
+                this.debugLog(`Working copy is dirty, committing ${changedFiles} file(s) (LFS-aware)`);
+                if (this.progressCallback) {
+                    const commitMsg = changedFiles > 0 
+                        ? `Committing ${changedFiles} file${changedFiles !== 1 ? 's' : ''}`
+                        : 'Committing local changes';
+                    this.progressCallback('committing', 0, changedFiles, commitMsg);
+                }
                 await this.addAllWithLFS(dir, auth);
                 await this.commit(dir, options?.commitMessage || "Local changes", author);
+                console.log(`[GitService] ✓ Committed ${changedFiles} file${changedFiles !== 1 ? 's' : ''} successfully`);
+                if (this.progressCallback) {
+                    const committedMsg = changedFiles > 0
+                        ? `Committed ${changedFiles} file${changedFiles !== 1 ? 's' : ''}`
+                        : 'Local changes committed';
+                    this.progressCallback('committing', changedFiles, changedFiles, committedMsg);
+                }
+            } else {
+                console.log('[GitService] ✓ Working directory clean, no files to commit');
             }
 
             // 2. Check if we're online
@@ -1315,13 +1466,22 @@ export class GitService {
             }
 
             // 3. Fetch remote changes to get latest state
+            this.progressTracker.currentPhase = 'fetching';
+            console.log('[GitService] ⬇️  Fetching remote changes from origin');
             this.debugLog("[GitService] Fetching remote changes");
+            if (this.progressCallback) {
+                this.progressCallback('fetching', 0, 0, 'Checking for remote changes');
+            }
             try {
                 await this.withTimeout(
                     git.fetch({
                         fs,
                         http,
                         dir,
+                        onProgress: (event) => {
+                            console.log(`[GitService] ⬇️  Fetch progress: ${event.phase || 'downloading'} ${event.loaded || 0}/${event.total || 0}`);
+                            this.updateSyncProgress('fetching', event);
+                        },
                         onAuth: () => {
                             this.debugLog(
                                 "[GitService] Authentication requested for fetch operation"
@@ -1332,15 +1492,38 @@ export class GitService {
                     2 * 60 * 1000,
                     "Fetch operation"
                 );
+                console.log('[GitService] ✓ Fetch completed successfully');
                 this.debugLog("[GitService] Fetch completed successfully");
+                if (this.progressCallback) {
+                    this.progressCallback('fetching', 1, 1, 'Remote check complete');
+                }
             } catch (fetchError) {
+                const errorMessage = fetchError instanceof Error ? fetchError.message : String(fetchError);
                 console.error("[GitService] Fetch operation failed:", {
-                    error: fetchError instanceof Error ? fetchError.message : String(fetchError),
+                    error: errorMessage,
                     directory: dir,
                     hasAuth: !!auth.username,
                     timestamp: new Date().toISOString(),
                 });
-                throw fetchError;
+                
+                // Provide more helpful error message based on error type
+                let userFriendlyMessage = 'fetch failed';
+                if (errorMessage.includes('ENOTFOUND') || errorMessage.includes('getaddrinfo')) {
+                    userFriendlyMessage = 'fetch failed: Cannot reach server (check internet connection)';
+                } else if (errorMessage.includes('401') || errorMessage.includes('authentication')) {
+                    userFriendlyMessage = 'fetch failed: Authentication failed (try logging out and back in)';
+                } else if (errorMessage.includes('403') || errorMessage.includes('forbidden')) {
+                    userFriendlyMessage = 'fetch failed: Access denied (check repository permissions)';
+                } else if (errorMessage.includes('timeout') || errorMessage.includes('ETIMEDOUT')) {
+                    userFriendlyMessage = 'fetch failed: Connection timeout (server not responding)';
+                } else if (errorMessage.includes('ECONNREFUSED')) {
+                    userFriendlyMessage = 'fetch failed: Connection refused (server may be down)';
+                }
+                
+                // Create enhanced error with user-friendly message
+                const enhancedError = new Error(userFriendlyMessage);
+                (enhancedError as any).originalError = fetchError;
+                throw enhancedError;
             }
 
             // 4. Get references to current state
@@ -1366,13 +1549,18 @@ export class GitService {
 
             // 6. If local and remote are identical, nothing to do
             if (localHead === remoteHead) {
-                this.debugLog("Local and remote are already in sync"); // this is the last log
+                console.log('[GitService] ✓ Local and remote are already in sync');
+                this.debugLog("Local and remote are already in sync");
+                if (this.progressCallback) {
+                    this.progressCallback('syncing', 1, 1, 'Already up to date');
+                }
                 await this.reconcilePointersFilesystem(dir, auth);
                 return { hadConflicts: false };
             }
 
             // 7. Try fast-forward first (simplest case)
             try {
+                console.log(`[GitService] 🔀 Attempting fast-forward merge (${localHead.substring(0, 8)}..${remoteHead.substring(0, 8)})`);
                 this.debugLog("[GitService] Attempting fast-forward merge");
                 this.debugLog("[GitService] Fast-forward context:", {
                     localHead: localHead.substring(0, 8),
@@ -1381,6 +1569,10 @@ export class GitService {
                     directory: dir,
                 });
 
+                if (this.progressCallback) {
+                    this.progressCallback('merging', 0, 1, 'Merging remote changes');
+                }
+                
                 await this.withTimeout(
                     git.fastForward({
                         fs,
@@ -1396,9 +1588,14 @@ export class GitService {
                     "Fast-forward operation"
                 );
 
+                console.log('[GitService] ✓ Fast-forward merge completed successfully');
+                if (this.progressCallback) {
+                    this.progressCallback('merging', 1, 1, 'Merge complete');
+                }
+
                 // Fast-forward worked, push any local changes
                 this.debugLog("[GitService] Fast-forward successful, pushing any local changes");
-                await this.safePush(dir, auth); // checking here
+                await this.safePush(dir, auth);
 
                 // After integrating remote changes, reconcile pointers/files
                 try {
@@ -1799,6 +1996,14 @@ export class GitService {
 
             throw err;
         } finally {
+            // Clean up heartbeat, progress tracker, and callback
+            if (lockHeartbeat) {
+                clearInterval(lockHeartbeat);
+            }
+            this.progressTracker = undefined;
+            this.heartbeatFailureCount = 0;
+            this.progressCallback = undefined;
+            
             // Always release the lock when done, regardless of success or failure
             await this.stateManager.releaseSyncLock();
         }
@@ -1839,7 +2044,7 @@ export class GitService {
     /**
      * Check if the working copy has any changes
      */
-    private async getWorkingCopyState(dir: string): Promise<{ isDirty: boolean; status: any[] }> {
+    async getWorkingCopyState(dir: string): Promise<{ isDirty: boolean; status: any[] }> {
         const status = await git.statusMatrix({ fs, dir });
         this.debugLog(
             "Status before committing local changes:",
