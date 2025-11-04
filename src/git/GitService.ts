@@ -44,6 +44,7 @@ export interface SyncResult {
     conflicts?: ConflictedFile[];
     offline?: boolean;
     skippedDueToLock?: boolean;
+    uploadedLfsFiles?: string[]; // List of LFS files that were uploaded during this sync
 }
 
 export enum RemoteBranchStatus {
@@ -1423,6 +1424,9 @@ export class GitService {
             }
         }, HEARTBEAT_INTERVAL);
 
+        // Track uploaded LFS files for post-sync cleanup
+        let uploadedLfsFiles: string[] = [];
+
         try {
             const currentBranch = await git.currentBranch({ fs, dir });
             if (!currentBranch) {
@@ -1447,7 +1451,10 @@ export class GitService {
                         : 'Committing local changes';
                     this.progressCallback('committing', 0, changedFiles, commitMsg);
                 }
-                await this.addAllWithLFS(dir, auth);
+                uploadedLfsFiles = await this.addAllWithLFS(dir, auth);
+                if (uploadedLfsFiles.length > 0) {
+                    this.debugLog(`[GitService] Uploaded ${uploadedLfsFiles.length} LFS file(s) during commit:`, uploadedLfsFiles);
+                }
                 await this.commit(dir, options?.commitMessage || "Local changes", author);
                 console.log(`[GitService] ✓ Committed ${changedFiles} file${changedFiles !== 1 ? 's' : ''} successfully`);
                 if (this.progressCallback) {
@@ -1462,7 +1469,7 @@ export class GitService {
 
             // 2. Check if we're online
             if (!(await this.isOnline())) {
-                return { hadConflicts: false, offline: true };
+                return { hadConflicts: false, offline: true, uploadedLfsFiles };
             }
 
             // 3. Fetch remote changes to get latest state
@@ -1538,7 +1545,7 @@ export class GitService {
                 // Remote branch doesn't exist, just push our changes
                 this.debugLog("Remote branch doesn't exist, pushing our changes");
                 await this.safePush(dir, auth);
-                return { hadConflicts: false };
+                return { hadConflicts: false, uploadedLfsFiles };
             }
 
             // Get files changed in local HEAD (this doesn't need updating after refetch)
@@ -1555,7 +1562,7 @@ export class GitService {
                     this.progressCallback('syncing', 1, 1, 'Already up to date');
                 }
                 await this.reconcilePointersFilesystem(dir, auth);
-                return { hadConflicts: false };
+                return { hadConflicts: false, uploadedLfsFiles };
             }
 
             // 7. Try fast-forward first (simplest case)
@@ -1607,7 +1614,7 @@ export class GitService {
                     );
                 }
 
-                return { hadConflicts: false };
+                return { hadConflicts: false, uploadedLfsFiles };
             } catch (err) {
                 this.debugLog("[GitService] Fast-forward failed, analyzing conflicts:", {
                     error: err instanceof Error ? err.message : String(err),
@@ -1965,7 +1972,7 @@ export class GitService {
             );
 
             this.debugLog(`Found ${conflicts.length} conflicts that need resolution`);
-            return { hadConflicts: true, conflicts };
+            return { hadConflicts: true, conflicts, uploadedLfsFiles };
         } catch (err) {
             // Enhanced error logging for sync operations
             console.error(`[GitService] Sync operation failed:`, {
@@ -2233,8 +2240,9 @@ export class GitService {
      * Stage all changes, routing LFS-tracked files through LFS upload.
      * This preserves the working tree's original binary content after staging.
      */
-    async addAllWithLFS(dir: string, auth: { username: string; password: string }): Promise<void> {
+    async addAllWithLFS(dir: string, auth: { username: string; password: string }): Promise<string[]> {
         const status = await git.statusMatrix({ fs, dir });
+        const uploadedLfsFiles: string[] = [];
 
         // Handle deletions
         const deletedFiles = status
@@ -2259,13 +2267,18 @@ export class GitService {
                 if (await this.isLfsWorktreeEquivalentToHeadPointer(dir, filepath)) {
                     continue;
                 }
-                await this.addWithLFS(dir, filepath, auth);
+                const wasUploaded = await this.addWithLFS(dir, filepath, auth);
+                if (wasUploaded) {
+                    uploadedLfsFiles.push(filepath);
+                }
                 continue;
             }
 
             // Non-LFS files: regular add
             await git.add({ fs, dir, filepath });
         }
+
+        return uploadedLfsFiles;
     }
 
     /**
@@ -2868,12 +2881,12 @@ export class GitService {
         dir: string,
         filepath: string,
         authFromCaller?: { username: string; password: string }
-    ): Promise<void> {
+    ): Promise<boolean> {
         // If not LFS-tracked, do normal add
         if (!(await this.isLfsTracked(dir, filepath))) {
             this.debugLog(`[GitService] ${filepath} is not LFS-tracked; adding as normal`);
             await git.add({ fs, dir, filepath });
-            return;
+            return false;
         }
         this.debugLog(`[GitService] ${filepath} is LFS-tracked; adding as LFS`);
         // Read original bytes
@@ -2886,7 +2899,7 @@ export class GitService {
             // Fall back: just add as normal if we have no remote yet
             console.warn(`[GitService] No remote URL; adding ${filepath} without LFS`);
             await git.add({ fs, dir, filepath });
-            return;
+            return false;
         }
         const { cleanUrl, auth } = GitService.parseGitUrl(remoteUrl);
         // Prefer caller-provided auth over embedded auth to avoid stale embedded credentials
@@ -2903,7 +2916,7 @@ export class GitService {
         if (!effectiveAuth) {
             console.warn(`[GitService] No auth; adding ${filepath} without LFS`);
             await git.add({ fs, dir, filepath });
-            return;
+            return false;
         }
 
         // If the worktree file already contains an LFS pointer, avoid re-uploading.
@@ -2964,7 +2977,7 @@ export class GitService {
                         }
                     }
                 }
-                return; // exit early if the file is already an LFS pointer
+                return false; // exit early if the file is already an LFS pointer (no upload needed)
             }
         } catch {}
         // Upload to LFS via our helper (handles batch, upload, verify and x-http-method)
@@ -2982,7 +2995,7 @@ export class GitService {
             this.debugLog(
                 `[GitService] Upload skipped or produced no pointer (likely empty/unrecoverable) for ${filepath}`
             );
-            return;
+            return false;
         }
         const pointerBlob = lfs.formatPointerInfo(pointerInfos[0]);
 
@@ -3002,5 +3015,6 @@ export class GitService {
         } else {
             // Non-pointer path: do nothing (no smudging)
         }
+        return true; // File was uploaded to LFS
     }
 }
