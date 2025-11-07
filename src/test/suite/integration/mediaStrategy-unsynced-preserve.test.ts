@@ -146,6 +146,10 @@ suite("Integration: unsynced local media preserved across strategies", () => {
         const localOnlyAbs = path.join(workspaceDir, ".project/attachments/files/audio/local-only.wav");
         const localBytes = await fs.promises.readFile(localOnlyAbs);
         assert.strictEqual(localBytes.toString(), "local-bytes", "local-only should be preserved");
+        
+        // Note: localProjectSettings.json is created by codex-editor extension, not frontier
+        // In integration tests with full extension, this file would exist and contain:
+        // mediaFilesVerified: false
     });
 
     test("stream-only populates files with pointers and keeps local-only", async () => {
@@ -168,5 +172,9 @@ suite("Integration: unsynced local media preserved across strategies", () => {
         const localOnlyAbs = path.join(workspaceDir, ".project/attachments/files/audio/local-only.wav");
         const localBytes = await fs.promises.readFile(localOnlyAbs);
         assert.strictEqual(localBytes.toString(), "local-bytes", "local-only should be preserved");
+        
+        // Note: localProjectSettings.json is created by codex-editor extension, not frontier
+        // In integration tests with full extension, this file would exist and contain:
+        // mediaFilesVerified: false
     });
 });
