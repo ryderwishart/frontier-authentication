@@ -138,7 +138,7 @@ suite("Integration: clone respects mediaStrategy", () => {
         }
     });
 
-    test("stream-only: clone skips bulk media downloads", async () => {
+    test("stream-only: clone populates files with pointers", async () => {
         // Arrange: create SCM with token
         const authProvider: any = {};
         const gl = new GitLabService(authProvider);
@@ -148,11 +148,16 @@ suite("Integration: clone respects mediaStrategy", () => {
         // Act: call underlying gitService.clone directly
         await scm.gitService.clone("https://example.com/repo.git", workspaceDir, { username: "oauth2", password: "mock-token" }, "stream-only");
 
-        // Assert: files bytes should NOT exist (no bulk download)
+        // Assert: files folder should have pointer file (not full media bytes)
         const filesAbs = path.join(workspaceDir, ".project/attachments/files/audio/clip.wav");
         let exists = true;
         try { await fs.promises.access(filesAbs); } catch { exists = false; }
-        assert.strictEqual(exists, false, "files/clip.wav should not be downloaded in stream-only");
+        assert.strictEqual(exists, true, "files/clip.wav pointer should exist");
+
+        // Verify it's a pointer file, not full media
+        const content = await fs.promises.readFile(filesAbs, "utf8");
+        assert.ok(content.includes("version https://git-lfs.github.com/spec/v1"), "should be a pointer file");
+        assert.ok(content.length < 200, "pointer file should be small");
     });
 
     test("auto-download: clone downloads media bytes", async () => {

@@ -148,16 +148,23 @@ suite("Integration: unsynced local media preserved across strategies", () => {
         assert.strictEqual(localBytes.toString(), "local-bytes", "local-only should be preserved");
     });
 
-    test("stream-only keeps local-only and does not download pointer", async () => {
+    test("stream-only populates files with pointers and keeps local-only", async () => {
         const gl = new GitLabService({} as any);
         const scm = new SCMManager(gl, { subscriptions: [], workspaceState: { get: () => undefined, update: async () => {} } } as any) as any;
 
         await scm.gitService.clone("https://example.com/repo.git", workspaceDir, { username: "oauth2", password: "mock-token" }, "stream-only");
 
+        // After clone with stream-only, files folder should have pointer file (not full media)
         const remoteFilesAbs = path.join(workspaceDir, ".project/attachments/files/audio/remote.wav");
         let existsRemote = true; try { await fs.promises.access(remoteFilesAbs); } catch { existsRemote = false; }
-        assert.strictEqual(existsRemote, false, "pointer bytes should not be downloaded in stream-only");
+        assert.strictEqual(existsRemote, true, "pointer file should be copied to files folder");
 
+        // Verify it's a pointer file, not full media
+        const remoteContent = await fs.promises.readFile(remoteFilesAbs, "utf8");
+        assert.ok(remoteContent.includes("version https://git-lfs.github.com/spec/v1"), "should be a pointer file");
+        assert.ok(remoteContent.length < 200, "pointer file should be small");
+
+        // Local-only unsynced recording should be preserved
         const localOnlyAbs = path.join(workspaceDir, ".project/attachments/files/audio/local-only.wav");
         const localBytes = await fs.promises.readFile(localOnlyAbs);
         assert.strictEqual(localBytes.toString(), "local-bytes", "local-only should be preserved");

@@ -91,14 +91,20 @@ suite("Integration: clone with stream-and-save does not bulk download", () => {
         if ((global as any).__restoreGetRemoteUrl) { (global as any).__restoreGetRemoteUrl(); delete (global as any).__restoreGetRemoteUrl; }
     });
 
-    test("stream-and-save: clone does not bulk download", async () => {
+    test("stream-and-save: clone populates files with pointers", async () => {
         const gl = new GitLabService({} as any);
         const scm = new SCMManager(gl, { subscriptions: [], workspaceState: { get: () => undefined, update: async () => {} } } as any) as any;
 
         await scm.gitService.clone("https://example.com/repo.git", workspaceDir, { username: "oauth2", password: "mock-token" }, "stream-and-save");
 
+        // After clone with stream-and-save, files folder should have pointer file (not full media)
         const filesAbs = path.join(workspaceDir, ".project/attachments/files/audio/on-demand.wav");
         let exists = true; try { await fs.promises.access(filesAbs); } catch { exists = false; }
-        assert.strictEqual(exists, false, "stream-and-save should not bulk download during clone");
+        assert.strictEqual(exists, true, "pointer file should be copied to files folder");
+
+        // Verify it's a pointer file, not full media
+        const content = await fs.promises.readFile(filesAbs, "utf8");
+        assert.ok(content.includes("version https://git-lfs.github.com/spec/v1"), "should be a pointer file");
+        assert.ok(content.length < 200, "pointer file should be small");
     });
 });

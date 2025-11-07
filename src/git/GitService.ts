@@ -2363,22 +2363,24 @@ export class GitService {
 
                     case "stream-and-save":
                         // Stream media files and download in background
-                        // Start downloading in background without blocking
+                        // CRITICAL: Populate files folder with pointers for consistency
                         this.debugLog(
-                            "[GitService] Media strategy set to stream-and-save - downloading in background"
+                            "[GitService] Media strategy set to stream-and-save - populating files folder with pointers"
                         );
-                        // For stream-and-save, do NOT bulk download here; downloads happen on-demand in editor
-                        // Keep this disabled to honor user's choice and bandwidth
-                        /* this.reconcilePointersFilesystem(dir, auth).catch(e => {
-                            console.warn("[GitService] Background media download failed:", e);
-                        }); */
+                        await this.populateFilesWithPointers(dir).catch(e => {
+                            console.warn("[GitService] Failed to populate files folder with pointers:", e);
+                        });
                         break;
 
                     case "stream-only":
                         // Don't download media files - they will be streamed on demand
+                        // CRITICAL: Populate files folder with pointers for consistency
                         this.debugLog(
-                            "[GitService] Media strategy set to stream-only - skipping download"
+                            "[GitService] Media strategy set to stream-only - populating files folder with pointers"
                         );
+                        await this.populateFilesWithPointers(dir).catch(e => {
+                            console.warn("[GitService] Failed to populate files folder with pointers:", e);
+                        });
                         break;
 
                     default:
@@ -2389,6 +2391,85 @@ export class GitService {
         } catch (e) {
             console.warn("[GitService] Media files download after clone failed:", e);
         }
+    }
+
+    /**
+     * Populate files folder with pointers from pointers folder
+     * This is critical for stream-only and stream-and-save modes to maintain consistency
+     * @param dir - Project directory
+     */
+    private async populateFilesWithPointers(dir: string): Promise<void> {
+        try {
+            const pointersDir = path.join(dir, ".project", "attachments", "pointers");
+            const filesDir = path.join(dir, ".project", "attachments", "files");
+
+            // Check if pointers directory exists
+            if (!fs.existsSync(pointersDir)) {
+                this.debugLog("[populateFilesWithPointers] No pointers directory found, skipping");
+                return;
+            }
+
+            // Find all pointer files recursively
+            const pointerFiles = await this.findAllFilesRecursively(pointersDir);
+            this.debugLog(`[populateFilesWithPointers] Found ${pointerFiles.length} pointer files to copy`);
+
+            // Copy each pointer file to files directory
+            let copiedCount = 0;
+            for (const pointerFilePath of pointerFiles) {
+                try {
+                    // Get relative path from pointers directory
+                    const relativePath = path.relative(pointersDir, pointerFilePath);
+                    const targetPath = path.join(filesDir, relativePath);
+
+                    // Create parent directory
+                    const targetDir = path.dirname(targetPath);
+                    if (!fs.existsSync(targetDir)) {
+                        await fs.promises.mkdir(targetDir, { recursive: true });
+                    }
+
+                    // Copy pointer file
+                    await fs.promises.copyFile(pointerFilePath, targetPath);
+                    copiedCount++;
+                } catch (error) {
+                    this.debugLog(`[populateFilesWithPointers] Failed to copy ${pointerFilePath}:`, error);
+                }
+            }
+
+            this.debugLog(`[populateFilesWithPointers] Copied ${copiedCount} pointer files to files folder`);
+        } catch (error) {
+            console.error("[populateFilesWithPointers] Error:", error);
+            throw error;
+        }
+    }
+
+    /**
+     * Recursively find all files in a directory
+     * @param dir - Directory to search
+     * @returns Array of file paths
+     */
+    private async findAllFilesRecursively(dir: string): Promise<string[]> {
+        const files: string[] = [];
+
+        try {
+            const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+
+            for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name);
+
+                if (entry.isDirectory()) {
+                    // Recurse into subdirectory
+                    const subFiles = await this.findAllFilesRecursively(fullPath);
+                    files.push(...subFiles);
+                } else if (entry.isFile()) {
+                    files.push(fullPath);
+                }
+            }
+        } catch (error) {
+            // Directory doesn't exist or can't be read, return empty array
+            this.debugLog(`[findAllFilesRecursively] Error reading ${dir}:`, error);
+        }
+
+        return files;
     }
 
     async add(dir: string, filepath: string): Promise<void> {
