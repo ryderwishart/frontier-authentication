@@ -900,7 +900,10 @@ export class GitService {
                 }
 
                 const oidsToDownload = enableDownloads ? Array.from(oidToTargets.keys()) : [];
-                if (oidsToDownload.length === 0) {
+                const totalToDownload = oidsToDownload.length;
+                const alreadyDownloaded = totalFiles - totalToDownload;
+                
+                if (totalToDownload === 0) {
                     progress.report({ message: "✅ All files up to date" });
                     this.debugLog(
                         "[GitService] Completed reconcilePointersFilesystem (no downloads needed)"
@@ -1066,13 +1069,16 @@ export class GitService {
                 }
 
                 // Phase 3: concurrent downloads with progress and connection reuse by origin
-                const totalToDownload = oidsToDownload.length;
                 let completed = 0;
                 const concurrency = vscode.workspace
                     .getConfiguration("frontier")
                     .get<number>("lfsDownloadConcurrency", 12);
 
-                progress.report({ message: `📎 Preparing to download ${totalToDownload} files` });
+                // Show total context: already downloaded + remaining to download
+                const downloadMessage = alreadyDownloaded > 0 
+                    ? `📎 Resuming download: ${alreadyDownloaded} of ${totalFiles} already complete`
+                    : `📎 Preparing to download ${totalToDownload} files`;
+                progress.report({ message: downloadMessage });
 
                 const queue = [...oidsToDownload];
                 const runWorker = async () => {
@@ -1085,8 +1091,11 @@ export class GitService {
                         if (!action?.href) {
                             this.debugLog(`[GitService] Missing download action for oid ${oid}`);
                             completed += 1;
+                            const progressMessage = alreadyDownloaded > 0
+                                ? `📎 Resuming: file ${alreadyDownloaded + completed} of ${totalFiles}`
+                                : `📎 Downloading file ${completed} of ${totalToDownload}`;
                             progress.report({
-                                message: `📎 Downloading file ${completed} of ${totalToDownload}`,
+                                message: progressMessage,
                             });
                             continue;
                         }
@@ -1127,8 +1136,11 @@ export class GitService {
                             this.debugLog(`[GitService] Failed downloading oid ${oid}:`, e);
                         } finally {
                             completed += 1;
+                            const progressMessage = alreadyDownloaded > 0
+                                ? `📎 Resuming: file ${alreadyDownloaded + completed} of ${totalFiles}`
+                                : `📎 Downloading file ${completed} of ${totalToDownload}`;
                             progress.report({
-                                message: `📎 Downloading file ${completed} of ${totalToDownload}`,
+                                message: progressMessage,
                             });
                         }
                     }
@@ -1559,7 +1571,13 @@ export class GitService {
                 console.log('[GitService] ✓ Local and remote are already in sync');
                 this.debugLog("Local and remote are already in sync");
                 if (this.progressCallback) {
-                    this.progressCallback('syncing', 1, 1, 'Already up to date');
+                    // Check if we need to download media files
+                    const strategy = this.stateManager.getRepoStrategy(dir);
+                    const needsMediaDownload = strategy === "auto-download";
+                    const message = needsMediaDownload 
+                        ? 'Project is up to date • Downloading media files for offline use'
+                        : 'Project is up to date';
+                    this.progressCallback('syncing', 1, 1, message);
                 }
                 await this.reconcilePointersFilesystem(dir, auth);
                 return { hadConflicts: false, uploadedLfsFiles };
