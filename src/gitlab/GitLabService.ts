@@ -514,22 +514,52 @@ export class GitLabService {
 
         try {
             const encodedProjectId = encodeURIComponent(projectId);
-            // Use 'all' endpoint to include inherited members from groups
-            const endpoint = `${this.gitlabBaseUrl}/api/v4/projects/${encodedProjectId}/members/all`;
+            const allMembers: any[] = [];
+            let page = 1;
+            const perPage = 100; // Max per page
 
-            const response = await fetch(endpoint, {
-                headers: {
-                    Authorization: `Bearer ${this.gitlabToken}`,
-                    "Content-Type": "application/json",
-                },
-            });
+            // Fetch all pages of members
+            while (true) {
+                // Use 'all' endpoint to include inherited members from groups
+                const endpoint = `${this.gitlabBaseUrl}/api/v4/projects/${encodedProjectId}/members/all?per_page=${perPage}&page=${page}`;
 
-            if (!response.ok) {
-                throw new Error(`Failed to fetch project members: ${response.statusText}`);
+                const response = await fetch(endpoint, {
+                    headers: {
+                        Authorization: `Bearer ${this.gitlabToken}`,
+                        "Content-Type": "application/json",
+                    },
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch project members: ${response.statusText}`);
+                }
+
+                const members = await response.json();
+                
+                if (!Array.isArray(members) || members.length === 0) {
+                    // No more members to fetch
+                    break;
+                }
+
+                allMembers.push(...members);
+
+                // Check if there are more pages
+                const totalPages = response.headers.get('x-total-pages');
+                if (totalPages && page >= parseInt(totalPages, 10)) {
+                    break;
+                }
+
+                // If we got fewer results than per_page, we're on the last page
+                if (members.length < perPage) {
+                    break;
+                }
+
+                page++;
             }
 
-            const members = await response.json();
-            return members.map((member: any) => ({
+            console.log(`Fetched ${allMembers.length} total members for project ${projectId}`);
+
+            return allMembers.map((member: any) => ({
                 username: member.username,
                 name: member.name,
                 email: member.email || member.public_email || "",
