@@ -71,6 +71,7 @@ export type MediaFilesStrategy =
 
 export interface FrontierAPI {
     authProvider: FrontierAuthProvider;
+    gitLabService: any; // GitLabService instance for remote operations
     getAuthStatus: () => {
         isAuthenticated: boolean;
     };
@@ -230,6 +231,10 @@ export async function activate(context: vscode.ExtensionContext) {
     const { GitService } = await import("./git/GitService");
     gitServiceInstance = new GitService(stateManagerInstance);
 
+    // Create GitLab service instance for API exposure
+    const { GitLabService } = await import("./gitlab/GitLabService");
+    const gitLabService = new GitLabService(authenticationProvider);
+
     // Register commands - pass gitService for debug toggle
     registerCommands(context, authenticationProvider, gitServiceInstance);
     registerGitLabCommands(context, authenticationProvider);
@@ -292,6 +297,9 @@ export async function activate(context: vscode.ExtensionContext) {
     const frontierAPI: FrontierAPI = {
         // Export the authentication provider for other extensions
         authProvider: authenticationProvider,
+        
+        // Export GitLab service for remote operations
+        gitLabService: gitLabService,
 
         // Export convenience methods
         getAuthStatus: () => authenticationProvider.getAuthStatus(),

@@ -410,4 +410,195 @@ export class GitLabService {
             throw new Error("Failed to get user information");
         }
     }
+
+    /**
+     * Fetch a raw file from a repository
+     * @param projectId - The GitLab project ID (can be numeric or URL-encoded path like "group%2Fproject")
+     * @param filePath - The path to the file in the repository (will be URL-encoded)
+     * @param ref - The branch, tag, or commit SHA (defaults to 'main')
+     * @returns The raw file content as a string
+     */
+    async getRepositoryFile(projectId: string, filePath: string, ref: string = 'main'): Promise<string> {
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            await this.initializeWithRetry();
+        }
+
+        try {
+            // URL-encode the file path for the API call
+            const encodedFilePath = encodeURIComponent(filePath);
+            const encodedProjectId = encodeURIComponent(projectId);
+            const endpoint = `${this.gitlabBaseUrl}/api/v4/projects/${encodedProjectId}/repository/files/${encodedFilePath}/raw?ref=${encodeURIComponent(ref)}`;
+
+            const response = await fetch(endpoint, {
+                headers: {
+                    Authorization: `Bearer ${this.gitlabToken}`,
+                },
+            });
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    throw new Error(`File not found: ${filePath}`);
+                }
+                throw new Error(`Failed to fetch file: ${response.statusText}`);
+            }
+
+            return await response.text();
+        } catch (error) {
+            console.error("Error fetching repository file:", error);
+            throw new Error(
+                `Failed to fetch repository file: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Get list of contributors for a project
+     * @param projectId - The GitLab project ID (can be numeric or URL-encoded path like "group%2Fproject")
+     * @returns Array of contributors with username, name, email, and commit count
+     */
+    async getProjectContributors(
+        projectId: string
+    ): Promise<Array<{ username: string; name: string; email: string; commits: number }>> {
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            await this.initializeWithRetry();
+        }
+
+        try {
+            const encodedProjectId = encodeURIComponent(projectId);
+            const endpoint = `${this.gitlabBaseUrl}/api/v4/projects/${encodedProjectId}/repository/contributors`;
+
+            const response = await fetch(endpoint, {
+                headers: {
+                    Authorization: `Bearer ${this.gitlabToken}`,
+                    "Content-Type": "application/json",
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to fetch contributors: ${response.statusText}`);
+            }
+
+            const contributors = await response.json();
+            return contributors.map((contributor: any) => ({
+                username: contributor.username || contributor.name,
+                name: contributor.name,
+                email: contributor.email,
+                commits: contributor.commits,
+            }));
+        } catch (error) {
+            console.error("Error fetching project contributors:", error);
+            throw new Error(
+                `Failed to fetch project contributors: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Get list of ALL members for a project (including those who haven't contributed)
+     * This includes inherited members from parent groups
+     * @param projectId - The GitLab project ID (can be numeric or URL-encoded path like "group%2Fproject")
+     * @returns Array of members with username, name, email, and access level/role
+     */
+    async getProjectMembers(
+        projectId: string
+    ): Promise<Array<{ 
+        username: string; 
+        name: string; 
+        email: string; 
+        accessLevel: number;
+        roleName: string;
+    }>> {
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            await this.initializeWithRetry();
+        }
+
+        try {
+            const encodedProjectId = encodeURIComponent(projectId);
+            const allMembers: any[] = [];
+            let page = 1;
+            const perPage = 100; // Max per page
+
+            // Fetch all pages of members
+            while (true) {
+                // Use 'all' endpoint to include inherited members from groups
+                const endpoint = `${this.gitlabBaseUrl}/api/v4/projects/${encodedProjectId}/members/all?per_page=${perPage}&page=${page}`;
+
+                const response = await fetch(endpoint, {
+                    headers: {
+                        Authorization: `Bearer ${this.gitlabToken}`,
+                        "Content-Type": "application/json",
+                    },
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch project members: ${response.statusText}`);
+                }
+
+                const members = await response.json();
+                
+                if (!Array.isArray(members) || members.length === 0) {
+                    // No more members to fetch
+                    break;
+                }
+
+                allMembers.push(...members);
+
+                // Check if there are more pages
+                const totalPages = response.headers.get('x-total-pages');
+                if (totalPages && page >= parseInt(totalPages, 10)) {
+                    break;
+                }
+
+                // If we got fewer results than per_page, we're on the last page
+                if (members.length < perPage) {
+                    break;
+                }
+
+                page++;
+            }
+
+            console.log(`Fetched ${allMembers.length} total members for project ${projectId}`);
+
+            return allMembers.map((member: any) => ({
+                username: member.username,
+                name: member.name,
+                email: member.email || member.public_email || "",
+                accessLevel: member.access_level,
+                roleName: this.getAccessLevelName(member.access_level),
+            }));
+        } catch (error) {
+            console.error("Error fetching project members:", error);
+            throw new Error(
+                `Failed to fetch project members: ${error instanceof Error ? error.message : "Unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Convert GitLab access level number to human-readable role name
+     * @param accessLevel - Numeric access level from GitLab API
+     * @returns Human-readable role name
+     */
+    private getAccessLevelName(accessLevel: number): string {
+        switch (accessLevel) {
+            case 0:
+                return "No access";
+            case 5:
+                return "Minimal access";
+            case 10:
+                return "Guest";
+            case 20:
+                return "Reporter";
+            case 30:
+                return "Developer";
+            case 40:
+                return "Maintainer";
+            case 50:
+                return "Owner";
+            case 60:
+                return "Admin";
+            default:
+                return `Unknown (${accessLevel})`;
+        }
+    }
 }

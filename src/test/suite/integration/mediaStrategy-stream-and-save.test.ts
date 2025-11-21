@@ -106,9 +106,5 @@ suite("Integration: clone with stream-and-save does not bulk download", () => {
         const content = await fs.promises.readFile(filesAbs, "utf8");
         assert.ok(content.includes("version https://git-lfs.github.com/spec/v1"), "should be a pointer file");
         assert.ok(content.length < 200, "pointer file should be small");
-        
-        // Note: localProjectSettings.json is created by codex-editor extension, not frontier
-        // In integration tests with full extension, this file would exist and contain:
-        // mediaFilesVerified: false, currentMediaFilesStrategy: "stream-and-save"
     });
 });
