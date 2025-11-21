@@ -92,7 +92,14 @@ suite("Integration: SCMManager Publish Workspace", () => {
             email: "test@example.com",
         });
 
-        const scmManager = new SCMManager(gitLabService, mockContext);
+        const scmManager = new SCMManager(gitLabService, mockContext) as any;
+
+        // Avoid long-running network/lock interactions in this integration test.
+        // Other tests exercise the full sync flow; here we only need to verify
+        // that publishWorkspace can be invoked for each visibility without hanging.
+        (scmManager.gitService as any).syncChanges = async () => {
+            return { hadConflicts: false };
+        };
 
         // Test each visibility level
         for (const visibility of ["private", "internal", "public"] as const) {
