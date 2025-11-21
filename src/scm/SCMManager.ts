@@ -740,7 +740,6 @@ export class SCMManager {
 
             // Add remote if not already added
             const currentRemoteUrl = await this.gitService.getRemoteUrl(workspacePath);
-            const isInitialPublish = !currentRemoteUrl;
             if (!currentRemoteUrl) {
                 console.log("Adding git remote...");
                 await this.gitService.addRemote(workspacePath, "origin", project.url);
@@ -767,105 +766,27 @@ export class SCMManager {
                 email: user.email || `${user.username}@users.noreply.gitlab.com`,
             });
 
-            // Before pushing, check if remote branch exists and merge/fast-forward if needed
+            // After creating the initial commit, run a full sync so publish behaves
+            // exactly like our normal sync flow (fetch, fast-forward, merge, push).
             const auth = {
                 username: "oauth2",
                 password: gitlabToken,
             };
+            const author = {
+                name: user.name || user.username,
+                email: user.email || `${user.username}@users.noreply.gitlab.com`,
+            };
 
-            if (!isInitialPublish) {
-                // Remote already exists, fetch and merge/fast-forward before pushing
-                console.log("Remote exists, fetching and merging before push...");
+            console.log("Running full sync as part of publish...");
+            const syncResult = await this.gitService.syncChanges(workspacePath, auth, author, {
+                commitMessage: "Initial commit",
+            });
 
-                try {
-                    // Fetch latest changes
-                    await git.fetch({
-                        fs,
-                        http,
-                        dir: workspacePath,
-                        onAuth: () => auth,
-                    });
-
-                    // Get current branch
-                    const currentBranch = await git.currentBranch({ fs, dir: workspacePath });
-                    if (currentBranch) {
-                        const localHead = await git.resolveRef({
-                            fs,
-                            dir: workspacePath,
-                            ref: "HEAD",
-                        });
-                        const remoteRef = `refs/remotes/origin/${currentBranch}`;
-
-                        try {
-                            const remoteHead = await git.resolveRef({
-                                fs,
-                                dir: workspacePath,
-                                ref: remoteRef,
-                            });
-
-                            // If local and remote are different, try to merge/fast-forward
-                            if (localHead !== remoteHead) {
-                                console.log(
-                                    "Local and remote differ, attempting fast-forward merge..."
-                                );
-                                try {
-                                    // Try fast-forward first
-                                    await git.fastForward({
-                                        fs,
-                                        http,
-                                        dir: workspacePath,
-                                        ref: currentBranch,
-                                        onAuth: () => auth,
-                                    });
-                                    console.log("✓ Fast-forward merge completed successfully");
-                                } catch (fastForwardError) {
-                                    // Fast-forward failed, this means there are divergent changes
-                                    // For publish, we'll create a merge commit
-                                    console.log(
-                                        "Fast-forward not possible, creating merge commit..."
-                                    );
-                                    const author = {
-                                        name: user.name || user.username,
-                                        email:
-                                            user.email ||
-                                            `${user.username}@users.noreply.gitlab.com`,
-                                    };
-
-                                    try {
-                                        await git.commit({
-                                            fs,
-                                            dir: workspacePath,
-                                            message: `Merge branch 'origin/${currentBranch}'`,
-                                            author: {
-                                                name: author.name,
-                                                email: author.email,
-                                                timestamp: Math.floor(Date.now() / 1000),
-                                                timezoneOffset: new Date().getTimezoneOffset(),
-                                            },
-                                            parent: [localHead, remoteHead],
-                                        });
-                                        console.log("✓ Merge commit created successfully");
-                                    } catch (mergeError) {
-                                        throw new Error(
-                                            `Cannot merge remote changes: ${mergeError instanceof Error ? mergeError.message : String(mergeError)}. Please resolve conflicts manually.`
-                                        );
-                                    }
-                                }
-                            }
-                        } catch (remoteRefError) {
-                            // Remote branch doesn't exist yet, that's fine - we'll push our branch
-                            console.log("Remote branch doesn't exist yet, will push new branch");
-                        }
-                    }
-                } catch (fetchError) {
-                    console.warn("Failed to fetch before push:", fetchError);
-                    // Continue with push anyway - if it fails, we'll get a proper error
-                }
+            if (syncResult.hadConflicts) {
+                throw new Error(
+                    "Publish encountered merge conflicts with remote. Please resolve conflicts via sync before publishing."
+                );
             }
-
-            // Push to remote (always normal push, no force)
-            console.log("Pushing to remote...");
-            await this.gitService.push(workspacePath, auth);
 
             // Initialize SCM
             console.log("Initializing SCM...");
