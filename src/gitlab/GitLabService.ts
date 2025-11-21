@@ -191,7 +191,10 @@ export class GitLabService {
                 name,
                 description,
                 visibility,
-                initialize_with_readme: true,
+                // Do NOT initialize with a README. We want a truly empty repository so that
+                // the client's initial publish/sync can create the first commit without
+                // immediately diverging from a server-created README commit.
+                initialize_with_readme: false,
                 default_branch_protection: 0,
             };
 
@@ -418,7 +421,11 @@ export class GitLabService {
      * @param ref - The branch, tag, or commit SHA (defaults to 'main')
      * @returns The raw file content as a string
      */
-    async getRepositoryFile(projectId: string, filePath: string, ref: string = 'main'): Promise<string> {
+    async getRepositoryFile(
+        projectId: string,
+        filePath: string,
+        ref: string = "main"
+    ): Promise<string> {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initializeWithRetry();
         }
@@ -499,15 +506,15 @@ export class GitLabService {
      * @param projectId - The GitLab project ID (can be numeric or URL-encoded path like "group%2Fproject")
      * @returns Array of members with username, name, email, and access level/role
      */
-    async getProjectMembers(
-        projectId: string
-    ): Promise<Array<{ 
-        username: string; 
-        name: string; 
-        email: string; 
-        accessLevel: number;
-        roleName: string;
-    }>> {
+    async getProjectMembers(projectId: string): Promise<
+        Array<{
+            username: string;
+            name: string;
+            email: string;
+            accessLevel: number;
+            roleName: string;
+        }>
+    > {
         if (!this.gitlabToken || !this.gitlabBaseUrl) {
             await this.initializeWithRetry();
         }
@@ -535,7 +542,7 @@ export class GitLabService {
                 }
 
                 const members = await response.json();
-                
+
                 if (!Array.isArray(members) || members.length === 0) {
                     // No more members to fetch
                     break;
@@ -544,7 +551,7 @@ export class GitLabService {
                 allMembers.push(...members);
 
                 // Check if there are more pages
-                const totalPages = response.headers.get('x-total-pages');
+                const totalPages = response.headers.get("x-total-pages");
                 if (totalPages && page >= parseInt(totalPages, 10)) {
                     break;
                 }
