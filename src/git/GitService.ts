@@ -1383,6 +1383,14 @@ export class GitService {
             } else if (errorMessage.includes("timeout") || errorMessage.includes("ETIMEDOUT")) {
                 userFriendlyMessage = "push failed: Connection timeout (server not responding)";
             } else if (
+                errorMessage.includes("One or more branches were not updated") ||
+                errorMessage.includes("failed to update ref")
+            ) {
+                // Typical isomorphic-git GitPushError when the remote ref changed
+                // between our last fetch and push (non-fast-forward update).
+                userFriendlyMessage =
+                    "push failed: Remote branch changed since last sync. Please sync again to merge the latest remote changes.";
+            } else if (
                 errorMessage.includes("rejected") ||
                 errorMessage.includes("non-fast-forward")
             ) {
@@ -2190,12 +2198,10 @@ export class GitService {
                 }
             }
 
-            // Get the current state before creating the merge commit
-            const localHead = await git.resolveRef({ fs, dir, ref: currentBranch });
-            const remoteRef = this.getRemoteRef(currentBranch);
-            const remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
-
             // Fetch latest changes to ensure we have the most recent remote state
+            // BEFORE we read local/remote heads to build the merge commit. This avoids
+            // creating a merge commit against a stale remote head, which would cause
+            // the subsequent push to be rejected as a non-fast-forward update.
             this.debugLog("[GitService] Fetching latest changes before merge completion");
             await this.withTimeout(
                 git.fetch({
@@ -2210,6 +2216,14 @@ export class GitService {
                 2 * 60 * 1000,
                 "Pre-merge fetch operation"
             );
+
+            // Get the current state AFTER fetch so our merge commit reflects the latest
+            // remote tip. This guarantees that the resulting merge commit will be a
+            // fast-forward of the remote (barring a race where someone pushes again
+            // between this fetch and our push).
+            const localHead = await git.resolveRef({ fs, dir, ref: currentBranch });
+            const remoteRef = this.getRemoteRef(currentBranch);
+            const remoteHead = await git.resolveRef({ fs, dir, ref: remoteRef });
             const commitMessage = `Merge branch 'origin/${currentBranch}'`;
             this.debugLog(`Creating merge commit with message: ${commitMessage}`);
 
