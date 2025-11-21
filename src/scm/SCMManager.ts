@@ -29,8 +29,8 @@ export class SCMManager {
     private readonly context: vscode.ExtensionContext;
     private stateManager: StateManager;
     private syncStatusBarItem: vscode.StatusBarItem | undefined;
-    private syncEventEmitter: vscode.EventEmitter<{ 
-        status: 'started' | 'completed' | 'error' | 'skipped' | 'progress', 
+    private syncEventEmitter: vscode.EventEmitter<{
+        status: "started" | "completed" | "error" | "skipped" | "progress";
         message?: string;
         progress?: {
             phase: string;
@@ -391,13 +391,15 @@ export class SCMManager {
 
         // Check if another sync is already in progress before firing 'started' event
         if (this.gitService.isSyncLocked()) {
-            this.syncEventEmitter.fire({ status: 'skipped', message: 'Sync already in progress' });
-            vscode.window.showInformationMessage('Sync already in progress. Please wait for the current synchronization to complete.');
+            this.syncEventEmitter.fire({ status: "skipped", message: "Sync already in progress" });
+            vscode.window.showInformationMessage(
+                "Sync already in progress. Please wait for the current synchronization to complete."
+            );
             return { hasConflicts: false };
         }
 
         // Fire sync started event (only if lock is free)
-        this.syncEventEmitter.fire({ status: 'started', message: 'Synchronization started' });
+        this.syncEventEmitter.fire({ status: "started", message: "Synchronization started" });
 
         // Create or show the status bar item
         if (!this.syncStatusBarItem) {
@@ -543,27 +545,22 @@ export class SCMManager {
             }
 
             // Try to sync and get result with progress reporting
-            const syncResult = await this.gitService.syncChanges(
-                workspacePath,
-                auth,
-                author,
-                {
-                    ...options,
-                    onProgress: (phase, loaded, total, description) => {
-                        // Fire progress event to UI
-                        this.syncEventEmitter.fire({
-                            status: 'progress',
-                            message: description || `${phase}: ${loaded}/${total}`,
-                            progress: {
-                                phase,
-                                loaded,
-                                total,
-                                description
-                            }
-                        });
-                    }
-                }
-            );
+            const syncResult = await this.gitService.syncChanges(workspacePath, auth, author, {
+                ...options,
+                onProgress: (phase, loaded, total, description) => {
+                    // Fire progress event to UI
+                    this.syncEventEmitter.fire({
+                        status: "progress",
+                        message: description || `${phase}: ${loaded}/${total}`,
+                        progress: {
+                            phase,
+                            loaded,
+                            total,
+                            description,
+                        },
+                    });
+                },
+            });
 
             // If sync was skipped due to a lock, inform the user and do not show "Synced"
             if (syncResult.skippedDueToLock) {
@@ -579,7 +576,10 @@ export class SCMManager {
                     "Sync skipped: another synchronization appears to be in progress. If this persists, ensure .git/frontier-sync.lock does not exist."
                 );
                 // Fire sync skipped event
-                this.syncEventEmitter.fire({ status: 'skipped', message: 'Sync skipped: another sync in progress' });
+                this.syncEventEmitter.fire({
+                    status: "skipped",
+                    message: "Sync skipped: another sync in progress",
+                });
                 return { hasConflicts: false };
             }
 
@@ -597,7 +597,10 @@ export class SCMManager {
         } catch (error) {
             console.error("Sync error:", error);
             // Fire sync error event
-            this.syncEventEmitter.fire({ status: 'error', message: error instanceof Error ? error.message : 'Sync error' });
+            this.syncEventEmitter.fire({
+                status: "error",
+                message: error instanceof Error ? error.message : "Sync error",
+            });
             throw error;
         } finally {
             // Stop animation and update status
@@ -613,7 +616,10 @@ export class SCMManager {
             }
             // Fire sync completed event only if sync succeeded
             if (syncSucceeded) {
-                this.syncEventEmitter.fire({ status: 'completed', message: 'Synchronization complete' });
+                this.syncEventEmitter.fire({
+                    status: "completed",
+                    message: "Synchronization complete",
+                });
             }
         }
     }
@@ -704,7 +710,6 @@ export class SCMManager {
         description?: string;
         visibility?: "private" | "internal" | "public";
         groupId?: string;
-        force: boolean;
     }): Promise<void> {
         try {
             console.log("Starting workspace publish with options:", options);
@@ -735,6 +740,7 @@ export class SCMManager {
 
             // Add remote if not already added
             const currentRemoteUrl = await this.gitService.getRemoteUrl(workspacePath);
+            const isInitialPublish = !currentRemoteUrl;
             if (!currentRemoteUrl) {
                 console.log("Adding git remote...");
                 await this.gitService.addRemote(workspacePath, "origin", project.url);
@@ -761,16 +767,105 @@ export class SCMManager {
                 email: user.email || `${user.username}@users.noreply.gitlab.com`,
             });
 
-            // Push to remote (reuse same token)
+            // Before pushing, check if remote branch exists and merge/fast-forward if needed
+            const auth = {
+                username: "oauth2",
+                password: gitlabToken,
+            };
+
+            if (!isInitialPublish) {
+                // Remote already exists, fetch and merge/fast-forward before pushing
+                console.log("Remote exists, fetching and merging before push...");
+
+                try {
+                    // Fetch latest changes
+                    await git.fetch({
+                        fs,
+                        http,
+                        dir: workspacePath,
+                        onAuth: () => auth,
+                    });
+
+                    // Get current branch
+                    const currentBranch = await git.currentBranch({ fs, dir: workspacePath });
+                    if (currentBranch) {
+                        const localHead = await git.resolveRef({
+                            fs,
+                            dir: workspacePath,
+                            ref: "HEAD",
+                        });
+                        const remoteRef = `refs/remotes/origin/${currentBranch}`;
+
+                        try {
+                            const remoteHead = await git.resolveRef({
+                                fs,
+                                dir: workspacePath,
+                                ref: remoteRef,
+                            });
+
+                            // If local and remote are different, try to merge/fast-forward
+                            if (localHead !== remoteHead) {
+                                console.log(
+                                    "Local and remote differ, attempting fast-forward merge..."
+                                );
+                                try {
+                                    // Try fast-forward first
+                                    await git.fastForward({
+                                        fs,
+                                        http,
+                                        dir: workspacePath,
+                                        ref: currentBranch,
+                                        onAuth: () => auth,
+                                    });
+                                    console.log("✓ Fast-forward merge completed successfully");
+                                } catch (fastForwardError) {
+                                    // Fast-forward failed, this means there are divergent changes
+                                    // For publish, we'll create a merge commit
+                                    console.log(
+                                        "Fast-forward not possible, creating merge commit..."
+                                    );
+                                    const author = {
+                                        name: user.name || user.username,
+                                        email:
+                                            user.email ||
+                                            `${user.username}@users.noreply.gitlab.com`,
+                                    };
+
+                                    try {
+                                        await git.commit({
+                                            fs,
+                                            dir: workspacePath,
+                                            message: `Merge branch 'origin/${currentBranch}'`,
+                                            author: {
+                                                name: author.name,
+                                                email: author.email,
+                                                timestamp: Math.floor(Date.now() / 1000),
+                                                timezoneOffset: new Date().getTimezoneOffset(),
+                                            },
+                                            parent: [localHead, remoteHead],
+                                        });
+                                        console.log("✓ Merge commit created successfully");
+                                    } catch (mergeError) {
+                                        throw new Error(
+                                            `Cannot merge remote changes: ${mergeError instanceof Error ? mergeError.message : String(mergeError)}. Please resolve conflicts manually.`
+                                        );
+                                    }
+                                }
+                            }
+                        } catch (remoteRefError) {
+                            // Remote branch doesn't exist yet, that's fine - we'll push our branch
+                            console.log("Remote branch doesn't exist yet, will push new branch");
+                        }
+                    }
+                } catch (fetchError) {
+                    console.warn("Failed to fetch before push:", fetchError);
+                    // Continue with push anyway - if it fails, we'll get a proper error
+                }
+            }
+
+            // Push to remote (always normal push, no force)
             console.log("Pushing to remote...");
-            await this.gitService.push(
-                workspacePath,
-                {
-                    username: "oauth2",
-                    password: gitlabToken,
-                },
-                { force: options.force }
-            );
+            await this.gitService.push(workspacePath, auth);
 
             // Initialize SCM
             console.log("Initializing SCM...");

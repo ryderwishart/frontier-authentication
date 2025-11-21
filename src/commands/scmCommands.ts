@@ -8,7 +8,6 @@ export interface PublishWorkspaceOptions {
     description?: string;
     visibility?: "private" | "internal" | "public";
     groupId?: number;
-    force: boolean;
 }
 
 // Store the SCM manager instance for API access
@@ -311,7 +310,6 @@ export function registerSCMCommands(
                 description?: string;
                 visibility?: "private" | "internal" | "public";
                 groupId?: number;
-                force: boolean;
             }) => {
                 try {
                     await gitLabService.initializeWithRetry();
@@ -448,7 +446,6 @@ export function registerSCMCommands(
                         description,
                         visibility,
                         groupId: groupId?.toString(),
-                        force: options.force,
                     });
 
                     return true;

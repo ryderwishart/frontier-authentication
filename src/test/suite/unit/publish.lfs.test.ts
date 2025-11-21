@@ -49,7 +49,7 @@ suite("Publish uses LFS during staging", () => {
         };
         (scm as any).initializeSCM = async () => {};
 
-        await scm.publishWorkspace({ name: "proj", force: true });
+        await scm.publishWorkspace({ name: "proj" });
 
         assert.deepStrictEqual(
             addAllWithLFSCreds,

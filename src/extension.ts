@@ -106,7 +106,6 @@ export interface FrontierAPI {
         description?: string;
         visibility?: "private" | "internal" | "public";
         groupId?: string;
-        force: boolean;
     }) => Promise<void>;
     getUserInfo: () => Promise<{
         email: string;
@@ -124,8 +123,8 @@ export interface FrontierAPI {
         workspacePath: string | undefined
     ) => Promise<void>;
     onSyncStatusChange: (
-        callback: (status: { 
-            status: 'started' | 'completed' | 'error' | 'skipped' | 'progress', 
+        callback: (status: {
+            status: "started" | "completed" | "error" | "skipped" | "progress";
             message?: string;
             progress?: {
                 phase: string;
@@ -147,7 +146,7 @@ export interface FrontierAPI {
         ownedByUs: boolean;
         phase?: string;
         progress?: { current: number; total: number; description?: string };
-        status: 'active' | 'stuck' | 'dead';
+        status: "active" | "stuck" | "dead";
     }>;
     cleanupStaleLock: () => Promise<void>;
     checkWorkingCopyState: (workspacePath: string) => Promise<{
@@ -348,24 +347,13 @@ export async function activate(context: vscode.ExtensionContext) {
             description?: string;
             visibility?: "private" | "internal" | "public";
             groupId?: string;
-            force: boolean;
         }) => {
             try {
                 await vscode.commands.executeCommand("frontier.publishWorkspace", {
                     ...options,
-                    force: true, // Always force push when publishing, since it won't be a simple fast-forward
                 });
             } catch (error: unknown) {
-                if (
-                    error instanceof Error &&
-                    error.message.includes("Push rejected because it was not a simple fast-forward")
-                ) {
-                    throw new Error(
-                        "Failed to publish workspace: Push rejected. Use 'force: true' to override."
-                    );
-                } else {
-                    throw error;
-                }
+                throw error;
             }
         },
         getUserInfo: async () => {
@@ -391,9 +379,9 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             // Construct WebSocket URL: replace protocol and remove /api/v1 path
             const url = new URL(API_ENDPOINT);
-            url.protocol = url.protocol.replace('http', 'ws');
-            url.pathname = '/ws/asr';
-            url.searchParams.set('source', 'codex');
+            url.protocol = url.protocol.replace("http", "ws");
+            url.pathname = "/ws/asr";
+            url.searchParams.set("source", "codex");
             return url.toString();
         },
         syncChanges: async (options?: { commitMessage?: string }) =>
@@ -408,19 +396,23 @@ export async function activate(context: vscode.ExtensionContext) {
                 resolvedFiles,
                 workspacePath
             ) as Promise<void>,
-        onSyncStatusChange: (callback: (status: { 
-            status: 'started' | 'completed' | 'error' | 'skipped' | 'progress', 
-            message?: string;
-            progress?: {
-                phase: string;
-                loaded?: number;
-                total?: number;
-                description?: string;
-            };
-        }) => void) => {
+        onSyncStatusChange: (
+            callback: (status: {
+                status: "started" | "completed" | "error" | "skipped" | "progress";
+                message?: string;
+                progress?: {
+                    phase: string;
+                    loaded?: number;
+                    total?: number;
+                    description?: string;
+                };
+            }) => void
+        ) => {
             const scmManager = getSCMManager();
             if (!scmManager) {
-                console.warn("SCMManager not initialized, sync status events will not be available");
+                console.warn(
+                    "SCMManager not initialized, sync status events will not be available"
+                );
                 return { dispose: () => {} };
             }
             return scmManager.onSyncStatusChange(callback);
@@ -603,7 +595,7 @@ function updateProgressStatusBar(statusBarItem: vscode.StatusBarItem, authState:
 // This method is called when your extension is deactivated
 export async function deactivate() {
     console.log("[Frontier] Extension deactivating...");
-    
+
     try {
         const stateManager = StateManager.getInstance();
         await stateManager.releaseSyncLock();
@@ -611,7 +603,7 @@ export async function deactivate() {
     } catch (error) {
         console.error("[Frontier] Error releasing sync lock on deactivation:", error);
     }
-    
+
     if (authenticationProvider !== undefined) {
         authenticationProvider.dispose();
     }
