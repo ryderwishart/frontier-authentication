@@ -23,6 +23,7 @@ async function main() {
         const extensionDevelopmentPath = path.resolve(__dirname, "../../");
         const extensionTestsPath = path.resolve(__dirname, "./suite/index");
         const testUserDataDir = path.resolve(__dirname, "../test-data");
+        const workspacePath = extensionDevelopmentPath;
 
         // Cleanup before running tests
         await cleanupTestUserData(testUserDataDir);
@@ -32,6 +33,7 @@ async function main() {
             extensionDevelopmentPath,
             extensionTestsPath,
             launchArgs: [
+                workspacePath,
                 "--disable-extensions",
                 "--disable-telemetry",
                 "--user-data-dir",
