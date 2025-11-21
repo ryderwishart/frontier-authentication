@@ -35,7 +35,7 @@ suite("Publish uses LFS during staging", () => {
 
         // Spy on git service methods
         let addAllWithLFSCreds: any = null;
-        let pushCreds: any = null;
+        let syncAuth: any = null;
 
         (scm.gitService as any).hasGitRepository = async () => true;
         (scm.gitService as any).getRemoteUrl = async () => undefined;
@@ -44,8 +44,16 @@ suite("Publish uses LFS during staging", () => {
             addAllWithLFSCreds = creds;
         };
         (scm.gitService as any).commit = async () => {};
-        (scm.gitService as any).push = async (_dir: string, creds: any) => {
-            pushCreds = creds;
+        // Stub syncChanges so publish can behave like a full sync without hitting
+        // real network/lock logic, and so we can verify the auth that is used.
+        (scm.gitService as any).syncChanges = async (
+            _dir: string,
+            auth: any,
+            _author: any,
+            _options?: any
+        ) => {
+            syncAuth = auth;
+            return { hadConflicts: false, uploadedLfsFiles: [] };
         };
         (scm as any).initializeSCM = async () => {};
 
@@ -57,9 +65,9 @@ suite("Publish uses LFS during staging", () => {
             "addAllWithLFS should be called with oauth2 and token"
         );
         assert.deepStrictEqual(
-            pushCreds,
+            syncAuth,
             { username: "oauth2", password: "tkn" },
-            "push should reuse the same token"
+            "syncChanges should reuse the same token that was used for LFS"
         );
         // Cleanup temp dir
         try {
