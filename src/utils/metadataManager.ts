@@ -147,7 +147,9 @@ export class MetadataManager {
     ): Promise<{ success: boolean; error?: string }> {
         const workspaceUri = vscode.Uri.joinPath(metadataPath, "..");
         const backupPath = vscode.Uri.joinPath(workspaceUri, ".metadata.json.backup");
-        const tempPath = vscode.Uri.joinPath(workspaceUri, ".metadata.json.tmp");
+        // Use unique temp path to avoid collisions
+        const uniqueId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+        const tempPath = vscode.Uri.joinPath(workspaceUri, `.metadata.json.${uniqueId}.tmp`);
 
         try {
             // Step 1: Create backup of existing file
@@ -216,15 +218,44 @@ export class MetadataManager {
         timeoutMs: number
     ): Promise<boolean> {
         const startTime = Date.now();
+        const uniqueId = `${Math.random().toString(36).substring(2, 9)}`;
         const lockData: MetadataLock = {
             extensionId: this.EXTENSION_ID,
             timestamp: startTime,
             pid: process.pid
         };
+        
+        // Use a unique temp file for atomic locking
+        const tempLockPath = lockPath.with({ path: lockPath.path + `.${uniqueId}.tmp` });
 
         while (Date.now() - startTime < timeoutMs) {
             try {
-                // Check if lock file already exists
+                // Try to create lock file exclusively using atomic rename strategy
+                // 1. Write to unique temp file
+                const lockContent = JSON.stringify(lockData);
+                const encoded = new TextEncoder().encode(lockContent);
+                await vscode.workspace.fs.writeFile(tempLockPath, encoded);
+
+                // 2. Try to rename temp to lock (fails if lock exists)
+                try {
+                    await vscode.workspace.fs.rename(tempLockPath, lockPath, { overwrite: false });
+                    return true;
+                } catch (renameError: any) {
+                    // Rename failed (likely lock exists), clean up temp file
+                    await this.cleanupFile(tempLockPath);
+                    
+                    if (renameError.code !== 'EntryExists' && renameError.code !== 'FileExists') {
+                        console.warn(`[MetadataManager] Atomic rename failed: ${renameError.message}`);
+                    }
+                    // Continue to check if lock is stale
+                }
+            } catch (error) {
+                // Write failed
+                await this.cleanupFile(tempLockPath);
+            }
+
+            try {
+                // Check if lock file already exists and is stale
                 const existingContent = await vscode.workspace.fs.readFile(lockPath);
                 const existingLock: MetadataLock = JSON.parse(new TextDecoder().decode(existingContent));
                 
@@ -233,35 +264,15 @@ export class MetadataManager {
                     console.log(`[MetadataManager] Removing stale lock from ${existingLock.extensionId}`);
                     await this.cleanupFile(lockPath);
                     // Continue to try creating new lock
+                    continue;
                 } else {
                     // Lock is still valid, wait and retry
                     await this.sleep(50);
                     continue;
                 }
             } catch (error) {
-                // Lock file doesn't exist or is corrupted, we can proceed
-            }
-
-            try {
-                // Try to create lock file
-                const lockContent = JSON.stringify(lockData);
-                const encoded = new TextEncoder().encode(lockContent);
-                await vscode.workspace.fs.writeFile(lockPath, encoded);
-                
-                // Verify we actually got the lock (race condition check)
-                await this.sleep(10); // Small delay to catch race conditions
-                const verifyContent = await vscode.workspace.fs.readFile(lockPath);
-                const verifyLock: MetadataLock = JSON.parse(new TextDecoder().decode(verifyContent));
-                
-                if (verifyLock.extensionId === this.EXTENSION_ID && verifyLock.timestamp === lockData.timestamp) {
-                    return true; // Successfully acquired lock
-                } else {
-                    // Someone else got the lock first
-                    await this.sleep(50);
-                    continue;
-                }
-            } catch (error) {
-                // Failed to create or verify lock, retry
+                // Lock file doesn't exist or is corrupted, just retry
+                // If it doesn't exist, next loop iteration will try to create it
                 await this.sleep(50);
                 continue;
             }
