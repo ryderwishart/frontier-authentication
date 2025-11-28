@@ -325,6 +325,37 @@ export function registerCommands(
                     `Failed to refresh user info: ${error instanceof Error ? error.message : String(error)}`
                 );
             }
+        }),
+
+        // Add command to set API endpoint
+        vscode.commands.registerCommand("frontier.setApiEndpoint", async () => {
+            const config = vscode.workspace.getConfiguration("frontier");
+            const current =
+                config.get<string>("apiEndpoint") || "https://api.frontierrnd.com/api/v1";
+
+            const input = await vscode.window.showInputBox({
+                prompt: "Enter Frontier API Endpoint",
+                value: current,
+                ignoreFocusOut: true,
+            });
+
+            if (input !== undefined && input !== current) {
+                // Determine target: Workspace if available, otherwise Global
+                const target = vscode.workspace.workspaceFolders
+                    ? vscode.ConfigurationTarget.Workspace
+                    : vscode.ConfigurationTarget.Global;
+
+                await config.update("apiEndpoint", input, target);
+
+                const selection = await vscode.window.showInformationMessage(
+                    `Frontier API Endpoint updated to: ${input}. Please reload the window for changes to take full effect.`,
+                    "Reload Window"
+                );
+
+                if (selection === "Reload Window") {
+                    vscode.commands.executeCommand("workbench.action.reloadWindow");
+                }
+            }
         })
     );
 }

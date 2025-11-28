@@ -202,7 +202,12 @@ export interface ResolvedFile {
 
 let authenticationProvider: FrontierAuthProvider;
 
-const API_ENDPOINT = "https://api.frontierrnd.com/api/v1";
+function getApiEndpoint(): string {
+    const config = vscode.workspace.getConfiguration("frontier");
+    return config.get<string>("apiEndpoint") || "https://api.frontierrnd.com/api/v1";
+}
+
+const API_ENDPOINT = getApiEndpoint();
 // const API_ENDPOINT = "http://localhost:8000/api/v1"; // Use this for local development when the frontier server is running locally
 
 // FIXME: let's gracefully handle offline (block login, for instance)
@@ -297,7 +302,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const frontierAPI: FrontierAPI = {
         // Export the authentication provider for other extensions
         authProvider: authenticationProvider,
-        
+
         // Export GitLab service for remote operations
         gitLabService: gitLabService,
 

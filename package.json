@@ -1,188 +1,199 @@
 {
-  "name": "frontier-authentication",
-  "displayName": "Frontier Authentication",
-  "description": "Authentication extension for Frontier",
-  "publisher": "frontier-rnd",
-  "version": "0.4.18",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/frontier-rnd/frontier-authentication"
-  },
-  "engines": {
-    "vscode": "^1.87.0"
-  },
-  "categories": [
-    "Other"
-  ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
-  "main": "./dist/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "frontier.login",
-        "title": "Login",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.register",
-        "title": "Register",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.logout",
-        "title": "Logout",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.getAuthStatus",
-        "title": "Get Authentication Status",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.listProjects",
-        "title": "List Projects",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.cloneRepository",
-        "title": "Clone Repository",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.createGitLabProject",
-        "title": "Create GitLab Project",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.createAndCloneProject",
-        "title": "Create and Clone GitLab Project",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.syncChanges",
-        "title": "Sync Changes",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.toggleAutoSync",
-        "title": "Toggle Auto-Sync",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.confirmLogout",
-        "title": "Logout from Frontier"
-      },
-      {
-        "command": "frontier.publishWorkspace",
-        "title": "Publish Workspace",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.getUserInfo",
-        "title": "Get User Info",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.listGroupsUserIsAtLeastMemberOf",
-        "title": "List Groups User Is At Least Member Of",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.showProgressDashboard",
-        "title": "Show Translation Progress Dashboard",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.testProgressReport",
-        "title": "Submit Test Progress Report",
-        "category": "Frontier: Debug"
-      },
-      {
-        "command": "frontier.debugAuth",
-        "title": "Debug Authentication Status",
-        "category": "Frontier: Debug"
-      },
-      {
-        "command": "frontier.manualSubmitProgressReport",
-        "title": "Submit Manual Progress Report",
-        "category": "Frontier"
-      },
-      {
-        "command": "frontier.toggleDebugLogging",
-        "title": "Toggle Debug Logging",
-        "category": "Frontier: Debug"
-      },
-      {
-        "command": "frontier.refreshUserInfo",
-        "title": "Refresh User Info Cache",
-        "category": "Frontier: Debug"
-      }
+    "name": "frontier-authentication",
+    "displayName": "Frontier Authentication",
+    "description": "Authentication extension for Frontier",
+    "publisher": "frontier-rnd",
+    "version": "0.4.18",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/frontier-rnd/frontier-authentication"
+    },
+    "engines": {
+        "vscode": "^1.87.0"
+    },
+    "categories": [
+        "Other"
     ],
-    "authentication": [
-      {
-        "id": "frontier",
-        "label": "Frontier"
-      }
+    "activationEvents": [
+        "onStartupFinished"
     ],
-    "configuration": {
-      "title": "Frontier",
-      "properties": {
-        "frontier.debugGitLogging": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable verbose debug logging for git operations (workingCopyStatusBeforeCommit, localStatusMatrix, mergeBaseStatusMatrix, remoteStatusMatrix)",
-          "scope": "application"
+    "main": "./dist/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "frontier.login",
+                "title": "Login",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.register",
+                "title": "Register",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.logout",
+                "title": "Logout",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.getAuthStatus",
+                "title": "Get Authentication Status",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.listProjects",
+                "title": "List Projects",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.cloneRepository",
+                "title": "Clone Repository",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.createGitLabProject",
+                "title": "Create GitLab Project",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.createAndCloneProject",
+                "title": "Create and Clone GitLab Project",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.syncChanges",
+                "title": "Sync Changes",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.toggleAutoSync",
+                "title": "Toggle Auto-Sync",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.confirmLogout",
+                "title": "Logout from Frontier"
+            },
+            {
+                "command": "frontier.publishWorkspace",
+                "title": "Publish Workspace",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.getUserInfo",
+                "title": "Get User Info",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.listGroupsUserIsAtLeastMemberOf",
+                "title": "List Groups User Is At Least Member Of",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.showProgressDashboard",
+                "title": "Show Translation Progress Dashboard",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.testProgressReport",
+                "title": "Submit Test Progress Report",
+                "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.debugAuth",
+                "title": "Debug Authentication Status",
+                "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.manualSubmitProgressReport",
+                "title": "Submit Manual Progress Report",
+                "category": "Frontier"
+            },
+            {
+                "command": "frontier.toggleDebugLogging",
+                "title": "Toggle Debug Logging",
+                "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.refreshUserInfo",
+                "title": "Refresh User Info Cache",
+                "category": "Frontier: Debug"
+            },
+            {
+                "command": "frontier.setApiEndpoint",
+                "title": "Set API Endpoint",
+                "category": "Frontier"
+            }
+        ],
+        "authentication": [
+            {
+                "id": "frontier",
+                "label": "Frontier"
+            }
+        ],
+        "configuration": {
+            "title": "Frontier",
+            "properties": {
+                "frontier.debugGitLogging": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable verbose debug logging for git operations (workingCopyStatusBeforeCommit, localStatusMatrix, mergeBaseStatusMatrix, remoteStatusMatrix)",
+                    "scope": "application"
+                },
+                "frontier.apiEndpoint": {
+                    "type": "string",
+                    "default": "https://api.frontierrnd.com/api/v1",
+                    "description": "The base URL for the Frontier API.",
+                    "scope": "resource"
+                }
+            }
         }
-      }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run test && npm run package",
+        "clean": "node -e \"const fs=require('fs');['out','dist'].forEach(d=>{try{fs.rmSync(d,{recursive:true,force:true})}catch{}})\"",
+        "compile": "webpack",
+        "watch": "webpack --watch",
+        "prepackage": "npm run clean",
+        "package": "webpack --mode production --devtool hidden-source-map",
+        "compile-tests": "tsc -p . --outDir out",
+        "watch-tests": "tsc -p . --outDir out --watch",
+        "pretest": "npm run clean && npm run compile-tests && npm run compile && npm run lint",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js",
+        "format": "prettier --write \"src/**/*.{ts,js,json,md}\"",
+        "format:check": "prettier --check \"src/**/*.{ts,js,json,md}\"",
+        "prepare": "husky"
+    },
+    "devDependencies": {
+        "@jest/globals": "^29.7.0",
+        "@types/diff3": "^0.0.2",
+        "@types/glob": "^8.1.0",
+        "@types/mocha": "^10.0.6",
+        "@types/node": "18.x",
+        "@types/node-fetch": "^2.6.11",
+        "@types/vscode": "^1.87.0",
+        "@typescript-eslint/eslint-plugin": "^7.0.2",
+        "@typescript-eslint/parser": "^7.0.2",
+        "@vscode/test-electron": "^2.3.9",
+        "crypto-browserify": "^3.12.0",
+        "eslint": "^8.56.0",
+        "glob": "^8.1.0",
+        "husky": "^9.1.7",
+        "memfs": "^4.7.1",
+        "mocha": "^10.2.0",
+        "path-browserify": "^1.0.1",
+        "prettier": "^3.4.1",
+        "ts-loader": "^9.5.1",
+        "typescript": "^5.3.3",
+        "webpack": "^5.90.3",
+        "webpack-cli": "^5.1.4"
+    },
+    "dependencies": {
+        "@aws-crypto/sha256-universal": "^2.0.0",
+        "@fetsorn/isogit-lfs": "^0.5.3",
+        "diff3": "^0.0.4",
+        "isomorphic-git": "^1.25.3",
+        "node-fetch": "^2.7.0"
     }
-  },
-  "scripts": {
-    "vscode:prepublish": "npm run test && npm run package",
-    "clean": "node -e \"const fs=require('fs');['out','dist'].forEach(d=>{try{fs.rmSync(d,{recursive:true,force:true})}catch{}})\"",
-    "compile": "webpack",
-    "watch": "webpack --watch",
-    "prepackage": "npm run clean",
-    "package": "webpack --mode production --devtool hidden-source-map",
-    "compile-tests": "tsc -p . --outDir out",
-    "watch-tests": "tsc -p . --outDir out --watch",
-    "pretest": "npm run clean && npm run compile-tests && npm run compile && npm run lint",
-    "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js",
-    "format": "prettier --write \"src/**/*.{ts,js,json,md}\"",
-    "format:check": "prettier --check \"src/**/*.{ts,js,json,md}\"",
-    "prepare": "husky"
-  },
-  "devDependencies": {
-    "@jest/globals": "^29.7.0",
-    "@types/diff3": "^0.0.2",
-    "@types/glob": "^8.1.0",
-    "@types/mocha": "^10.0.6",
-    "@types/node": "18.x",
-    "@types/node-fetch": "^2.6.11",
-    "@types/vscode": "^1.87.0",
-    "@typescript-eslint/eslint-plugin": "^7.0.2",
-    "@typescript-eslint/parser": "^7.0.2",
-    "@vscode/test-electron": "^2.3.9",
-    "crypto-browserify": "^3.12.0",
-    "eslint": "^8.56.0",
-    "glob": "^8.1.0",
-    "husky": "^9.1.7",
-    "memfs": "^4.7.1",
-    "mocha": "^10.2.0",
-    "path-browserify": "^1.0.1",
-    "prettier": "^3.4.1",
-    "ts-loader": "^9.5.1",
-    "typescript": "^5.3.3",
-    "webpack": "^5.90.3",
-    "webpack-cli": "^5.1.4"
-  },
-  "dependencies": {
-    "@aws-crypto/sha256-universal": "^2.0.0",
-    "@fetsorn/isogit-lfs": "^0.5.3",
-    "diff3": "^0.0.4",
-    "isomorphic-git": "^1.25.3",
-    "node-fetch": "^2.7.0"
-  }
 }

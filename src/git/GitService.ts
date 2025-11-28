@@ -2781,7 +2781,11 @@ export class GitService {
                 .then((res) => (res as Response).status === 200)
                 .catch(() => false);
 
-            const apiIsOnline = await fetch("https://api.frontierrnd.com")
+            const apiEndpoint = vscode.workspace.getConfiguration("frontier").get<string>("apiEndpoint") || "https://api.frontierrnd.com/api/v1";
+            // Get base URL for health check (remove /api/v1 if present)
+            const baseUrl = apiEndpoint.replace(/\/api\/v1\/?$/, "");
+
+            const apiIsOnline = await fetch(baseUrl)
                 .then((res) => {
                     this.debugLog("apiIsOnline", { res });
                     return (res as Response).status === 200;
