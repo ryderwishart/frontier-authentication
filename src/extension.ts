@@ -390,10 +390,8 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!authenticationProvider.isAuthenticated) {
                 return undefined;
             }
-            // Construct WebSocket URL: replace protocol and remove /api/v1 path
             const url = new URL(API_ENDPOINT);
-            url.protocol = url.protocol.replace("http", "ws");
-            url.pathname = "/ws/asr";
+            url.pathname = "/api/v1/asr/transcribe";
             url.searchParams.set("source", "codex");
             return url.toString();
         },
