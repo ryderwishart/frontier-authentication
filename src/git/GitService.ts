@@ -45,6 +45,12 @@ export interface SyncResult {
     offline?: boolean;
     skippedDueToLock?: boolean;
     uploadedLfsFiles?: string[]; // List of LFS files that were uploaded during this sync
+    /**
+     * Optional diagnostics to help clients validate whether remote changes were considered.
+     * These are best-effort and primarily populated in the divergent-history conflict path.
+     */
+    allChangedFilePaths?: string[];
+    remoteChangedFilePaths?: string[];
 }
 
 export enum RemoteBranchStatus {
@@ -111,7 +117,7 @@ async function uploadBlobsToLFSBucket(
         url,
         auth,
         recovery,
-    }: UploadBlobsOptions & { recovery?: { dir: string; filepaths: string[] } },
+    }: UploadBlobsOptions & { recovery?: { dir: string; filepaths: string[]; }; },
     contents: Uint8Array[]
 ): Promise<LfsPointerInfo[]> {
     debugLog("[LFS Patch] Using patched uploadBlobs function");
@@ -525,10 +531,10 @@ export async function downloadLFSObject(
     }: {
         headers?: Record<string, string>;
         url: string;
-        auth?: { username?: string; password?: string; token?: string };
+        auth?: { username?: string; password?: string; token?: string; };
     },
-    object: { oid: string; size: number },
-    options?: { maxPointerDepth?: number }
+    object: { oid: string; size: number; },
+    options?: { maxPointerDepth?: number; }
 ): Promise<Uint8Array> {
     const authHeaders: Record<string, string> = {
         "User-Agent": "curl/7.54", // Helpful for certain servers [[memory:5628983]]
@@ -674,7 +680,7 @@ export class GitService {
      */
     private updateSyncProgress(
         phase: string,
-        event: { loaded?: number; total?: number; phase?: string }
+        event: { loaded?: number; total?: number; phase?: string; }
     ): void {
         const now = Date.now();
         const current = event.loaded || 0;
@@ -739,7 +745,7 @@ export class GitService {
      */
     private async reconcilePointersFilesystem(
         dir: string,
-        auth: { username: string; password: string }
+        auth: { username: string; password: string; }
     ): Promise<void> {
         await vscode.window.withProgress(
             {
@@ -784,7 +790,7 @@ export class GitService {
                             "[GitService] Stream-and-save mode: will skip bulk downloads; will still convert local blobs to pointers"
                         );
                     }
-                } catch {}
+                } catch { }
 
                 const status = await git.statusMatrix({ fs, dir });
                 const headOid = await git.resolveRef({ fs, dir, ref: "HEAD" });
@@ -804,7 +810,7 @@ export class GitService {
                 // Map of oid -> array of targets to write (deduplicates identical content)
                 const oidToTargets = new Map<
                     string,
-                    { filesAbs: string; filepath: string; size: number }[]
+                    { filesAbs: string; filepath: string; size: number; }[]
                 >();
 
                 for (let i = 0; i < totalFiles; i++) {
@@ -959,7 +965,7 @@ export class GitService {
                 const batchData = (await batchResp.json()) as LFSBatchResponse;
                 const actionByOid = new Map<
                     string,
-                    { href: string; header?: Record<string, string> }
+                    { href: string; header?: Record<string, string>; }
                 >();
                 for (const obj of batchData.objects ?? []) {
                     const dl = obj.actions?.download;
@@ -980,7 +986,7 @@ export class GitService {
                     });
 
                 const runHealWorker = async () => {
-                    for (;;) {
+                    for (; ;) {
                         const item = healQueue.shift();
                         if (!item) {
                             return;
@@ -1257,7 +1263,7 @@ export class GitService {
             onlineStatus: typeof navigator !== "undefined" ? (navigator as any).onLine : "Unknown",
             connectionTests: {} as Record<
                 string,
-                { status: string; responseTime?: number; httpStatus?: number; error?: string }
+                { status: string; responseTime?: number; httpStatus?: number; error?: string; }
             >,
         };
 
@@ -1300,8 +1306,8 @@ export class GitService {
      */
     private async safePush(
         dir: string,
-        auth: { username: string; password: string },
-        options?: { ref?: string; timeoutMs?: number }
+        auth: { username: string; password: string; },
+        options?: { ref?: string; timeoutMs?: number; }
     ): Promise<void> {
         const { ref, timeoutMs = 10 * 60 * 1000 } = options || {};
 
@@ -1414,8 +1420,8 @@ export class GitService {
     // Below is a simplified version. It commits if dirty, fetches remote changes, tries pulling (which will error on merge conflicts), and then either pushes or returns a list of files that differ.
     async syncChanges(
         dir: string,
-        auth: { username: string; password: string },
-        author: { name: string; email: string },
+        auth: { username: string; password: string; },
+        author: { name: string; email: string; },
         options?: {
             commitMessage?: string;
             onProgress?: (
@@ -1765,10 +1771,10 @@ export class GitService {
             const updatedMergeBaseStatusMatrix =
                 updatedMergeBaseCommits.length > 0
                     ? await git.statusMatrix({
-                          fs,
-                          dir,
-                          ref: updatedMergeBaseCommits[0],
-                      })
+                        fs,
+                        dir,
+                        ref: updatedMergeBaseCommits[0],
+                    })
                     : [];
 
             this.debugLog("updatedRemoteStatusMatrix:", updatedRemoteStatusMatrix);
@@ -1797,6 +1803,7 @@ export class GitService {
             const filesAddedOnRemote: string[] = [];
             const filesDeletedLocally: string[] = [];
             const filesDeletedOnRemote: string[] = [];
+            const filesAddedInBothBranches: string[] = [];
             const filesModifiedAndTreatedAsPotentialConflict: string[] = [];
 
             // Analyze each file's status across all references
@@ -1805,12 +1812,15 @@ export class GitService {
                 const remoteStatus = remoteStatusMap.get(filepath);
                 const mergeBaseStatus = mergeBaseStatusMap.get(filepath);
 
+                const localExists = !!localStatus && (localStatus as any)[0] === 1;
+                const remoteExists = !!remoteStatus && (remoteStatus as any)[0] === 1;
+                const baseExists = !!mergeBaseStatus && (mergeBaseStatus as any)[0] === 1;
+
                 // File exists in remote but not in local or merge base -> added on remote
                 if (
-                    remoteStatus &&
-                    (remoteStatus as any)[0] === 1 &&
-                    (!localStatus || (localStatus as any)[0] === 0) &&
-                    (!mergeBaseStatus || (mergeBaseStatus as any)[0] === 0)
+                    remoteExists &&
+                    !localExists &&
+                    !baseExists
                 ) {
                     filesAddedOnRemote.push(filepath);
                     continue;
@@ -1818,22 +1828,28 @@ export class GitService {
 
                 // File exists in local but not in remote or merge base -> added locally
                 if (
-                    localStatus &&
-                    (localStatus as any)[0] === 1 &&
-                    (!remoteStatus || (remoteStatus as any)[0] === 0) &&
-                    (!mergeBaseStatus || (mergeBaseStatus as any)[0] === 0)
+                    localExists &&
+                    !remoteExists &&
+                    !baseExists
                 ) {
                     filesAddedLocally.push(filepath);
                     continue;
                 }
 
+                // File exists in both local and remote but not in merge base -> added in both branches
+                // This can happen when both sides independently create the same path after diverging.
+                // We must include it in conflict candidates so client-side merges (e.g., `.codex`)
+                // can combine content instead of silently dropping one side.
+                if (localExists && remoteExists && !baseExists) {
+                    filesAddedInBothBranches.push(filepath);
+                    continue;
+                }
+
                 // File exists in merge base and local but not in remote -> deleted on remote
                 if (
-                    mergeBaseStatus &&
-                    (mergeBaseStatus as any)[0] === 1 &&
-                    localStatus &&
-                    (localStatus as any)[0] === 1 &&
-                    (!remoteStatus || (remoteStatus as any)[0] === 0)
+                    baseExists &&
+                    localExists &&
+                    !remoteExists
                 ) {
                     filesDeletedOnRemote.push(filepath);
                     continue;
@@ -1841,11 +1857,9 @@ export class GitService {
 
                 // File exists in merge base and remote but not in local -> deleted locally
                 if (
-                    mergeBaseStatus &&
-                    (mergeBaseStatus as any)[0] === 1 &&
-                    remoteStatus &&
-                    (remoteStatus as any)[0] === 1 &&
-                    (!localStatus || (localStatus as any)[0] === 0)
+                    baseExists &&
+                    remoteExists &&
+                    !localExists
                 ) {
                     filesDeletedLocally.push(filepath);
                     continue;
@@ -1853,12 +1867,9 @@ export class GitService {
 
                 // File exists in all three but has different content
                 if (
-                    localStatus &&
-                    (localStatus as any)[0] === 1 &&
-                    remoteStatus &&
-                    (remoteStatus as any)[0] === 1 &&
-                    mergeBaseStatus &&
-                    (mergeBaseStatus as any)[0] === 1
+                    localExists &&
+                    remoteExists &&
+                    baseExists
                 ) {
                     const localModified = (localStatus as any)[1] === 2; // workdir different from HEAD
                     const remoteModified = (remoteStatus as any)[1] === 2; // workdir different from HEAD
@@ -1875,6 +1886,7 @@ export class GitService {
             this.debugLog("Files deleted locally:", filesDeletedLocally);
             this.debugLog("Files added on remote:", filesAddedOnRemote);
             this.debugLog("Files deleted on remote:", filesDeletedOnRemote);
+            this.debugLog("Files added in both branches:", filesAddedInBothBranches);
             this.debugLog(
                 "Files modified and treated as potential conflict:",
                 filesModifiedAndTreatedAsPotentialConflict
@@ -1888,10 +1900,22 @@ export class GitService {
                     ...filesDeletedLocally,
                     ...filesAddedOnRemote,
                     ...filesDeletedOnRemote,
+                    ...filesAddedInBothBranches,
                 ]),
             ];
 
             this.debugLog("All changed files:", allChangedFilePaths);
+
+            // Subset: file paths where remote differs from the merge base and should be applied to local.
+            // NOTE: includes `filesAddedInBothBranches` because remote contains those paths.
+            const remoteChangedFilePaths = [
+                ...new Set([
+                    ...filesAddedOnRemote,
+                    ...filesDeletedOnRemote,
+                    ...filesModifiedAndTreatedAsPotentialConflict,
+                    ...filesAddedInBothBranches,
+                ]),
+            ];
 
             // 9. Get all files changed in either branch with enhanced conflict detection
             const conflicts = await Promise.all(
@@ -1902,11 +1926,20 @@ export class GitService {
                     let isNew = false;
                     let isDeleted = false;
 
-                    // More precise determination of file status
-                    const isAddedLocally = filesAddedLocally.includes(filepath);
-                    const isAddedRemotely = filesAddedOnRemote.includes(filepath);
-                    const isDeletedLocally = filesDeletedLocally.includes(filepath);
-                    const isDeletedRemotely = filesDeletedOnRemote.includes(filepath);
+                    // More precise determination of file status (commit existence vs merge base)
+                    // Note: statusMap values are [head, workdir, stage] for the selected ref.
+                    const localEntry = localStatusMap.get(filepath) as any;
+                    const remoteEntry = remoteStatusMap.get(filepath) as any;
+                    const baseEntry = mergeBaseStatusMap.get(filepath) as any;
+
+                    const localExists = !!localEntry && localEntry[0] === 1;
+                    const remoteExists = !!remoteEntry && remoteEntry[0] === 1;
+                    const baseExists = !!baseEntry && baseEntry[0] === 1;
+
+                    const isAddedLocally = localExists && !baseExists;
+                    const isAddedRemotely = remoteExists && !baseExists;
+                    const isDeletedLocally = baseExists && remoteExists && !localExists;
+                    const isDeletedRemotely = baseExists && localExists && !remoteExists;
 
                     // Determine if this is a new file (added on either side)
                     isNew = isAddedLocally || isAddedRemotely;
@@ -2047,7 +2080,13 @@ export class GitService {
             );
 
             this.debugLog(`Found ${conflicts.length} conflicts that need resolution`);
-            return { hadConflicts: true, conflicts, uploadedLfsFiles };
+            return {
+                hadConflicts: true,
+                conflicts,
+                uploadedLfsFiles,
+                allChangedFilePaths,
+                remoteChangedFilePaths,
+            };
         } catch (err) {
             // Enhanced error logging for sync operations
             console.error(`[GitService] Sync operation failed:`, {
@@ -2126,7 +2165,7 @@ export class GitService {
     /**
      * Check if the working copy has any changes
      */
-    async getWorkingCopyState(dir: string): Promise<{ isDirty: boolean; status: any[] }> {
+    async getWorkingCopyState(dir: string): Promise<{ isDirty: boolean; status: any[]; }> {
         const status = await git.statusMatrix({ fs, dir });
         this.debugLog(
             "Status before committing local changes:",
@@ -2145,8 +2184,8 @@ export class GitService {
      */
     async completeMerge(
         dir: string,
-        auth: { username: string; password: string },
-        author: { name: string; email: string },
+        auth: { username: string; password: string; },
+        author: { name: string; email: string; },
         resolvedFiles: Array<{
             filepath: string;
             resolution: "deleted" | "created" | "modified";
@@ -2323,7 +2362,7 @@ export class GitService {
      */
     async addAllWithLFS(
         dir: string,
-        auth: { username: string; password: string }
+        auth: { username: string; password: string; }
     ): Promise<string[]> {
         const status = await git.statusMatrix({ fs, dir });
         const uploadedLfsFiles: string[] = [];
@@ -2371,7 +2410,7 @@ export class GitService {
     async commit(
         dir: string,
         message: string,
-        author: { name: string; email: string }
+        author: { name: string; email: string; }
     ): Promise<string> {
         return git.commit({
             fs,
@@ -2391,7 +2430,7 @@ export class GitService {
     async clone(
         url: string,
         dir: string,
-        auth?: { username: string; password: string },
+        auth?: { username: string; password: string; },
         mediaStrategy?: "auto-download" | "stream-and-save" | "stream-only"
     ): Promise<void> {
         await vscode.window.withProgress(
@@ -2598,7 +2637,7 @@ export class GitService {
         }
     }
 
-    async getRemotes(dir: string): Promise<Array<{ remote: string; url: string }>> {
+    async getRemotes(dir: string): Promise<Array<{ remote: string; url: string; }>> {
         return git.listRemotes({ fs, dir });
     }
 
@@ -2636,7 +2675,7 @@ export class GitService {
 
     async push(
         dir: string,
-        auth: { username: string; password: string },
+        auth: { username: string; password: string; },
         options?: {}
     ): Promise<void> {
         await this.safePush(dir, auth, options);
@@ -2645,7 +2684,7 @@ export class GitService {
     private async ensureSingleLfsPointerHasMatchingFile(
         dir: string,
         filepath: string,
-        auth: { username: string; password: string }
+        auth: { username: string; password: string; }
     ): Promise<void> {
         const remoteUrl = await this.getRemoteUrl(dir);
         if (!remoteUrl) {
@@ -2751,7 +2790,7 @@ export class GitService {
     private async stageResolvedFileWithLFS(
         dir: string,
         filepath: string,
-        auth: { username: string; password: string }
+        auth: { username: string; password: string; }
     ): Promise<void> {
         // If HEAD blob is a pointer and this is a pointers path, ensure files dir has bytes; no smudging into pointer path
         const headPointer = await this.readHeadPointerInfo(dir, filepath);
@@ -2925,7 +2964,7 @@ export class GitService {
     }
 
     /** Parse LFS pointer text into { oid, size } */
-    private parseLfsPointer(pointerText: string): { oid: string; size: number } | null {
+    private parseLfsPointer(pointerText: string): { oid: string; size: number; } | null {
         try {
             // Strip possible UTF-8 BOM and normalize
             if (pointerText && pointerText.charCodeAt(0) === 0xfeff) {
@@ -2952,7 +2991,7 @@ export class GitService {
     private async buildWorktreePointerInfo(
         dir: string,
         filepath: string
-    ): Promise<{ oid: string; size: number } | null> {
+    ): Promise<{ oid: string; size: number; } | null> {
         try {
             const absPath = path.join(dir, filepath);
             const bytes = await fs.promises.readFile(absPath);
@@ -2976,7 +3015,7 @@ export class GitService {
     private async readHeadPointerInfo(
         dir: string,
         filepath: string
-    ): Promise<{ oid: string; size: number } | null> {
+    ): Promise<{ oid: string; size: number; } | null> {
         try {
             const headOid = await git.resolveRef({ fs, dir, ref: "HEAD" });
             const { blob } = await git.readBlob({ fs, dir, oid: headOid, filepath });
@@ -3028,7 +3067,7 @@ export class GitService {
 
     public static parseGitUrl(url: string): {
         cleanUrl: string;
-        auth?: { username: string; password: string };
+        auth?: { username: string; password: string; };
     } {
         try {
             const urlObj = new URL(url);
@@ -3062,7 +3101,7 @@ export class GitService {
     private async addWithLFS(
         dir: string,
         filepath: string,
-        authFromCaller?: { username: string; password: string }
+        authFromCaller?: { username: string; password: string; }
     ): Promise<boolean> {
         // If not LFS-tracked, do normal add
         if (!(await this.isLfsTracked(dir, filepath))) {
@@ -3161,7 +3200,7 @@ export class GitService {
                 }
                 return false; // exit early if the file is already an LFS pointer (no upload needed)
             }
-        } catch {}
+        } catch { }
         // Upload to LFS via our helper (handles batch, upload, verify and x-http-method)
         this.debugLog(`[GitService] Uploading ${filepath} to LFS`);
         const pointerInfos = await uploadBlobsToLFSBucket(

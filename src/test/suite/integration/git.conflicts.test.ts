@@ -171,6 +171,112 @@ suite("Integration: GitService Merge Conflicts", () => {
         }
     });
 
+    test("file added in both branches (missing from merge base) is surfaced as a conflict", async () => {
+        // Base commit WITHOUT the file
+        await fs.promises.writeFile(path.join(workspaceDir, "README.md"), "base", "utf8");
+        await git.add({ fs, dir: workspaceDir, filepath: "README.md" });
+        const baseOid = await git.commit({
+            fs,
+            dir: workspaceDir,
+            message: "Base commit",
+            author: { name: "Test", email: "test@example.com" },
+        });
+
+        // Add remote
+        await git.addRemote({
+            fs,
+            dir: workspaceDir,
+            remote: "origin",
+            url: "https://example.com/repo.git",
+        });
+        await git.writeRef({
+            fs,
+            dir: workspaceDir,
+            ref: "refs/remotes/origin/main",
+            value: baseOid,
+            force: true,
+        });
+
+        const conflictPath = "files/target/TheChosen_201_en-1.codex";
+
+        // Local branch adds the file
+        await fs.promises.mkdir(path.join(workspaceDir, "files/target"), { recursive: true });
+        await fs.promises.writeFile(path.join(workspaceDir, conflictPath), "local-codex", "utf8");
+        await git.add({ fs, dir: workspaceDir, filepath: conflictPath });
+        const localOid = await git.commit({
+            fs,
+            dir: workspaceDir,
+            message: "Local adds codex",
+            author: { name: "Local", email: "local@example.com" },
+        });
+
+        // Create a remote commit from the base that adds the same path with different content
+        await git.writeRef({
+            fs,
+            dir: workspaceDir,
+            ref: "refs/heads/main",
+            value: baseOid,
+            force: true,
+        });
+        await git.checkout({ fs, dir: workspaceDir, ref: "main", force: true });
+
+        await fs.promises.mkdir(path.join(workspaceDir, "files/target"), { recursive: true });
+        await fs.promises.writeFile(path.join(workspaceDir, conflictPath), "remote-codex", "utf8");
+        await git.add({ fs, dir: workspaceDir, filepath: conflictPath });
+        const remoteOid = await git.commit({
+            fs,
+            dir: workspaceDir,
+            message: "Remote adds codex",
+            author: { name: "Remote", email: "remote@example.com" },
+        });
+
+        await git.writeRef({
+            fs,
+            dir: workspaceDir,
+            ref: "refs/remotes/origin/main",
+            value: remoteOid,
+            force: true,
+        });
+
+        // Reset working branch to local commit for the sync operation
+        await git.writeRef({
+            fs,
+            dir: workspaceDir,
+            ref: "refs/heads/main",
+            value: localOid,
+            force: true,
+        });
+        await git.checkout({ fs, dir: workspaceDir, ref: "main", force: true });
+
+        // Mock fetch to no-op (we already set refs/remotes/origin/main)
+        const originalFetch = git.fetch;
+        (git as any).fetch = async () => ({});
+
+        try {
+            const result = await gitService.syncChanges(
+                workspaceDir,
+                { username: "oauth2", password: "token" },
+                { name: "Test", email: "test@example.com" }
+            );
+
+            assert.strictEqual(result.hadConflicts, true, "Should detect conflicts");
+            assert.ok(result.conflicts, "Should have conflicts array");
+
+            const codexConflict = result.conflicts!.find((c) => c.filepath === conflictPath);
+            assert.ok(codexConflict, "Should include the added-in-both `.codex` path");
+            assert.strictEqual(codexConflict!.isNew, true, "Should be marked as new (added)");
+            assert.ok(codexConflict!.ours.length > 0, "Should include local content");
+            assert.ok(codexConflict!.theirs.length > 0, "Should include remote content");
+            assert.notStrictEqual(
+                codexConflict!.ours,
+                codexConflict!.theirs,
+                "Local and remote contents should differ"
+            );
+        } finally {
+            (git as any).fetch = originalFetch;
+        }
+    });
+
     test("conflict in LFS-tracked file", async () => {
         // Setup: Create .gitattributes for LFS tracking
         await fs.promises.writeFile(

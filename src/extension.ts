@@ -118,6 +118,8 @@ export interface FrontierAPI {
         hasConflicts: boolean;
         conflicts?: Array<ConflictedFile>;
         offline?: boolean;
+        allChangedFilePaths?: string[];
+        remoteChangedFilePaths?: string[];
     }>;
     completeMerge: (
         resolvedFiles: ResolvedFile[],

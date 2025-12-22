@@ -382,7 +382,15 @@ export class SCMManager {
     async syncChanges(
         options?: { commitMessage?: string },
         isManualSync: boolean = false
-    ): Promise<{ hasConflicts: boolean; conflicts?: ConflictedFile[] }> {
+    ): Promise<{
+        hasConflicts: boolean;
+        conflicts?: ConflictedFile[];
+        /**
+         * Optional diagnostics to help clients validate remote changes vs merged conflicts.
+         */
+        allChangedFilePaths?: string[];
+        remoteChangedFilePaths?: string[];
+    }> {
         // Check extension version compatibility with project metadata before syncing
         const canSync = await checkMetadataVersionsForSync(this.context, isManualSync);
         if (!canSync) {
@@ -588,6 +596,8 @@ export class SCMManager {
                 return {
                     hasConflicts: true,
                     conflicts: syncResult.conflicts,
+                    allChangedFilePaths: syncResult.allChangedFilePaths,
+                    remoteChangedFilePaths: syncResult.remoteChangedFilePaths,
                 };
             }
 
