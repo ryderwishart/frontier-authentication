@@ -8,6 +8,7 @@ import http from "isomorphic-git/http/node";
 import { PublishWorkspaceOptions } from "../commands/scmCommands";
 import { StateManager } from "../state";
 import { ResolvedFile } from "../extension";
+import { MediaFilesStrategy } from "../types/state";
 import { checkMetadataVersionsForSync } from "../utils/extensionVersionChecker";
 import {
     compareVersions,
@@ -69,6 +70,41 @@ export class SCMManager {
         const path = workspaceFolder.uri.fsPath;
         // console.log("Using workspace path:", path);
         return path;
+    }
+
+    private async readLocalMediaStrategy(workspacePath: string): Promise<MediaFilesStrategy | undefined> {
+        try {
+            const settingsPath = path.join(workspacePath, ".project", "localProjectSettings.json");
+            const content = await fs.promises.readFile(settingsPath, "utf8");
+            const settings = JSON.parse(content);
+            return settings.currentMediaFilesStrategy ?? settings.mediaFilesStrategy;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async readLocalLfsSourceUrl(workspacePath: string): Promise<string | undefined> {
+        try {
+            const settingsPath = path.join(workspacePath, ".project", "localProjectSettings.json");
+            const content = await fs.promises.readFile(settingsPath, "utf8");
+            const settings = JSON.parse(content);
+            return settings.lfsSourceRemoteUrl;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async clearLocalLfsSourceUrl(workspacePath: string): Promise<void> {
+        try {
+            const settingsPath = path.join(workspacePath, ".project", "localProjectSettings.json");
+            const content = await fs.promises.readFile(settingsPath, "utf8");
+            const settings = JSON.parse(content);
+            if (!settings.lfsSourceRemoteUrl) return;
+            delete settings.lfsSourceRemoteUrl;
+            await fs.promises.writeFile(settingsPath, JSON.stringify(settings, null, 4));
+        } catch {
+            // ignore
+        }
     }
 
     private registerCommands(): void {
@@ -761,12 +797,46 @@ export class SCMManager {
                 throw new Error("GitLab token not available");
             }
 
+            // Sync media strategy from local project settings (if present)
+            const localStrategy = await this.readLocalMediaStrategy(workspacePath);
+            if (localStrategy) {
+                await this.stateManager.setRepoStrategy(workspacePath, localStrategy);
+            }
+
+            // If stream-only/stream-and-save, temporarily download LFS bytes before publishing
+            let restoreStrategy: MediaFilesStrategy | undefined;
+            try {
+                restoreStrategy = await this.gitService.prepareLfsBytesForPublish(workspacePath, {
+                    username: "oauth2",
+                    password: gitlabToken,
+                });
+            } catch (e) {
+                throw new Error(
+                    "Cannot publish in stream-only mode: LFS objects are missing. Switch to auto-download and retry."
+                );
+            }
+
+            // If we have a source LFS remote URL, attempt to hydrate bytes before staging
+            const sourceLfsUrl = await this.readLocalLfsSourceUrl(workspacePath);
+            if (sourceLfsUrl) {
+                const lfsBaseUrl = sourceLfsUrl.endsWith(".git") ? sourceLfsUrl : `${sourceLfsUrl}.git`;
+                await this.gitService.downloadLfsObjectsForPublish(workspacePath, {
+                    username: "oauth2",
+                    password: gitlabToken,
+                }, lfsBaseUrl);
+            }
+
             // Add all files (LFS-aware)
             console.log("Adding files to git (LFS-aware)...");
             await this.gitService.addAllWithLFS(workspacePath, {
                 username: "oauth2",
                 password: gitlabToken,
             });
+
+            // Restore original media strategy after staging
+            if (restoreStrategy) {
+                await this.gitService.restoreMediaStrategyAfterPublish(workspacePath, restoreStrategy);
+            }
 
             // Create initial commit
             console.log("Creating initial commit...");
@@ -801,6 +871,9 @@ export class SCMManager {
             // Initialize SCM
             console.log("Initializing SCM...");
             await this.initializeSCM(workspacePath);
+
+            // Clear LFS source URL after successful publish
+            await this.clearLocalLfsSourceUrl(workspacePath);
 
             vscode.window.showInformationMessage(
                 `Workspace published successfully to ${project.url}`

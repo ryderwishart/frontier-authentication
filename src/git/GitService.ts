@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 
 import { StateManager, HEARTBEAT_INTERVAL } from "../state";
+import { MediaFilesStrategy } from "../types/state";
 import {
     UploadBlobsOptions,
     LFSBatchRequest,
@@ -2405,6 +2406,116 @@ export class GitService {
     }
 
     /**
+     * Prepare LFS bytes for publish when stream-only or stream-and-save is active.
+     * Temporarily switches to auto-download to allow LFS downloads, then returns the original strategy.
+     */
+    public async prepareLfsBytesForPublish(
+        dir: string,
+        auth: { username: string; password: string; }
+    ): Promise<MediaFilesStrategy | undefined> {
+        const originalStrategy = this.stateManager.getRepoStrategy(dir);
+        if (originalStrategy !== "stream-only" && originalStrategy !== "stream-and-save") {
+            return undefined;
+        }
+
+        await this.stateManager.setRepoStrategy(dir, "auto-download");
+        try {
+            await this.reconcilePointersFilesystem(dir, auth);
+        } catch (error) {
+            await this.stateManager.setRepoStrategy(dir, originalStrategy);
+            throw error;
+        }
+
+        return originalStrategy;
+    }
+
+    /**
+     * Restore the original media strategy after publish.
+     * For stream-only/stream-and-save, repopulate files with pointers.
+     */
+    public async restoreMediaStrategyAfterPublish(
+        dir: string,
+        originalStrategy?: MediaFilesStrategy
+    ): Promise<void> {
+        if (!originalStrategy) return;
+
+        await this.stateManager.setRepoStrategy(dir, originalStrategy);
+        if (originalStrategy === "stream-only" || originalStrategy === "stream-and-save") {
+            await this.populateFilesWithPointers(dir);
+        }
+    }
+
+    /**
+     * Download LFS objects for pointers using a provided LFS base URL.
+     * This is used during publish when the new repo lacks LFS objects
+     * but we can fetch bytes from the source repo's LFS endpoint.
+     */
+    public async downloadLfsObjectsForPublish(
+        dir: string,
+        auth: { username: string; password: string; },
+        lfsBaseUrl: string
+    ): Promise<number> {
+        try {
+            const pointersDir = path.join(dir, ".project", "attachments", "pointers");
+            if (!fs.existsSync(pointersDir)) {
+                return 0;
+            }
+
+            const pointerFiles = await this.findAllFilesRecursively(pointersDir);
+            let downloadedCount = 0;
+
+            for (const pointerFilePath of pointerFiles) {
+                try {
+                    const relativePath = path.relative(pointersDir, pointerFilePath);
+                    const filesAbs = path.join(
+                        dir,
+                        ".project",
+                        "attachments",
+                        "files",
+                        relativePath
+                    );
+
+                    // If files/ already has real bytes, skip
+                    let needsDownload = true;
+                    try {
+                        const fileBuf = await fs.promises.readFile(filesAbs);
+                        const maybePointer = this.parseLfsPointer(fileBuf.toString("utf8"));
+                        if (!maybePointer) {
+                            needsDownload = false;
+                        }
+                    } catch {
+                        // missing file -> download
+                    }
+
+                    if (!needsDownload) continue;
+
+                    const pointerText = await fs.promises.readFile(pointerFilePath, "utf8");
+                    const pointer = this.parseLfsPointer(pointerText);
+                    if (!pointer) {
+                        continue;
+                    }
+
+                    const bytes = await downloadLFSObject(
+                        { url: lfsBaseUrl, headers: {}, auth },
+                        { oid: pointer.oid, size: pointer.size }
+                    );
+
+                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                    await fs.promises.writeFile(filesAbs, bytes);
+                    downloadedCount++;
+                } catch (e) {
+                    console.warn("[GitService] Failed to download LFS bytes for publish:", e);
+                }
+            }
+
+            return downloadedCount;
+        } catch (e) {
+            console.warn("[GitService] downloadLfsObjectsForPublish failed:", e);
+            return 0;
+        }
+    }
+
+    /**
      * Create a commit with the given message
      */
     async commit(
@@ -2762,6 +2873,31 @@ export class GitService {
                                     return;
                                 }
                             }
+                            // If not in files/, try to download from source repo (swap/migration scenario)
+                            const sourceUrl = await this.readLocalLfsSourceUrl(dir);
+                            if (sourceUrl) {
+                                const sourceLfsBaseUrl = sourceUrl.endsWith(".git")
+                                    ? sourceUrl
+                                    : `${sourceUrl}.git`;
+                                const sourceBytes = await downloadLFSObject(
+                                    { url: sourceLfsBaseUrl, headers: {}, auth: effectiveAuth },
+                                    { oid: headPointer.oid, size: headPointer.size }
+                                );
+                                await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                                await fs.promises.writeFile(filesAbs, sourceBytes);
+                                await uploadBlobsToLFSBucket(
+                                    {
+                                        url: lfsBaseUrl,
+                                        headers: {},
+                                        auth: effectiveAuth,
+                                        recovery: { dir, filepaths: [filepath] },
+                                    },
+                                    [sourceBytes]
+                                );
+                                await attemptDownload();
+                                this.stateManager.incrementMetric("lfsHealSucceeded");
+                                return;
+                            }
                             vscode.window.showWarningMessage(
                                 `Missing LFS content for ${filepath}. Ask the original author to re-upload the file to heal the pointer.`
                             );
@@ -2783,6 +2919,17 @@ export class GitService {
             }
         } catch (err) {
             console.warn(`[GitService] Failed to download LFS object for ${filepath}:`, err);
+        }
+    }
+
+    private async readLocalLfsSourceUrl(dir: string): Promise<string | undefined> {
+        try {
+            const settingsPath = path.join(dir, ".project", "localProjectSettings.json");
+            const content = await fs.promises.readFile(settingsPath, "utf8");
+            const settings = JSON.parse(content);
+            return settings.lfsSourceRemoteUrl;
+        } catch {
+            return undefined;
         }
     }
 
@@ -3166,8 +3313,55 @@ export class GitService {
                 await git.add({ fs, dir, filepath });
 
                 if (this.isPointerPath(filepath)) {
-                    // Ensure parallel files directory has the real bytes; download if missing
+                    // If files dir has real bytes, attempt to upload so the new repo has LFS objects
                     const absolutePathToBlobFill = this.getFilesPathForPointer(dir, filepath);
+                    let blobBytes: Buffer | undefined;
+                    try {
+                        blobBytes = await fs.promises.readFile(absolutePathToBlobFill);
+                    } catch {
+                        blobBytes = undefined;
+                    }
+
+                    if (blobBytes && blobBytes.length > 0) {
+                        // If files/ contains another pointer stub, skip upload
+                        const maybePointer = this.parseLfsPointer(blobBytes.toString("utf8"));
+                        if (!maybePointer) {
+                            try {
+                                // Verify bytes match the pointer OID/size before uploading
+                                const buildPointerInfo = (lfs as any).buildPointerInfo;
+                                const info = buildPointerInfo ? await buildPointerInfo(blobBytes) : null;
+                                const oid = String((info as any)?.oid ?? "");
+                                const size = Number((info as any)?.size ?? 0);
+
+                                if (oid && size && (oid !== existingPointer.oid || size !== existingPointer.size)) {
+                                    console.warn(
+                                        `[GitService] Skipping LFS upload for ${filepath}: bytes do not match pointer`,
+                                        { pointer: existingPointer, computed: { oid, size } }
+                                    );
+                                } else {
+                                    await uploadBlobsToLFSBucket(
+                                        {
+                                            url: lfsBaseUrl,
+                                            headers: {},
+                                            auth: effectiveAuth,
+                                            recovery: { dir, filepaths: [filepath] },
+                                        },
+                                        [blobBytes]
+                                    );
+                                    this.debugLog(
+                                        `[GitService] Uploaded LFS bytes for existing pointer ${filepath}`
+                                    );
+                                }
+                            } catch (e) {
+                                console.warn(
+                                    `[GitService] Failed to upload LFS bytes for existing pointer ${filepath}:`,
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    // Ensure parallel files directory has the real bytes; download if missing
                     await fs.promises.mkdir(path.dirname(absolutePathToBlobFill), {
                         recursive: true,
                     });

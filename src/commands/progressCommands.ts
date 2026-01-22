@@ -205,25 +205,38 @@ export function registerProgressCommands(
         )
     );
 
-    // Get aggregated progress
+    // Get aggregated progress (returns safe fallback on failure instead of bubbling)
     context.subscriptions.push(
         vscode.commands.registerCommand("frontier.getAggregatedProgress", async () => {
+            const fallback = {
+                projectCount: 0,
+                activeProjectCount: 0,
+                totalCompletionPercentage: 0,
+                projectSummaries: [] as Array<{
+                    projectId: string;
+                    projectName: string;
+                    completionPercentage: number;
+                    lastActivity: string;
+                    stage: string;
+                }>,
+            };
+
             try {
                 if (!authProvider.isAuthenticated) {
-                    throw new Error("You must be logged in to retrieve aggregated progress");
+                    return fallback;
                 }
 
                 // Get authenticated session
                 const sessions = await authProvider.getSessions();
                 const session = sessions[0];
                 if (!session) {
-                    throw new Error("Authentication session expired");
+                    return fallback;
                 }
 
                 // Get API endpoint from context
                 const apiEndpoint = context.globalState.get<string>("frontierApiEndpoint");
                 if (!apiEndpoint) {
-                    throw new Error("API endpoint is not configured");
+                    return fallback;
                 }
 
                 // GET from API endpoint
@@ -235,17 +248,24 @@ export function registerProgressCommands(
                 });
 
                 if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(
-                        `Failed to get aggregated progress: ${errorData.detail || response.statusText}`
+                    let detail: string | undefined;
+                    try {
+                        const errorData = await response.json();
+                        detail = errorData?.detail;
+                    } catch {
+                        // ignore parse error
+                    }
+                    console.warn(
+                        "Aggregated progress request failed:",
+                        detail || response.statusText
                     );
+                    return fallback;
                 }
 
                 return await response.json();
             } catch (error) {
-                console.error("Error getting aggregated progress:", error);
-                // Don't swallow the error - let it bubble up to the dashboard
-                throw error;
+                console.warn("Error getting aggregated progress:", error);
+                return fallback;
             }
         })
     );
