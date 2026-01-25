@@ -1,5 +1,13 @@
 import * as vscode from "vscode";
-import { MetadataManager } from "./metadataManager";
+
+/**
+ * Extension version checker for frontier-authentication.
+ * 
+ * DESIGN: This extension delegates all metadata.json writes to codex-editor
+ * via commands. This implements the "single writer" principle to prevent
+ * conflicts and the issues that were causing metadata.json to be deleted.
+ */
+
 // Lightweight version comparator to avoid external semver dependency
 export function compareVersions(a: string, b: string): number {
     const normalize = (v: string) => v.trim().replace(/^v/i, "");
@@ -21,25 +29,6 @@ const debug = (message: string) => {
     if (DEBUG_MODE) {
         console.log(`[ExtensionVersionChecker] ${message}`);
     }
-};
-
-interface ProjectMetadata {
-    meta?: {
-        requiredExtensions?: {
-            codexEditor?: string;
-            frontierAuthentication?: string;
-        };
-        [key: string]: unknown;
-    };
-    [key: string]: unknown;
-}
-
-type MetaSection = {
-    requiredExtensions?: {
-        codexEditor?: string;
-        frontierAuthentication?: string;
-    };
-    [key: string]: unknown;
 };
 
 export interface ExtensionVersionInfo {
@@ -80,6 +69,69 @@ interface MetadataVersionCheckResult {
     outdatedExtensions?: ExtensionVersionInfo[];
 }
 
+/**
+ * Read extension versions from metadata.json via codex-editor command
+ */
+async function getExtensionVersionsViaCommand(): Promise<{
+    success: boolean;
+    versions?: { codexEditor?: string; frontierAuthentication?: string };
+    error?: string;
+}> {
+    try {
+        // Check if codex-editor is available
+        const codexExtension = vscode.extensions.getExtension("project-accelerate.codex-editor-extension");
+        if (!codexExtension) {
+            return { success: false, error: "Codex Editor extension not available" };
+        }
+
+        // Ensure it's activated
+        if (!codexExtension.isActive) {
+            await codexExtension.activate();
+        }
+
+        // Call the command
+        const result = await vscode.commands.executeCommand<{
+            success: boolean;
+            versions?: { codexEditor?: string; frontierAuthentication?: string };
+            error?: string;
+        }>("codex-editor.getMetadataExtensionVersions");
+
+        return result || { success: false, error: "No response from command" };
+    } catch (error) {
+        return { success: false, error: `Command failed: ${(error as Error).message}` };
+    }
+}
+
+/**
+ * Update extension versions in metadata.json via codex-editor command
+ */
+async function updateExtensionVersionsViaCommand(
+    versions: { codexEditor?: string; frontierAuthentication?: string }
+): Promise<{ success: boolean; error?: string }> {
+    try {
+        // Check if codex-editor is available
+        const codexExtension = vscode.extensions.getExtension("project-accelerate.codex-editor-extension");
+        if (!codexExtension) {
+            return { success: false, error: "Codex Editor extension not available" };
+        }
+
+        // Ensure it's activated
+        if (!codexExtension.isActive) {
+            await codexExtension.activate();
+        }
+
+        // Call the command
+        const result = await vscode.commands.executeCommand<{ success: boolean; error?: string }>(
+            "codex-editor.updateMetadataExtensionVersions",
+            versions
+        );
+
+        return result || { success: false, error: "No response from command" };
+    } catch (error) {
+        return { success: false, error: `Command failed: ${(error as Error).message}` };
+    }
+}
+
 export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionCheckResult> {
     try {
         debug("[MetadataVersionChecker] ═══ METADATA VERSION CHECK ═══");
@@ -113,8 +165,8 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
             };
         }
 
-        // Use MetadataManager to safely read current versions
-        const currentVersionsResult = await MetadataManager.getExtensionVersions(workspaceFolder.uri);
+        // Read current versions via codex-editor command
+        const currentVersionsResult = await getExtensionVersionsViaCommand();
         if (!currentVersionsResult.success) {
             console.warn("[MetadataVersionChecker] ❌ Could not read metadata.json:", currentVersionsResult.error);
             return { canSync: false, metadataUpdated: false, reason: "Could not read metadata file" };
@@ -184,9 +236,9 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
             }
         }
 
-        // Safely update metadata if needed
+        // Update metadata via codex-editor command if needed
         if (needsUpdate) {
-            const updateResult = await MetadataManager.updateExtensionVersions(workspaceFolder.uri, versionsToUpdate);
+            const updateResult = await updateExtensionVersionsViaCommand(versionsToUpdate);
             if (!updateResult.success) {
                 console.error("[MetadataVersionChecker] ❌ Failed to update metadata:", updateResult.error);
                 return {
@@ -227,8 +279,6 @@ export async function checkAndUpdateMetadataVersions(): Promise<MetadataVersionC
         debug("[MetadataVersionChecker] ═══ END METADATA VERSION CHECK ═══\n");
     }
 }
-
-// saveMetadata function removed - now using MetadataManager for thread-safe operations
 
 function shouldShowVersionModal(context: vscode.ExtensionContext, isManualSync: boolean): boolean {
     if (isManualSync) {
@@ -366,8 +416,6 @@ export async function checkMetadataVersionsForSync(
 
 export function registerVersionCheckCommands(context: vscode.ExtensionContext): void {
     // Generic check command that other extensions (e.g., Codex) can call
-    // to enforce the same blocking modal used for sync before performing
-    // media operations (download/stream) or other actions.
     vscode.commands.registerCommand(
         "frontier.checkMetadataVersionsForSync",
         async (options?: { isManualSync?: boolean }): Promise<boolean> => {
@@ -383,30 +431,22 @@ export function registerVersionCheckCommands(context: vscode.ExtensionContext): 
     );
 
     // Lightweight command to check remote metadata.json for requiredExtensions
-    // and report whether the local installed extensions are behind remote.
-    // Returns boolean: true if mismatch detected (block), false if OK
     vscode.commands.registerCommand(
         "frontier.checkRemoteMetadataVersionMismatch",
         async (): Promise<boolean> => {
             try {
-                const { SCMManager } = await import("../scm/SCMManager");
-                // Create a temporary SCMManager-like instance to reuse logic
                 const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                 if (!workspacePath) return true;
 
-                // Mimic the remote metadata fetch/check from SCMManager.syncChanges
+                // Mimic the remote metadata fetch/check
                 const { getInstalledExtensionVersions } = await import("./extensionVersionChecker");
                 const { compareVersions } = await import("./extensionVersionChecker");
-                const { GitService } = await import("../git/GitService");
-                const state = (await import("../state")).StateManager.getInstance();
-                const gitService = new GitService(state);
 
                 // Fetch remote refs and read remote metadata.json (best effort)
                 try {
                     const git = await import("isomorphic-git");
                     const fs = (await import("fs")).promises as any;
                     const http = (await import("isomorphic-git/http/node")).default;
-                    // We don't have direct token access here; rely on default remote credentials if embedded
                     await git.fetch({ fs, http, dir: workspacePath } as any);
                 } catch {}
 
@@ -443,5 +483,3 @@ export function registerVersionCheckCommands(context: vscode.ExtensionContext): 
         }
     );
 }
-
-
