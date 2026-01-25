@@ -327,6 +327,15 @@ export function registerCommands(
             }
         }),
 
+        // Handle connectivity restored - revalidate session
+        vscode.commands.registerCommand("frontier.onConnectivityRestored", async () => {
+            try {
+                await authProvider.revalidateSessionOnConnectivityRestored();
+            } catch (error) {
+                console.error("Error handling connectivity restored:", error);
+            }
+        }),
+
         // Add command to set API endpoint
         vscode.commands.registerCommand("frontier.setApiEndpoint", async () => {
             const config = vscode.workspace.getConfiguration("frontier");

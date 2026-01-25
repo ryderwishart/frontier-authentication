@@ -50,6 +50,13 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
 
     private readonly stateManager: StateManager;
 
+    // Connectivity-based revalidation tracking
+    private _needsConnectivityRevalidation = false;
+    private _connectivityCheckInterval: NodeJS.Timeout | null = null;
+    private _lastRevalidationTime = 0;
+    private static readonly REVALIDATION_DEBOUNCE_MS = 5000; // 5 seconds
+    private static readonly CONNECTIVITY_CHECK_INTERVAL_MS = 30000; // 30 seconds
+
     constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly apiEndpoint: string,
@@ -73,33 +80,100 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         }
 
         this.initializePromise = (async () => {
+            let sessionDataStr: string | undefined;
+            let sessionData: FrontierSessionData | undefined;
+            let parseError = false;
+
             try {
-                const sessionDataStr = await this.context.secrets.get(
+                sessionDataStr = await this.context.secrets.get(
                     FrontierAuthProvider.SESSION_SECRET_KEY
                 );
 
                 if (sessionDataStr) {
-                    const sessionData: FrontierSessionData = JSON.parse(sessionDataStr);
-
-                    // Get user info for proper display name
-                    let userLabel = "Frontier User";
-                    let userInfo = undefined;
                     try {
-                        const validity = await this.checkTokenValidity(sessionData.accessToken);
-                        if (validity.isValid && validity.userInfo) {
-                            userLabel = this.getUserDisplayName(validity.userInfo);
-                            // Cache user info for offline access
-                            userInfo = {
-                                email: validity.userInfo.email || "",
-                                username: validity.userInfo.username || userLabel,
-                                name: validity.userInfo.name,
-                            };
-                        }
-                    } catch (error) {
-                        console.warn("Could not fetch user info during initialization:", error);
+                        sessionData = JSON.parse(sessionDataStr);
+                    } catch (jsonError) {
+                        // Corrupted session data - this IS a reason to clear the session
+                        console.error("Failed to parse stored session data (corrupted):", jsonError);
+                        parseError = true;
                     }
+                }
+            } catch (secretsError) {
+                // Error accessing secrets storage - this is NOT a reason to clear the session
+                // The secrets might just be temporarily unavailable during extension reload
+                console.error("Failed to access secrets storage:", secretsError);
+                // Continue without session - don't clear anything
+            }
 
-                    // Optimistically load the session
+            // If we had a parse error, clear the corrupted data
+            if (parseError) {
+                try {
+                    await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
+                    console.log("Cleared corrupted session data");
+                } catch (deleteError) {
+                    console.error("Failed to delete corrupted session data:", deleteError);
+                }
+                this._sessions = [];
+                await this.stateManager.updateAuthState({
+                    isAuthenticated: false,
+                    gitlabCredentials: undefined,
+                    gitlabInfo: undefined,
+                    userInfo: undefined,
+                });
+                this._initialized = true;
+                return;
+            }
+
+            if (sessionData) {
+                // We have valid session data - restore the session optimistically
+                // Network errors during validation should NOT clear the session
+                let userLabel = "Frontier User";
+                let userInfo = undefined;
+                let shouldClearSession = false;
+                let hadNetworkError = false;
+
+                try {
+                    const validity = await this.checkTokenValidity(sessionData.accessToken);
+                    if (validity.isValid && validity.userInfo) {
+                        userLabel = this.getUserDisplayName(validity.userInfo);
+                        // Cache user info for offline access
+                        userInfo = {
+                            email: validity.userInfo.email || "",
+                            username: validity.userInfo.username || userLabel,
+                            name: validity.userInfo.name,
+                        };
+                    } else if (validity.isInvalidAuth) {
+                        // Server explicitly rejected the token (401/403) - clear session
+                        console.log("Token explicitly rejected by server, will clear session");
+                        shouldClearSession = true;
+                    } else if (validity.isNetworkError) {
+                        // Network error - mark for revalidation when connectivity is restored
+                        hadNetworkError = true;
+                    }
+                } catch (error) {
+                    // Network or other transient error - keep the session for offline access
+                    console.warn("Could not validate token during initialization (keeping session):", error);
+                    hadNetworkError = true;
+                }
+
+                if (shouldClearSession) {
+                    // Token was explicitly invalidated by server - clear everything
+                    try {
+                        await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
+                    } catch (deleteError) {
+                        console.error("Failed to delete invalid session:", deleteError);
+                    }
+                    this._sessions = [];
+                    await this.stateManager.updateAuthState({
+                        isAuthenticated: false,
+                        gitlabCredentials: undefined,
+                        gitlabInfo: undefined,
+                        userInfo: undefined,
+                    });
+                    // Note: No need to fire session change events here since no sessions
+                    // were added yet during this initialization flow
+                } else {
+                    // Restore the session (even if we couldn't validate - for offline support)
                     this._sessions = [
                         {
                             id: "frontier-session",
@@ -145,35 +219,33 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
                         );
                     }, 2000); // Delay to ensure VS Code has processed the session
 
-                    // Cache user info for existing authenticated users who don't have it yet
+                    // Fallback: cache user info if it wasn't cached during init (e.g., network was down)
+                    // This has an early-return if userInfo is already cached, so it's essentially free
                     setTimeout(() => {
                         this.fetchAndCacheUserInfo().catch((error) => {
                             console.error("Error during user info caching:", error);
                         });
-                    }, 3000); // Delay to ensure other initialization is complete
-                } else {
-                    // No stored session, ensure state is clean
-                    await this.stateManager.updateAuthState({
-                        isAuthenticated: false,
-                        gitlabCredentials: undefined,
-                        gitlabInfo: undefined,
-                    });
+                    }, 3000);
+
+                    // If we had a network error during init, start periodic connectivity check
+                    // This allows revalidation even when webviews aren't open
+                    if (hadNetworkError) {
+                        this._needsConnectivityRevalidation = true;
+                        this.startConnectivityCheck();
+                        console.log("Started periodic connectivity check for session revalidation");
+                    }
                 }
-            } catch (error) {
-                console.error("Failed to initialize authentication:", error);
-                // Attempt to clean up state if there was a critical error during init
-                await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
-                this._sessions = [];
+            } else {
+                // No stored session, ensure state is clean
                 await this.stateManager.updateAuthState({
                     isAuthenticated: false,
                     gitlabCredentials: undefined,
                     gitlabInfo: undefined,
+                    userInfo: undefined,
                 });
-                this._onDidChangeSessions.fire({ added: [], removed: this._sessions, changed: [] });
-                this._onDidChangeAuthentication.fire();
-            } finally {
-                this._initialized = true;
             }
+
+            this._initialized = true;
         })();
 
         return this.initializePromise;
@@ -671,7 +743,154 @@ export class FrontierAuthProvider implements vscode.AuthenticationProvider, vsco
         }
     }
 
+    /**
+     * Re-validate session when connectivity is restored.
+     * Called by webview when network status changes from offline to online,
+     * or by periodic connectivity check when webviews aren't open.
+     * - If token is valid: cache userInfo if missing, stop connectivity checks
+     * - If token is explicitly invalid (401/403): clear the session
+     * - If network error: do nothing (transient issue, keep checking)
+     */
+    async revalidateSessionOnConnectivityRestored(): Promise<void> {
+        // Debounce: ignore if we revalidated recently
+        const now = Date.now();
+        if (now - this._lastRevalidationTime < FrontierAuthProvider.REVALIDATION_DEBOUNCE_MS) {
+            console.log("Skipping revalidation - debounced (too recent)");
+            return;
+        }
+        this._lastRevalidationTime = now;
+
+        if (!this.isAuthenticated || this._sessions.length === 0) {
+            console.log("Connectivity restored but no session to revalidate");
+            this._needsConnectivityRevalidation = false;
+            this.stopConnectivityCheck();
+            return;
+        }
+
+        console.log("Connectivity restored - revalidating session...");
+
+        try {
+            const token = await this.getToken();
+            if (!token) {
+                console.warn("No token available for revalidation");
+                return;
+            }
+
+            const validity = await this.checkTokenValidity(token);
+
+            if (validity.isValid && validity.userInfo) {
+                // Token is valid - cache user info if not already cached
+                const currentUserInfo = this.stateManager.getUserInfo();
+                if (!currentUserInfo) {
+                    const userInfo: UserInfo = {
+                        email: validity.userInfo.email || "",
+                        username:
+                            validity.userInfo.username ||
+                            this.getUserDisplayName(validity.userInfo),
+                        name: validity.userInfo.name,
+                    };
+
+                    await this.stateManager.updateAuthState({
+                        userInfo: userInfo,
+                    });
+
+                    console.log("Session revalidated and user info cached after connectivity restored");
+                } else {
+                    console.log("Session revalidated successfully after connectivity restored");
+                }
+
+                // Also update session label if needed (e.g., was "Frontier User" due to offline init)
+                if (this._sessions[0].account.label === "Frontier User") {
+                    const userLabel = this.getUserDisplayName(validity.userInfo);
+                    if (userLabel !== "Frontier User") {
+                        await this.autoRefreshSessionWithUserInfo(token);
+                    }
+                }
+
+                // Success! Stop the connectivity check
+                this._needsConnectivityRevalidation = false;
+                this.stopConnectivityCheck();
+            } else if (validity.isInvalidAuth) {
+                // Token was explicitly rejected by server (401/403) - user may have been
+                // logged out server-side while offline. Clear the session.
+                console.log("Token rejected by server after connectivity restored - clearing session");
+
+                // Stop connectivity checks since we're clearing the session
+                this._needsConnectivityRevalidation = false;
+                this.stopConnectivityCheck();
+
+                try {
+                    await this.context.secrets.delete(FrontierAuthProvider.SESSION_SECRET_KEY);
+                } catch (deleteError) {
+                    console.error("Failed to delete invalid session:", deleteError);
+                }
+
+                const removedSessions = [...this._sessions];
+                this._sessions = [];
+
+                await this.stateManager.updateAuthState({
+                    isAuthenticated: false,
+                    gitlabCredentials: undefined,
+                    gitlabInfo: undefined,
+                    userInfo: undefined,
+                });
+
+                this._onDidChangeSessions.fire({
+                    added: [],
+                    removed: removedSessions,
+                    changed: [],
+                });
+                this._onDidChangeAuthentication.fire();
+
+                // Notify user that they need to log in again
+                vscode.window.showWarningMessage(
+                    "Your session has expired. Please log in again."
+                );
+            } else if (validity.isNetworkError) {
+                // Network error even though we thought we were online - transient issue
+                // Keep the connectivity check running
+                console.log("Network error during revalidation - will retry later");
+            }
+        } catch (error) {
+            console.warn("Error during session revalidation after connectivity restored:", error);
+            // Don't throw - this is a background operation
+        }
+    }
+
+    /**
+     * Start periodic connectivity check to revalidate session when network returns.
+     * This is a fallback for when webviews aren't open to detect connectivity changes.
+     */
+    private startConnectivityCheck(): void {
+        // Don't start if already running
+        if (this._connectivityCheckInterval) {
+            return;
+        }
+
+        this._connectivityCheckInterval = setInterval(async () => {
+            if (!this._needsConnectivityRevalidation) {
+                this.stopConnectivityCheck();
+                return;
+            }
+
+            console.log("Periodic connectivity check - attempting revalidation...");
+            await this.revalidateSessionOnConnectivityRestored();
+        }, FrontierAuthProvider.CONNECTIVITY_CHECK_INTERVAL_MS);
+    }
+
+    /**
+     * Stop the periodic connectivity check.
+     */
+    private stopConnectivityCheck(): void {
+        if (this._connectivityCheckInterval) {
+            clearInterval(this._connectivityCheckInterval);
+            this._connectivityCheckInterval = null;
+            console.log("Stopped periodic connectivity check");
+        }
+    }
+
     dispose() {
+        this.stopConnectivityCheck();
         this._onDidChangeSessions.dispose();
         this._onDidChangeAuthentication.dispose();
     }
