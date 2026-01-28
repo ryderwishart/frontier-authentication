@@ -195,6 +195,19 @@ export interface FrontierAPI {
      * @throws Error if not authenticated, no remote URL, or download fails
      */
     downloadLFSFile: (projectPath: string, oid: string, size: number) => Promise<Buffer>;
+
+    /**
+     * Get repository tree (list files in a directory) from GitLab
+     * @param projectUrl - The git URL of the project
+     * @param path - The directory path to list (e.g., ".project/attachments/pointers")
+     * @param ref - The branch, tag, or commit SHA (defaults to 'main')
+     * @returns Array of file entries with name, path, and type
+     */
+    getRepositoryTree: (
+        projectUrl: string,
+        path?: string,
+        ref?: string
+    ) => Promise<Array<{ name: string; path: string; type: "blob" | "tree" }>>;
 }
 
 export interface ResolvedFile {
@@ -568,6 +581,35 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             }
         },
+
+        getRepositoryTree: async (
+            projectUrl: string,
+            path: string = "",
+            ref: string = "main"
+        ): Promise<Array<{ name: string; path: string; type: "blob" | "tree" }>> => {
+            try {
+                // Extract project path from URL
+                // URL format: https://gitlab.com/group/subgroup/project.git
+                // Need to extract everything after the domain: group/subgroup/project
+                const cleanUrl = projectUrl.replace(/\.git$/, "");
+                const urlObj = new URL(cleanUrl);
+                // pathname is /group/subgroup/project, remove leading slash
+                const projectPath = urlObj.pathname.replace(/^\//, "");
+                
+                console.log(`[FrontierAPI] getRepositoryTree: projectPath=${projectPath}, treePath=${path}`);
+                
+                const tree = await gitLabService.getRepositoryTree(projectPath, path, ref);
+                return tree.map((item: { name: string; path: string; type: string }) => ({
+                    name: item.name,
+                    path: item.path,
+                    type: item.type as "blob" | "tree",
+                }));
+            } catch (error) {
+                console.error("Error fetching repository tree:", error);
+                return [];
+            }
+        },
+
         setRepoMediaStrategy: async (
             workspacePath: string,
             strategy: MediaFilesStrategy

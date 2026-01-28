@@ -459,6 +459,57 @@ export class GitLabService {
     }
 
     /**
+     * Get repository tree (list files in a directory)
+     * @param projectId - The GitLab project ID (can be numeric or URL-encoded path like "group%2Fproject")
+     * @param path - The directory path to list (e.g., ".project/attachments/pointers")
+     * @param ref - The branch, tag, or commit SHA (defaults to 'main')
+     * @param recursive - Whether to list recursively (defaults to true)
+     * @returns Array of file entries with name, path, type, and mode
+     */
+    async getRepositoryTree(
+        projectId: string,
+        path: string = "",
+        ref: string = "main",
+        recursive: boolean = true
+    ): Promise<Array<{ name: string; path: string; type: "blob" | "tree"; mode: string }>> {
+        if (!this.gitlabToken || !this.gitlabBaseUrl) {
+            await this.initializeWithRetry();
+        }
+
+        try {
+            const encodedProjectId = encodeURIComponent(projectId);
+            const params = new URLSearchParams({
+                ref,
+                recursive: String(recursive),
+            });
+            if (path) {
+                params.set("path", path);
+            }
+            const endpoint = `${this.gitlabBaseUrl}/api/v4/projects/${encodedProjectId}/repository/tree?${params.toString()}`;
+
+            const response = await fetch(endpoint, {
+                headers: {
+                    Authorization: `Bearer ${this.gitlabToken}`,
+                },
+            });
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    // Directory doesn't exist - return empty array
+                    return [];
+                }
+                throw new Error(`Failed to fetch repository tree: ${response.statusText}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error("Error fetching repository tree:", error);
+            // Return empty array on error - don't fail the whole operation
+            return [];
+        }
+    }
+
+    /**
      * Get list of contributors for a project
      * @param projectId - The GitLab project ID (can be numeric or URL-encoded path like "group%2Fproject")
      * @returns Array of contributors with username, name, email, and commit count
