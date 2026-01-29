@@ -476,36 +476,59 @@ export class GitLabService {
             await this.initializeWithRetry();
         }
 
+        const allItems: Array<{ name: string; path: string; type: "blob" | "tree"; mode: string }> = [];
+        let currentPage = 1;
+        const perPage = 100; // Max allowed by GitLab
+
         try {
             const encodedProjectId = encodeURIComponent(projectId);
-            const params = new URLSearchParams({
-                ref,
-                recursive: String(recursive),
-            });
-            if (path) {
-                params.set("path", path);
-            }
-            const endpoint = `${this.gitlabBaseUrl}/api/v4/projects/${encodedProjectId}/repository/tree?${params.toString()}`;
 
-            const response = await fetch(endpoint, {
-                headers: {
-                    Authorization: `Bearer ${this.gitlabToken}`,
-                },
-            });
-
-            if (!response.ok) {
-                if (response.status === 404) {
-                    // Directory doesn't exist - return empty array
-                    return [];
+            while (true) {
+                const params = new URLSearchParams({
+                    ref,
+                    recursive: String(recursive),
+                    page: currentPage.toString(),
+                    per_page: perPage.toString(),
+                });
+                if (path) {
+                    params.set("path", path);
                 }
-                throw new Error(`Failed to fetch repository tree: ${response.statusText}`);
+                const endpoint = `${this.gitlabBaseUrl}/api/v4/projects/${encodedProjectId}/repository/tree?${params.toString()}`;
+
+                const response = await fetch(endpoint, {
+                    headers: {
+                        Authorization: `Bearer ${this.gitlabToken}`,
+                    },
+                });
+
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        // Directory doesn't exist - return empty array
+                        return [];
+                    }
+                    throw new Error(`Failed to fetch repository tree: ${response.statusText}`);
+                }
+
+                const items = await response.json();
+                if (!Array.isArray(items) || items.length === 0) {
+                    break;
+                }
+
+                allItems.push(...items);
+
+                // If we got fewer items than per_page, we're on the last page
+                if (items.length < perPage) {
+                    break;
+                }
+
+                currentPage++;
             }
 
-            return await response.json();
+            return allItems;
         } catch (error) {
             console.error("Error fetching repository tree:", error);
-            // Return empty array on error - don't fail the whole operation
-            return [];
+            // Return what we have so far on error - don't fail the whole operation
+            return allItems;
         }
     }
 
