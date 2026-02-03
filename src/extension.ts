@@ -4,7 +4,6 @@ import * as vscode from "vscode";
 import { FrontierAuthProvider } from "./auth/AuthenticationProvider";
 import { registerCommands } from "./commands";
 import { registerGitLabCommands } from "./commands/gitlabCommands";
-import { registerProgressCommands } from "./commands/progressCommands";
 import { registerSCMCommands, getSCMManager } from "./commands/scmCommands";
 import {
     registerVersionCheckCommands,
@@ -19,49 +18,6 @@ let gitServiceInstance: GitServiceClass | undefined;
 
 export function getGitService(): GitServiceClass | undefined {
     return gitServiceInstance;
-}
-
-export interface BookCompletionData {
-    completionPercentage: number;
-    sourceWords: number;
-    targetWords: number;
-}
-
-export interface ProjectProgressReport {
-    projectId: string; // Unique project identifier
-    timestamp: string; // ISO timestamp of report generation
-    reportId: string; // Unique report identifier
-
-    // Translation metrics
-    translationProgress: {
-        bookCompletionMap: Record<string, BookCompletionData>; // Book ID -> completion data with word counts
-        totalVerseCount: number; // Total verses in project
-        translatedVerseCount: number; // Verses with translations
-        validatedVerseCount: number; // Verses passing validation
-        wordsTranslated: number; // Total words translated
-    };
-
-    // Validation metrics
-    validationStatus: {
-        stage: "none" | "initial" | "community" | "expert" | "finished";
-        versesPerStage: Record<string, number>; // Stage -> verse count
-        lastValidationTimestamp: string; // ISO timestamp
-    };
-
-    // Activity metrics
-    activityMetrics: {
-        lastEditTimestamp: string; // ISO timestamp
-        editCountLast24Hours: number; // Edit count
-        editCountLastWeek: number; // Edit count
-        averageDailyEdits: number; // Avg edits per active day
-    };
-
-    // Quality indicators
-    qualityMetrics: {
-        spellcheckIssueCount: number; // Spelling issues
-        flaggedSegmentsCount: number; // Segments needing review
-        consistencyScore: number; // 0-100 score
-    };
 }
 
 export type MediaFilesStrategy =
@@ -157,35 +113,6 @@ export interface FrontierAPI {
         status?: any;
     }>;
 
-    // Project Progress Reporting API
-    submitProgressReport: (
-        report: ProjectProgressReport
-    ) => Promise<{ success: boolean; reportId: string }>;
-
-    getProgressReports: (options: {
-        projectIds?: string[]; // Filter by specific projects
-        startDate?: string; // Filter by date range
-        endDate?: string;
-        limit?: number; // Pagination
-        offset?: number;
-    }) => Promise<{
-        reports: ProjectProgressReport[];
-        totalCount: number;
-    }>;
-
-    getAggregatedProgress: () => Promise<{
-        projectCount: number;
-        activeProjectCount: number;
-        totalCompletionPercentage: number;
-        projectSummaries: Array<{
-            projectId: string;
-            projectName: string;
-            completionPercentage: number;
-            lastActivity: string;
-            stage: string;
-        }>;
-    }>;
-
     /**
      * Download a single LFS file by OID
      * @param projectPath - Path to the git repository
@@ -259,7 +186,6 @@ export async function activate(context: vscode.ExtensionContext) {
     registerCommands(context, authenticationProvider, gitServiceInstance);
     registerGitLabCommands(context, authenticationProvider);
     registerSCMCommands(context, authenticationProvider);
-    registerProgressCommands(context, authenticationProvider);
     registerVersionCheckCommands(context);
 
     // Store API endpoint for use by other components
@@ -272,25 +198,13 @@ export async function activate(context: vscode.ExtensionContext) {
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     context.subscriptions.push(statusBarItem);
 
-    // Create progress status bar item
-    const progressStatusBarItem = vscode.window.createStatusBarItem(
-        vscode.StatusBarAlignment.Right,
-        99
-    );
-    progressStatusBarItem.text = "$(sync) Translation Progress";
-    progressStatusBarItem.tooltip = "View translation progress";
-    progressStatusBarItem.command = "frontier.showProgressDashboard";
-    context.subscriptions.push(progressStatusBarItem);
-
     // Update status bar when state changes
     stateManager.onDidChangeState(() => {
         updateStatusBar(statusBarItem, stateManager.getAuthState());
-        updateProgressStatusBar(progressStatusBarItem, stateManager.getAuthState());
     });
 
     // Initial status bar update and show
     updateStatusBar(statusBarItem, stateManager.getAuthState());
-    updateProgressStatusBar(progressStatusBarItem, stateManager.getAuthState());
     statusBarItem.show();
 
     // Only show activation message if not already authenticated
@@ -462,39 +376,6 @@ export async function activate(context: vscode.ExtensionContext) {
             return { isDirty: state.isDirty, status: state.status };
         },
 
-        // Project Progress Reporting API
-        submitProgressReport: async (report: ProjectProgressReport) =>
-            vscode.commands.executeCommand("frontier.submitProgressReport", report) as Promise<{
-                success: boolean;
-                reportId: string;
-            }>,
-
-        getProgressReports: async (options: {
-            projectIds?: string[];
-            startDate?: string;
-            endDate?: string;
-            limit?: number;
-            offset?: number;
-        }) =>
-            vscode.commands.executeCommand("frontier.getProgressReports", options) as Promise<{
-                reports: ProjectProgressReport[];
-                totalCount: number;
-            }>,
-
-        getAggregatedProgress: async () =>
-            vscode.commands.executeCommand("frontier.getAggregatedProgress") as Promise<{
-                projectCount: number;
-                activeProjectCount: number;
-                totalCompletionPercentage: number;
-                projectSummaries: Array<{
-                    projectId: string;
-                    projectName: string;
-                    completionPercentage: number;
-                    lastActivity: string;
-                    stage: string;
-                }>;
-            }>,
-
         downloadLFSFile: async (
             projectPath: string,
             oid: string,
@@ -637,14 +518,6 @@ function updateStatusBar(statusBarItem: vscode.StatusBarItem, authState: AuthSta
         statusBarItem.command = "frontier.login";
     }
     statusBarItem.show(); // Always show the status bar item
-}
-
-function updateProgressStatusBar(statusBarItem: vscode.StatusBarItem, authState: AuthState) {
-    if (authState.isAuthenticated) {
-        statusBarItem.show();
-    } else {
-        statusBarItem.hide();
-    }
 }
 
 // This method is called when your extension is deactivated
