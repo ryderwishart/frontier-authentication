@@ -1723,7 +1723,7 @@ export class GitService {
             }
 
             // 4. Get references to current state
-            const localHead = await git.resolveRef({ fs, dir, ref: "HEAD" });
+            let localHead = await git.resolveRef({ fs, dir, ref: "HEAD" });
             let remoteHead;
             const remoteRef = `refs/remotes/origin/${currentBranch}`;
 
@@ -1821,7 +1821,25 @@ export class GitService {
             }
 
             // 8. If we get here, we have divergent histories - check for conflicts
-            this.debugLog("Fast-forward failed, need to handle conflicts");
+            // This can happen because:
+            //   a) Fast-forward itself failed (divergent histories), OR
+            //   b) Fast-forward succeeded but push failed (another user pushed concurrently)
+            // In case (b), our local HEAD has already moved forward from the fast-forward,
+            // so we must re-read it to get accurate merge base calculations.
+            this.debugLog("Fast-forward failed or push rejected, need to handle conflicts");
+
+            // Re-read local HEAD in case fast-forward succeeded but push failed.
+            // Without this, the merge base calculation would use the stale pre-fast-forward
+            // localHead, causing incorrect conflict detection and potentially losing data.
+            const currentLocalHead = await git.resolveRef({ fs, dir, ref: "HEAD" });
+            if (currentLocalHead !== localHead) {
+                this.debugLog("[GitService] Local HEAD moved (fast-forward succeeded, push failed):", {
+                    before: localHead.substring(0, 8),
+                    after: currentLocalHead.substring(0, 8),
+                });
+                // Update localHead for correct merge base calculation below
+                localHead = currentLocalHead;
+            }
 
             // Refetch to ensure we have the absolute latest remote state before analyzing conflicts
             this.debugLog("[GitService] Refetching remote changes before conflict analysis");
@@ -1896,9 +1914,13 @@ export class GitService {
             this.debugLog("updatedRemoteStatusMatrix:", updatedRemoteStatusMatrix);
             this.debugLog("updatedMergeBaseStatusMatrix:", updatedMergeBaseStatusMatrix);
 
+            // Re-read local status matrix now. The original was captured before the fast-forward
+            // attempt (step 7) and may be stale if fast-forward succeeded but push was rejected.
+            const updatedLocalStatusMatrix = await git.statusMatrix({ fs, dir }).catch(() => localStatusMatrix);
+
             // Convert status matrices to maps for easier lookup
             const localStatusMap = new Map(
-                localStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
+                updatedLocalStatusMatrix.map((entry: any) => [entry[0], entry.slice(1)])
             );
             const remoteStatusMap = new Map(
                 updatedRemoteStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
