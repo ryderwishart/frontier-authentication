@@ -14,6 +14,112 @@ import {
     LfsPointerInfo,
 } from "../types/lfs";
 
+/** Retry and batching constants for LFS uploads */
+const LFS_MAX_RETRIES = 3;
+const LFS_RETRY_BASE_DELAY_MS = 1000;
+const LFS_UPLOAD_BATCH_SIZE = 50;
+/** Max simultaneous PUT uploads within a single batch */
+const LFS_UPLOAD_CONCURRENCY = 10;
+
+/**
+ * Determine whether an error is retryable (server-side / transient network errors).
+ */
+function isRetryableError(error: unknown): boolean {
+    if (error && typeof error === "object" && "status" in error) {
+        const status = (error as { status: number }).status;
+        if (status >= 500) {
+            return true;
+        }
+        // Known HTTP status below 500 (e.g. 4xx client errors) — not retryable.
+        // Return early so message-based heuristics below don't produce false positives
+        // (e.g. "limit: 500MB" matching /5\d{2}/, or "authentication timeout" matching /timeout/).
+        if (typeof status === "number" && status > 0) {
+            return false;
+        }
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    return (
+        /ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|timeout|abort|socket hang up/i.test(msg) ||
+        /5\d{2}/i.test(msg)
+    );
+}
+
+/**
+ * Retry a function with exponential back-off (delay = base * 3^attempt).
+ * Only retries when `isRetryableError` returns true.
+ */
+async function retryWithBackoff<T>(
+    fn: () => Promise<T>,
+    label: string,
+    maxRetries: number = LFS_MAX_RETRIES,
+    baseDelayMs: number = LFS_RETRY_BASE_DELAY_MS,
+): Promise<T> {
+    let hadFailure = false;
+    for (let attempt = 0; ; attempt++) {
+        try {
+            const result = await fn();
+            if (hadFailure) {
+                console.log(
+                    `[LFS Retry] ${label} succeeded on attempt ${attempt + 1} after previous failure(s)`
+                );
+            }
+            return result;
+        } catch (error) {
+            hadFailure = true;
+            if (attempt >= maxRetries || !isRetryableError(error)) {
+                throw error;
+            }
+            const delay = baseDelayMs * Math.pow(3, attempt); // 1 s, 3 s, 9 s
+            console.log(
+                `[LFS Retry] ${label} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${error instanceof Error ? error.message : error}`,
+            );
+            await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+    }
+}
+
+/**
+ * Run an array of async tasks with a concurrency limit.
+ * Tasks are started in order; at most `concurrency` run at the same time.
+ * If any task throws, the error propagates immediately (remaining queued
+ * tasks are not started, but already-running tasks are awaited).
+ */
+async function runWithConcurrency(
+    tasks: (() => Promise<void>)[],
+    concurrency: number,
+): Promise<void> {
+    let nextIndex = 0;
+    let firstError: unknown | undefined;
+
+    const runWorker = async (): Promise<void> => {
+        while (nextIndex < tasks.length && firstError === undefined) {
+            const idx = nextIndex++;
+            try {
+                await tasks[idx]();
+            } catch (err) {
+                firstError = err;
+                throw err;
+            }
+        }
+    };
+
+    const workerCount = Math.min(concurrency, tasks.length);
+    const workers = Array.from({ length: workerCount }, () => runWorker());
+
+    const results = await Promise.allSettled(workers);
+
+    // Re-throw the first error encountered
+    if (firstError !== undefined) {
+        throw firstError;
+    }
+    // Safety: also check for unexpected rejections
+    for (const r of results) {
+        if (r.status === "rejected") {
+            throw r.reason;
+        }
+    }
+}
+
 /**
  * Standalone debug logging function that checks VS Code configuration
  */
@@ -336,30 +442,35 @@ async function uploadBlobsToLFSBucket(
     debugLog("[LFS Patch] Request data:", lfsInfoRequestData);
     debugLog("[LFS Patch] Auth headers:", Object.keys(authHeaders));
 
-    const lfsInfoRes = await fetch(`${url}/info/lfs/objects/batch`, {
-        method: "POST",
-        headers: {
-            ...headers,
-            ...authHeaders,
-            Accept: "application/vnd.git-lfs+json",
-            "Content-Type": "application/vnd.git-lfs+json",
-        },
-        body: JSON.stringify(lfsInfoRequestData),
-    });
+    const lfsInfoResponseData = await retryWithBackoff(async () => {
+        const lfsInfoRes = await fetch(`${url}/info/lfs/objects/batch`, {
+            method: "POST",
+            headers: {
+                ...headers,
+                ...authHeaders,
+                Accept: "application/vnd.git-lfs+json",
+                "Content-Type": "application/vnd.git-lfs+json",
+            },
+            body: JSON.stringify(lfsInfoRequestData),
+        });
 
-    if (!lfsInfoRes.ok) {
-        const errorText = await lfsInfoRes.text();
-        console.error("[LFS Patch] Request failed:");
-        console.error("Status:", lfsInfoRes.status, lfsInfoRes.statusText);
-        console.error("Response:", errorText);
-        console.error("Request URL:", `${url}/info/lfs/objects/batch`);
-        console.error("Request headers:", { ...headers, ...authHeaders });
-        throw new Error(
-            `LFS request failed with status ${lfsInfoRes.status}: ${lfsInfoRes.statusText}\nResponse: ${errorText}`
-        );
-    }
+        if (!lfsInfoRes.ok) {
+            const errorText = await lfsInfoRes.text();
+            console.error("[LFS Patch] Request failed:");
+            console.error("Status:", lfsInfoRes.status, lfsInfoRes.statusText);
+            console.error("Response:", errorText);
+            console.error("Request URL:", `${url}/info/lfs/objects/batch`);
+            console.error("Request headers:", { ...headers, ...authHeaders });
+            const err = new Error(
+                `LFS request failed with status ${lfsInfoRes.status}: ${lfsInfoRes.statusText}\nResponse: ${errorText}`
+            );
+            (err as any).status = lfsInfoRes.status;
+            throw err;
+        }
 
-    const lfsInfoResponseData = (await lfsInfoRes.json()) as unknown;
+        return (await lfsInfoRes.json()) as unknown;
+    }, "LFS batch API");
+
     debugLog("[LFS Patch] Server response:", lfsInfoResponseData);
 
     // Use our fixed validation
@@ -368,153 +479,163 @@ async function uploadBlobsToLFSBucket(
         throw new Error("Unexpected JSON structure received for LFS upload request");
     }
 
-    // Upload each object
+    // Build a mapping from effectiveContents index → filepath for better logging.
+    // recovery.filepaths aligns with the original contents array; after skip
+    // filtering we need to re-index so logs show the actual filename.
+    const effectiveFilepaths: string[] = [];
+    if (recovery?.filepaths) {
+        let effIdx = 0;
+        for (let i = 0; i < contents.length; i++) {
+            if (!skipIndices.has(i)) {
+                effectiveFilepaths[effIdx++] = recovery.filepaths[i] ?? `<unknown index ${i}>`;
+            }
+        }
+    }
+    const fileLabel = (idx: number): string => {
+        const name = effectiveFilepaths[idx];
+        return name ? `file ${idx} (${name})` : `file ${idx}`;
+    };
+
+    // Upload each object (with per-file retry, concurrency-limited)
     const responseData = lfsInfoResponseData as LFSBatchResponse;
-    await Promise.all(
-        responseData.objects.map(async (object, index: number) => {
+    const uploadTasks = responseData.objects.map((object, index: number) => async () => {
             // Server already has file
             if (!object.actions) {
-                debugLog(`[LFS Patch] Server already has file ${index}`);
+                debugLog(`[LFS Patch] Server already has ${fileLabel(index)}`);
                 return;
             }
 
             const { actions } = object;
             const upload = actions.upload;
             if (!upload?.href) {
-                debugLog(`[LFS Patch] No upload action provided for file ${index}`);
+                debugLog(`[LFS Patch] No upload action provided for ${fileLabel(index)}`);
                 return;
             }
 
-            debugLog(`[LFS Patch] Uploading file ${index} to:`, upload.href);
-            debugLog(`[LFS Patch] Upload headers for file ${index}:`, {
+            debugLog(`[LFS Patch] Uploading ${fileLabel(index)} to:`, upload.href);
+            // Use effectiveContents (not contents) so indices align after skip filtering
+            const fileBytes = effectiveContents[index];
+            debugLog(`[LFS Patch] File size:`, `${fileBytes.length} bytes`);
+
+            // Build upload headers once (reused across retries)
+            const uploadHeaders: Record<string, string> = {
                 ...headers,
-                ...authHeaders,
                 ...(upload.header ?? {}),
-                // Don't override Content-Type if it's set by the server
                 ...(upload.header?.["Content-Type"]
                     ? {}
                     : { "Content-Type": "application/octet-stream" }),
-            });
-            debugLog(`[LFS Patch] File size:`, `${contents[index].length} bytes`);
+            };
+            delete uploadHeaders["Transfer-Encoding"];
+            delete uploadHeaders["Content-Length"];
 
-            try {
-                // Use the specific headers provided by GitLab for the upload
-                // These include the proper authentication for the LFS storage
-                const uploadHeaders: Record<string, string> = {
-                    ...headers,
-                    // Use GitLab's provided headers (which include auth)
-                    ...(upload.header ?? {}),
-                    // Only add Content-Type if not already specified
-                    ...(upload.header?.["Content-Type"]
-                        ? {}
-                        : { "Content-Type": "application/octet-stream" }),
-                };
+            debugLog(`[LFS Patch] Final upload headers:`, uploadHeaders);
 
-                // Remove headers that Node.js fetch doesn't allow to be set manually
-                delete uploadHeaders["Transfer-Encoding"];
-                delete uploadHeaders["Content-Length"];
-
-                debugLog(`[LFS Patch] Final upload headers:`, uploadHeaders);
-
-                // Create AbortController for timeout handling
+            // Upload with retry on transient/server errors
+            await retryWithBackoff(async () => {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
+                const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 min timeout
 
-                const resp = await fetch(upload.href, {
-                    method: "PUT",
-                    headers: uploadHeaders,
-                    body: Buffer.from(contents[index]),
-                    signal: controller.signal,
-                    // Add keepalive for large uploads
-                    keepalive: false,
-                });
-
-                clearTimeout(timeoutId);
-
-                if (!resp.ok) {
-                    const errorText = await resp.text();
-                    console.error(`[LFS Patch] Upload failed for file ${index}:`);
-                    console.error("Status:", resp.status, resp.statusText);
-                    console.error("Response:", errorText);
-                    throw new Error(
-                        `Upload failed for file ${index}, HTTP ${resp.status}: ${resp.statusText}\nResponse: ${errorText}`
-                    );
-                }
-
-                debugLog(`[LFS Patch] File ${index} uploaded successfully`);
-            } catch (fetchError: any) {
-                console.error(`[LFS Patch] Network error uploading file ${index}:`, fetchError);
-                console.error(`[LFS Patch] Error details:`, {
-                    message: fetchError.message,
-                    cause: fetchError.cause,
-                    code: fetchError.code,
-                    stack: fetchError.stack,
-                });
-
-                // Log the cause in more detail if it exists
-                if (fetchError.cause) {
-                    console.error(`[LFS Patch] Error cause details:`, {
-                        message: fetchError.cause.message,
-                        code: fetchError.cause.code,
-                        errno: fetchError.cause.errno,
-                        syscall: fetchError.cause.syscall,
-                        address: fetchError.cause.address,
-                        port: fetchError.cause.port,
-                        stack: fetchError.cause.stack,
+                try {
+                    const resp = await fetch(upload.href, {
+                        method: "PUT",
+                        headers: uploadHeaders,
+                        body: Buffer.from(fileBytes),
+                        signal: controller.signal,
+                        keepalive: false,
                     });
-                }
 
-                // Provide more helpful error messages based on the error type
-                if (
-                    fetchError.message?.includes("certificate") ||
-                    fetchError.message?.includes("SSL") ||
-                    fetchError.message?.includes("TLS")
-                ) {
-                    throw new Error(
-                        `SSL/Certificate error uploading to LFS storage. This may be a self-signed certificate issue. Original error: ${fetchError.message}`
-                    );
-                } else if (
-                    fetchError.message?.includes("ECONNREFUSED") ||
-                    fetchError.message?.includes("ENOTFOUND")
-                ) {
-                    throw new Error(
-                        `Network connection error uploading to LFS storage. Check if the LFS storage server is accessible. Original error: ${fetchError.message}`
-                    );
-                } else if (fetchError.message?.includes("timeout")) {
-                    throw new Error(
-                        `Upload timeout to LFS storage. The file may be too large or the connection too slow. Original error: ${fetchError.message}`
-                    );
-                } else {
-                    throw new Error(
-                        `Network error uploading to LFS storage: ${fetchError.message}`
-                    );
-                }
-            }
+                    clearTimeout(timeoutId);
 
-            // Handle verification if required
+                    if (!resp.ok) {
+                        const errorText = await resp.text();
+                        console.error(`[LFS Patch] Upload failed for ${fileLabel(index)}:`);
+                        console.error("Status:", resp.status, resp.statusText);
+                        console.error("Response:", errorText);
+                        const err = new Error(
+                            `Upload failed for ${fileLabel(index)}, HTTP ${resp.status}: ${resp.statusText}\nResponse: ${errorText}`
+                        );
+                        (err as any).status = resp.status;
+                        throw err;
+                    }
+
+                    debugLog(`[LFS Patch] ${fileLabel(index)} uploaded successfully`);
+                } catch (fetchError: any) {
+                    clearTimeout(timeoutId);
+                    console.error(`[LFS Patch] Network error uploading ${fileLabel(index)}:`, fetchError);
+                    console.error(`[LFS Patch] Error details:`, {
+                        message: fetchError.message,
+                        cause: fetchError.cause,
+                        code: fetchError.code,
+                    });
+
+                    if (fetchError.cause) {
+                        console.error(`[LFS Patch] Error cause details:`, {
+                            message: fetchError.cause.message,
+                            code: fetchError.cause.code,
+                            errno: fetchError.cause.errno,
+                            syscall: fetchError.cause.syscall,
+                        });
+                    }
+
+                    // Rethrow with descriptive message; retryWithBackoff will decide whether to retry
+                    if (
+                        fetchError.message?.includes("certificate") ||
+                        fetchError.message?.includes("SSL") ||
+                        fetchError.message?.includes("TLS")
+                    ) {
+                        throw new Error(
+                            `SSL/Certificate error uploading ${fileLabel(index)} to LFS storage. Original error: ${fetchError.message}`
+                        );
+                    } else if (
+                        fetchError.message?.includes("ECONNREFUSED") ||
+                        fetchError.message?.includes("ENOTFOUND")
+                    ) {
+                        throw new Error(
+                            `Network connection error uploading ${fileLabel(index)} to LFS storage. Original error: ${fetchError.message}`
+                        );
+                    } else if (fetchError.message?.includes("timeout") || fetchError.name === "AbortError") {
+                        throw new Error(
+                            `Upload timeout for ${fileLabel(index)} to LFS storage. Original error: ${fetchError.message}`
+                        );
+                    } else if ((fetchError as any).status) {
+                        // Already has status from our HTTP check above; re-throw as-is
+                        throw fetchError;
+                    } else {
+                        throw new Error(
+                            `Network error uploading ${fileLabel(index)} to LFS storage: ${fetchError.message}`
+                        );
+                    }
+                }
+            }, `LFS PUT ${fileLabel(index)}`);
+
+            // Handle verification if required (also with retry)
             if (actions.verify) {
-                debugLog(`[LFS Patch] Verifying file ${index}`);
-                const verificationResp = await fetch(actions.verify.href, {
-                    method: "POST",
-                    headers: {
-                        ...(actions.verify.header ?? {}),
-                        Accept: "application/vnd.git-lfs+json",
-                        "Content-Type": "application/vnd.git-lfs+json",
-                    },
-                    body: JSON.stringify({
-                        oid: String((infos[index] as any).oid ?? ""),
-                        size: Number((infos[index] as any).size ?? 0),
-                    }),
-                });
+                debugLog(`[LFS Patch] Verifying ${fileLabel(index)}`);
+                await retryWithBackoff(async () => {
+                    const verificationResp = await fetch(actions.verify!.href, {
+                        method: "POST",
+                        headers: {
+                            ...(actions.verify!.header ?? {}),
+                            Accept: "application/vnd.git-lfs+json",
+                            "Content-Type": "application/vnd.git-lfs+json",
+                        },
+                        body: JSON.stringify({
+                            oid: String((infos[index] as any).oid ?? ""),
+                            size: Number((infos[index] as any).size ?? 0),
+                        }),
+                    });
 
-                if (!verificationResp.ok) {
-                    throw new Error(
-                        `Verification failed for file ${index}, HTTP ${verificationResp.status}: ${verificationResp.statusText}`
-                    );
-                }
+                    if (!verificationResp.ok) {
+                        const err = new Error(
+                            `Verification failed for ${fileLabel(index)}, HTTP ${verificationResp.status}: ${verificationResp.statusText}`
+                        );
+                        (err as any).status = verificationResp.status;
+                        throw err;
+                    }
+                }, `LFS verify ${fileLabel(index)}`);
             }
-        })
-    );
+    });
+    await runWithConcurrency(uploadTasks, LFS_UPLOAD_CONCURRENCY);
 
     debugLog("[LFS Patch] Upload completed successfully");
     return infos;
@@ -1608,7 +1729,7 @@ export class GitService {
             }
 
             // 4. Get references to current state
-            const localHead = await git.resolveRef({ fs, dir, ref: "HEAD" });
+            let localHead = await git.resolveRef({ fs, dir, ref: "HEAD" });
             let remoteHead;
             const remoteRef = `refs/remotes/origin/${currentBranch}`;
 
@@ -1706,7 +1827,25 @@ export class GitService {
             }
 
             // 8. If we get here, we have divergent histories - check for conflicts
-            this.debugLog("Fast-forward failed, need to handle conflicts");
+            // This can happen because:
+            //   a) Fast-forward itself failed (divergent histories), OR
+            //   b) Fast-forward succeeded but push failed (another user pushed concurrently)
+            // In case (b), our local HEAD has already moved forward from the fast-forward,
+            // so we must re-read it to get accurate merge base calculations.
+            this.debugLog("Fast-forward failed or push rejected, need to handle conflicts");
+
+            // Re-read local HEAD in case fast-forward succeeded but push failed.
+            // Without this, the merge base calculation would use the stale pre-fast-forward
+            // localHead, causing incorrect conflict detection and potentially losing data.
+            const currentLocalHead = await git.resolveRef({ fs, dir, ref: "HEAD" });
+            if (currentLocalHead !== localHead) {
+                this.debugLog("[GitService] Local HEAD moved (fast-forward succeeded, push failed):", {
+                    before: localHead.substring(0, 8),
+                    after: currentLocalHead.substring(0, 8),
+                });
+                // Update localHead for correct merge base calculation below
+                localHead = currentLocalHead;
+            }
 
             // Refetch to ensure we have the absolute latest remote state before analyzing conflicts
             this.debugLog("[GitService] Refetching remote changes before conflict analysis");
@@ -1781,9 +1920,13 @@ export class GitService {
             this.debugLog("updatedRemoteStatusMatrix:", updatedRemoteStatusMatrix);
             this.debugLog("updatedMergeBaseStatusMatrix:", updatedMergeBaseStatusMatrix);
 
+            // Re-read local status matrix now. The original was captured before the fast-forward
+            // attempt (step 7) and may be stale if fast-forward succeeded but push was rejected.
+            const updatedLocalStatusMatrix = await git.statusMatrix({ fs, dir }).catch(() => localStatusMatrix);
+
             // Convert status matrices to maps for easier lookup
             const localStatusMap = new Map(
-                localStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
+                updatedLocalStatusMatrix.map((entry: any) => [entry[0], entry.slice(1)])
             );
             const remoteStatusMap = new Map(
                 updatedRemoteStatusMatrix.map((entry) => [entry[0], entry.slice(1)])
@@ -2386,20 +2529,260 @@ export class GitService {
             )
             .map(([filepath]) => filepath);
 
+        // Resolve remote URL and auth once (avoids per-file lookups)
+        const remoteUrl = await this.getRemoteUrl(dir);
+        let lfsBaseUrl: string | undefined;
+        let effectiveAuth: { username: string; password: string } | undefined;
+        if (remoteUrl) {
+            const { cleanUrl, auth: embeddedAuth } = GitService.parseGitUrl(remoteUrl);
+            effectiveAuth = auth ?? embeddedAuth;
+            lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
+        }
+
+        // ── Phase 1: Categorise every modified file ──────────────────────
+        // Files with raw bytes that must be uploaded and converted to pointers
+        const rawBytesFiles: { filepath: string; bytes: Buffer }[] = [];
+        // Existing pointers whose backing bytes need uploading to the new repo
+        const existingPointerUploads: { filepath: string; bytes: Buffer }[] = [];
+
         for (const filepath of modifiedFiles) {
-            if (await this.isLfsTracked(dir, filepath)) {
-                if (await this.isLfsWorktreeEquivalentToHeadPointer(dir, filepath)) {
-                    continue;
-                }
-                const wasUploaded = await this.addWithLFS(dir, filepath, auth);
-                if (wasUploaded) {
-                    uploadedLfsFiles.push(filepath);
-                }
+            // Non-LFS → regular add
+            if (!(await this.isLfsTracked(dir, filepath))) {
+                await git.add({ fs, dir, filepath });
                 continue;
             }
 
-            // Non-LFS files: regular add
-            await git.add({ fs, dir, filepath });
+            // Unchanged LFS → skip
+            if (await this.isLfsWorktreeEquivalentToHeadPointer(dir, filepath)) {
+                continue;
+            }
+
+            // No remote / auth → fall back to regular add
+            if (!remoteUrl || !lfsBaseUrl || !effectiveAuth) {
+                console.warn(`[GitService] No remote URL/auth; adding ${filepath} without LFS`);
+                await git.add({ fs, dir, filepath });
+                continue;
+            }
+
+            const absolutePath = path.join(dir, filepath);
+            const buf = await fs.promises.readFile(absolutePath);
+
+            // ── Already an LFS pointer? ──
+            try {
+                const asText = buf.toString("utf8");
+                if (asText.length === 0) {
+                    this.debugLog(
+                        `[GitService] ${filepath} is empty; delegating recovery to upload helper`
+                    );
+                }
+                const existingPointer = this.parseLfsPointer(asText);
+                if (existingPointer) {
+                    this.debugLog(
+                        `[GitService] ${filepath} is already an LFS pointer; staging without upload`
+                    );
+                    // Normalize and stage the pointer
+                    const canonicalPointer = lfs.formatPointerInfo({
+                        oid: existingPointer.oid,
+                        size: existingPointer.size,
+                    } as any);
+                    await fs.promises.writeFile(absolutePath, Buffer.from(canonicalPointer));
+                    await git.add({ fs, dir, filepath });
+
+                    if (this.isPointerPath(filepath)) {
+                        // Check if files/ dir has real bytes we should upload to the new repo
+                        const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                        let blobBytes: Buffer | undefined;
+                        try {
+                            blobBytes = await fs.promises.readFile(filesAbs);
+                        } catch {
+                            blobBytes = undefined;
+                        }
+
+                        if (blobBytes && blobBytes.length > 0) {
+                            const maybePointer = this.parseLfsPointer(blobBytes.toString("utf8"));
+                            if (!maybePointer) {
+                                const buildPointerInfo = (lfs as any).buildPointerInfo;
+                                const info = buildPointerInfo
+                                    ? await buildPointerInfo(blobBytes)
+                                    : null;
+                                const oid = String((info as any)?.oid ?? "");
+                                const size = Number((info as any)?.size ?? 0);
+
+                                if (
+                                    oid &&
+                                    size &&
+                                    (oid !== existingPointer.oid ||
+                                        size !== existingPointer.size)
+                                ) {
+                                    console.warn(
+                                        `[GitService] Skipping LFS upload for ${filepath}: bytes do not match pointer`,
+                                        { pointer: existingPointer, computed: { oid, size } }
+                                    );
+                                } else {
+                                    existingPointerUploads.push({ filepath, bytes: blobBytes });
+                                }
+                            }
+                        }
+
+                        // Ensure files/ dir has bytes — download if missing
+                        await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                        let hasFile = true;
+                        try {
+                            await fs.promises.access(filesAbs, fs.constants.F_OK);
+                        } catch {
+                            hasFile = false;
+                        }
+                        if (!hasFile) {
+                            try {
+                                const bytes = await downloadLFSObject(
+                                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
+                                    { oid: existingPointer.oid, size: existingPointer.size }
+                                );
+                                await fs.promises.writeFile(filesAbs, bytes);
+                                this.debugLog(
+                                    `[GitService] Downloaded missing LFS bytes for ${filepath} into files dir`
+                                );
+                            } catch (e) {
+                                console.warn(
+                                    `[GitService] Failed to download bytes for existing pointer ${filepath}:`,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    continue; // pointer already staged — nothing more to do
+                }
+            } catch { /* not a pointer — fall through to raw upload */ }
+
+            // Raw bytes — needs upload + pointer creation.
+            // If the file is empty and sits in the pointers path, try to recover
+            // real bytes from the parallel files/ directory so the OID we compute
+            // locally matches what uploadBlobsToLFSBucket will actually upload.
+            let uploadBytes = buf;
+            if (buf.length === 0 && this.isPointerPath(filepath)) {
+                const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                try {
+                    const recovered = await fs.promises.readFile(filesAbs);
+                    if (recovered.length > 0) {
+                        uploadBytes = recovered;
+                        this.debugLog(
+                            `[GitService] Recovered empty pointer ${filepath} from files dir for batched upload`
+                        );
+                    }
+                } catch { /* no recovery available — corruption handled by uploadBlobsToLFSBucket */ }
+            }
+            rawBytesFiles.push({ filepath, bytes: uploadBytes });
+        }
+
+        // ── Phase 2: Batch-upload raw-bytes files ────────────────────────
+        if (rawBytesFiles.length > 0 && lfsBaseUrl && effectiveAuth) {
+            const totalBatches = Math.ceil(rawBytesFiles.length / LFS_UPLOAD_BATCH_SIZE);
+            this.debugLog(
+                `[GitService] Batch-uploading ${rawBytesFiles.length} raw LFS files in ${totalBatches} batch(es) of up to ${LFS_UPLOAD_BATCH_SIZE}`
+            );
+
+            const buildPointerInfo = (lfs as any).buildPointerInfo;
+
+            for (let i = 0; i < rawBytesFiles.length; i += LFS_UPLOAD_BATCH_SIZE) {
+                const batch = rawBytesFiles.slice(i, i + LFS_UPLOAD_BATCH_SIZE);
+                const batchNum = Math.floor(i / LFS_UPLOAD_BATCH_SIZE) + 1;
+                this.debugLog(
+                    `[GitService] Uploading batch ${batchNum}/${totalBatches} (${batch.length} files)`
+                );
+
+                const pointerInfos = await uploadBlobsToLFSBucket(
+                    {
+                        url: lfsBaseUrl,
+                        headers: {},
+                        auth: effectiveAuth,
+                        recovery: { dir, filepaths: batch.map((f) => f.filepath) },
+                    },
+                    batch.map((f) => f.bytes)
+                );
+
+                // uploadBlobsToLFSBucket may skip corrupted/empty files, so the
+                // returned infos may be shorter than the batch.  Match by OID.
+                const resultByOid = new Map<string, LfsPointerInfo>();
+                for (const pi of pointerInfos) {
+                    resultByOid.set(String((pi as any).oid ?? ""), pi);
+                }
+
+                for (let j = 0; j < batch.length; j++) {
+                    const { filepath, bytes } = batch[j];
+
+                    // Compute local OID to match against upload results
+                    const localInfo = buildPointerInfo
+                        ? await buildPointerInfo(bytes)
+                        : null;
+                    const localOid = localInfo
+                        ? String((localInfo as any).oid ?? "")
+                        : "";
+                    const matchedInfo = localOid
+                        ? resultByOid.get(localOid)
+                        : undefined;
+
+                    if (!matchedInfo) {
+                        this.debugLog(
+                            `[GitService] Upload skipped or no pointer for ${filepath} (empty/corrupted)`
+                        );
+                        continue;
+                    }
+
+                    // Write pointer file and stage
+                    const pointerBlob = lfs.formatPointerInfo(matchedInfo);
+                    const absolutePath = path.join(dir, filepath);
+                    await fs.promises.writeFile(absolutePath, Buffer.from(pointerBlob));
+                    await git.add({ fs, dir, filepath });
+
+                    // Ensure files/ dir has the raw bytes
+                    if (this.isPointerPath(filepath)) {
+                        const filesAbs = this.getFilesPathForPointer(dir, filepath);
+                        await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
+                        try {
+                            await fs.promises.access(filesAbs, fs.constants.F_OK);
+                            this.debugLog(
+                                `[GitService] Files dir already has ${filepath}, not overwriting`
+                            );
+                        } catch {
+                            await fs.promises.writeFile(filesAbs, bytes);
+                        }
+                    }
+
+                    uploadedLfsFiles.push(filepath);
+                }
+            }
+        }
+
+        // ── Phase 3: Batch-upload existing-pointer bytes (fork publish) ──
+        if (existingPointerUploads.length > 0 && lfsBaseUrl && effectiveAuth) {
+            this.debugLog(
+                `[GitService] Batch-uploading ${existingPointerUploads.length} existing pointer byte(s)`
+            );
+            for (let i = 0; i < existingPointerUploads.length; i += LFS_UPLOAD_BATCH_SIZE) {
+                const batch = existingPointerUploads.slice(i, i + LFS_UPLOAD_BATCH_SIZE);
+                try {
+                    await uploadBlobsToLFSBucket(
+                        {
+                            url: lfsBaseUrl,
+                            headers: {},
+                            auth: effectiveAuth,
+                            recovery: {
+                                dir,
+                                filepaths: batch.map((f) => f.filepath),
+                            },
+                        },
+                        batch.map((f) => f.bytes)
+                    );
+                    this.debugLog(
+                        `[GitService] Uploaded batch of ${batch.length} existing pointer byte(s)`
+                    );
+                } catch (e) {
+                    console.warn(
+                        `[GitService] Failed to upload existing pointer bytes batch:`,
+                        e
+                    );
+                }
+            }
         }
 
         return uploadedLfsFiles;
