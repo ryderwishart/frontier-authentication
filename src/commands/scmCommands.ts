@@ -116,8 +116,13 @@ export function registerSCMCommands(
                             error instanceof Error ? error.message : "Unknown error"
                         }`
                     );
+                    return [];
                 }
-                return [];
+                // When called programmatically (showUI=false), propagate the error
+                // so callers (e.g., codex-editor's fetchRemoteProjects) can distinguish
+                // "no projects found" from "server unreachable" and avoid incorrectly
+                // marking local projects as orphaned/Remote Missing.
+                throw error;
             }
         })
     );
