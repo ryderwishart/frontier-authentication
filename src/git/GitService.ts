@@ -30,6 +30,12 @@ function isRetryableError(error: unknown): boolean {
         if (status >= 500) {
             return true;
         }
+        // Known HTTP status below 500 (e.g. 4xx client errors) — not retryable.
+        // Return early so message-based heuristics below don't produce false positives
+        // (e.g. "limit: 500MB" matching /5\d{2}/, or "authentication timeout" matching /timeout/).
+        if (typeof status === "number" && status > 0) {
+            return false;
+        }
     }
     const msg = error instanceof Error ? error.message : String(error);
     return (
