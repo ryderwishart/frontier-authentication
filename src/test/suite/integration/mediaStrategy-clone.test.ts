@@ -7,6 +7,7 @@ import * as dugiteGit from "../../../git/dugiteGit";
 import { GitLabService } from "../../../gitlab/GitLabService";
 import { SCMManager } from "../../../scm/SCMManager";
 import { StateManager } from "../../../state";
+import { buildPointerInfo, formatPointerInfo } from "../../../git/lfsPointerUtils";
 
 suite("Integration: clone respects mediaStrategy", () => {
     let workspaceDir: string;
@@ -44,16 +45,11 @@ suite("Integration: clone respects mediaStrategy", () => {
         const headOid = await dugiteGit.commit(workspaceDir, "initial", { name: "Tester", email: "tester@example.com" });
 
         // Add a pointer under pointers dir
-        const fakeOid = "c".repeat(64);
+        const media = Buffer.from("hello-bytes");
         const pointerRel = ".project/attachments/pointers/audio/clip.wav";
         const pointerAbs = path.join(workspaceDir, pointerRel);
         await fs.promises.mkdir(path.dirname(pointerAbs), { recursive: true });
-        const pointerText = [
-            "version https://git-lfs.github.com/spec/v1",
-            `oid sha256:${fakeOid}`,
-            "size 11",
-        ].join("\n");
-        await fs.promises.writeFile(pointerAbs, pointerText, "utf8");
+        await fs.promises.writeFile(pointerAbs, formatPointerInfo(buildPointerInfo(media)));
         await dugiteGit.add(workspaceDir, pointerRel);
         const newHead = await dugiteGit.commit(workspaceDir, "add pointer", { name: "Tester", email: "tester@example.com" });
 
@@ -77,7 +73,7 @@ suite("Integration: clone respects mediaStrategy", () => {
                 const req = bodyStr ? JSON.parse(bodyStr) : { objects: [] };
                 const objects = (req.objects || []).map((o: any) => ({
                     oid: o.oid,
-                    size: o.size || 11,
+                    size: o.size,
                     actions: {
                         download: {
                             href: "https://lfs-download.example.com/obj",
@@ -92,7 +88,7 @@ suite("Integration: clone respects mediaStrategy", () => {
             }
 
             if (url.startsWith("https://lfs-download.example.com/") && method === "GET") {
-                return new Response(Buffer.from("hello-bytes"), { status: 200 });
+                return new Response(media, { status: 200 });
             }
 
             return new Response("", { status: 200 });

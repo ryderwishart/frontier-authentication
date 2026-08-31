@@ -7,6 +7,7 @@ import * as dugiteGit from "../../../git/dugiteGit";
 import { GitLabService } from "../../../gitlab/GitLabService";
 import { SCMManager } from "../../../scm/SCMManager";
 import { StateManager } from "../../../state";
+import { buildPointerInfo, formatPointerInfo } from "../../../git/lfsPointerUtils";
 
 suite("Integration: unsynced local media preserved across strategies", () => {
     let workspaceDir: string;
@@ -41,15 +42,8 @@ suite("Integration: unsynced local media preserved across strategies", () => {
         const ptrRel = ".project/attachments/pointers/audio/remote.wav";
         const ptrAbs = path.join(workspaceDir, ptrRel);
         await fs.promises.mkdir(path.dirname(ptrAbs), { recursive: true });
-        await fs.promises.writeFile(
-            ptrAbs,
-            [
-                "version https://git-lfs.github.com/spec/v1",
-                `oid sha256:${"f".repeat(64)}`,
-                "size 11",
-            ].join("\n"),
-            "utf8"
-        );
+        const media = Buffer.from("hello-remote");
+        await fs.promises.writeFile(ptrAbs, formatPointerInfo(buildPointerInfo(media)));
         await dugiteGit.add(workspaceDir, ptrRel);
         const head = await dugiteGit.commit(workspaceDir, "add ptr", { name: "T", email: "t@e" });
 
@@ -77,7 +71,7 @@ suite("Integration: unsynced local media preserved across strategies", () => {
                 const req = bodyStr ? JSON.parse(bodyStr) : { objects: [] };
                 const objects = (req.objects || []).map((o: any) => ({
                     oid: o.oid,
-                    size: o.size || 11,
+                    size: o.size,
                     actions: {
                         download: {
                             href: "https://lfs-download.example.com/obj",
@@ -92,7 +86,7 @@ suite("Integration: unsynced local media preserved across strategies", () => {
             }
 
             if (url.startsWith("https://lfs-download.example.com/") && method === "GET") {
-                return new Response(Buffer.from("hello-remote"), { status: 200 });
+                return new Response(media, { status: 200 });
             }
 
             return new Response("", { status: 200 });

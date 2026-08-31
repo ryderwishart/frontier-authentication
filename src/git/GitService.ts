@@ -1,7 +1,8 @@
 import * as dugiteGit from "./dugiteGit";
 import { assertMergeSnapshot } from "./mergeSnapshot";
 import type { MergeSnapshot } from "./mergeSnapshot";
-import { hasMatchingLfsCache } from "./lfsCacheValidation";
+import { canHydrateLfsCache, inspectLfsCache } from "./lfsCacheValidation";
+import { writeLfsCacheIfMissing, writeLfsCacheSafely } from "./lfsCacheWrite";
 import { isAtomicSaveTemp } from "./transientFiles";
 import { formatPointerInfo, buildPointerInfo } from "./lfsPointerUtils";
 import * as fs from "fs";
@@ -1464,10 +1465,37 @@ export class GitService {
                 }
 
                 // Map of oid -> array of targets to write (deduplicates identical content)
-                const oidToTargets = new Map<
-                    string,
-                    { filesAbs: string; filepath: string; size: number; }[]
-                >();
+                type DownloadTarget = { filesAbs: string; filepath: string; size: number };
+                const oidToTargets = new Map<string, DownloadTarget[]>();
+                const preservedFiles = new Map<string, string>();
+                let reportedPreserved = 0;
+                const reportPreserved = () => {
+                    if (preservedFiles.size <= reportedPreserved) { return; }
+                    reportedPreserved = preservedFiles.size;
+                    const sample = Array.from(preservedFiles, ([file, reason]) => `${file}: ${reason}`).slice(0, 5);
+                    console.warn(`[GitService] Preserved ${preservedFiles.size} media file(s) during reconciliation: ${sample.join("; ")}`);
+                    vscode.window.showWarningMessage(
+                        `Automatic media download skipped ${preservedFiles.size} file(s) to protect local changes. Local media was preserved; review the GitService warnings before replacing it.`
+                    );
+                };
+                const pointerStillCurrent = async (target: DownloadTarget, oid: string): Promise<boolean> => {
+                    try {
+                        const text = await fs.promises.readFile(path.join(dir, target.filepath), "utf8");
+                        const current = this.parseLfsPointer(text);
+                        return current?.oid === oid && current.size === target.size;
+                    } catch { return false; }
+                };
+                const needsDownload = async (target: DownloadTarget, oid: string): Promise<boolean> => {
+                    if (!await pointerStillCurrent(target, oid)) {
+                        preservedFiles.set(target.filepath, "pointer changed or could not be read during download");
+                        return false;
+                    }
+                    const state = await inspectLfsCache(target.filesAbs, { oid, size: target.size });
+                    if (state === "protected") {
+                        preservedFiles.set(target.filepath, "local media differs from its pointer or could not be safely read");
+                    }
+                    return canHydrateLfsCache(state);
+                };
                 const readFailures: string[] = [];
                 const conversionFailures: string[] = [];
 
@@ -1533,18 +1561,7 @@ export class GitService {
                             this.debugLog("[GitService] Wrote pointer and staged", { filepath });
 
                             const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                            await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                            try {
-                                await fs.promises.access(filesAbs, fs.constants.F_OK);
-                                this.debugLog(
-                                    `[GitService] Files dir already has ${filepath}, not overwriting`
-                                );
-                            } catch {
-                                await fs.promises.writeFile(filesAbs, bytes);
-                                this.debugLog("[GitService] Wrote bytes to files dir", {
-                                    filesAbs,
-                                });
-                            }
+                            await writeLfsCacheIfMissing(filesAbs, bytes);
                             this.debugLog(
                                 `[GitService] Converted blob to pointer and wrote files dir for ${filepath}`
                             );
@@ -1561,8 +1578,11 @@ export class GitService {
                     // Streaming modes do not hydrate pointers during sync.
                     if (!enableDownloads) { continue; }
                     const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                    const present = await hasMatchingLfsCache(filesAbs, pointer);
-                    if (!present) {
+                    const state = await inspectLfsCache(filesAbs, pointer);
+                    if (state === "protected") {
+                        preservedFiles.set(filepath, "local media differs from its pointer or could not be safely read");
+                    }
+                    if (canHydrateLfsCache(state)) {
                         const targets = oidToTargets.get(pointer.oid) ?? [];
                         targets.push({ filesAbs, filepath, size: pointer.size });
                         oidToTargets.set(pointer.oid, targets);
@@ -1592,10 +1612,10 @@ export class GitService {
 
                 const oidsToDownload = enableDownloads ? Array.from(oidToTargets.keys()) : [];
                 const totalToDownload = oidsToDownload.length;
-                const alreadyDownloaded = totalFiles - totalToDownload;
+                reportPreserved();
 
                 if (totalToDownload === 0) {
-                    progress.report({ message: "✅ All files up to date" });
+                    progress.report({ message: preservedFiles.size > 0 ? "Local media preserved; review skipped files" : "✅ All files up to date" });
                     this.debugLog(
                         "[GitService] Completed reconcilePointersFilesystem (no downloads needed)"
                     );
@@ -1778,12 +1798,10 @@ export class GitService {
                     .getConfiguration("frontier")
                     .get<number>("lfsDownloadConcurrency", 12);
 
-                // Show total context: already downloaded + remaining to download
-                const downloadMessage =
-                    alreadyDownloaded > 0
-                        ? `📎 Resuming download: ${alreadyDownloaded} of ${totalFiles} already complete`
-                        : `📎 Preparing to download ${totalToDownload} files`;
-                progress.report({ message: downloadMessage });
+                progress.report({ message: `📎 Checking ${totalToDownload} media object(s) for download` });
+                const reportDownloadProgress = () => progress.report({
+                    message: `📎 Processed media object ${completed} of ${totalToDownload}`,
+                });
 
                 const queue = [...oidsToDownload];
                 const runWorker = async () => {
@@ -1793,47 +1811,23 @@ export class GitService {
                             return;
                         }
 
-                        // Re-check `files/<X>` existence right before issuing the
-                        // HTTP request. Between the Phase-1 scan (which populated
-                        // oidToTargets) and now, the bytes for this OID may have
-                        // landed on disk via a different code path — most often
-                        // the audio playback fallback in codex-editor, which now
-                        // persists bytes after on-demand auto-download
-                        // (`codexCellEditorMessagehandling.ts` ~ line 2193).
-                        // If every target for this OID is already on disk, skip
-                        // the HTTP request entirely to avoid redundant bandwidth.
+                        // Recheck each target: a local save or on-demand download may
+                        // have arrived since the scan. One protected target must not
+                        // prevent hydration of other missing targets for the same OID.
                         const targetsForOid = oidToTargets.get(oid) ?? [];
-                        if (targetsForOid.length > 0) {
-                            const presence = await Promise.all(
-                                targetsForOid.map((t) => hasMatchingLfsCache(t.filesAbs, { oid, size: t.size }))
-                            );
-                            if (presence.every(Boolean)) {
-                                this.debugLog(
-                                    `[GitService] Skipping reconcile download for oid ${oid} — all files-dir targets already present`
-                                );
-                                completed += 1;
-                                const progressMessage =
-                                    alreadyDownloaded > 0
-                                        ? `📎 Resuming: file ${alreadyDownloaded + completed} of ${totalFiles}`
-                                        : `📎 Downloading file ${completed} of ${totalToDownload}`;
-                                progress.report({
-                                    message: progressMessage,
-                                });
-                                continue;
-                            }
+                        const needed = await Promise.all(targetsForOid.map((t) => needsDownload(t, oid)));
+                        const downloadTargets = targetsForOid.filter((_, index) => needed[index]);
+                        if (downloadTargets.length === 0) {
+                            completed += 1;
+                            reportDownloadProgress();
+                            continue;
                         }
 
                         const action = actionByOid.get(oid);
                         if (!action?.href) {
                             this.debugLog(`[GitService] Missing download action for oid ${oid}`);
                             completed += 1;
-                            const progressMessage =
-                                alreadyDownloaded > 0
-                                    ? `📎 Resuming: file ${alreadyDownloaded + completed} of ${totalFiles}`
-                                    : `📎 Downloading file ${completed} of ${totalToDownload}`;
-                            progress.report({
-                                message: progressMessage,
-                            });
+                            reportDownloadProgress();
                             continue;
                         }
 
@@ -1852,19 +1846,31 @@ export class GitService {
                                 );
                             }
                             const bytes = new Uint8Array(await fileResp.arrayBuffer());
-                            const targets = oidToTargets.get(oid) ?? [];
+                            const targets = downloadTargets;
                             const downloaded = buildPointerInfo(bytes);
                             if (downloaded.oid !== oid || targets.some((t) => t.size !== downloaded.size)) {
                                 throw new Error(`Downloaded LFS object ${oid} failed integrity verification`);
                             }
-                            await Promise.all(
+                            const writes = await Promise.allSettled(
                                 targets.map(async (t) => {
-                                    await fs.promises.mkdir(path.dirname(t.filesAbs), {
-                                        recursive: true,
-                                    });
-                                    await fs.promises.writeFile(t.filesAbs, bytes);
+                                    const result = await writeLfsCacheSafely(
+                                        t.filesAbs, bytes, { oid, size: t.size }, () => pointerStillCurrent(t, oid)
+                                    );
+                                    if (result.recoveryPath) {
+                                        this.debugLog(`[GitService] Prior cache entry retained at ${result.recoveryPath}`);
+                                    }
+                                    if (result.status === "preserved" || result.status === "pointer-changed") {
+                                        const reason = result.status === "pointer-changed" ? "pointer changed during download" : "local media changed during download";
+                                        preservedFiles.set(t.filepath, reason + (result.recoveryPath ? `; recovery copy: ${result.recoveryPath}` : ""));
+                                    }
                                 })
                             );
+                            // Wait for every target before completing this object, including
+                            // restoration of local files when another target fails to write.
+                            const failures = writes.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+                            if (failures.length > 0) {
+                                throw new Error(`${failures.length} media target(s) could not be written: ${failures.map((failure) => String(failure.reason)).join("; ")}`);
+                            }
                             this.debugLog("[GitService] Downloaded LFS object", {
                                 oid,
                                 size: bytes.length,
@@ -1881,19 +1887,14 @@ export class GitService {
                             }
                         } finally {
                             completed += 1;
-                            const progressMessage =
-                                alreadyDownloaded > 0
-                                    ? `📎 Resuming: file ${alreadyDownloaded + completed} of ${totalFiles}`
-                                    : `📎 Downloading file ${completed} of ${totalToDownload}`;
-                            progress.report({
-                                message: progressMessage,
-                            });
+                            reportDownloadProgress();
                         }
                     }
                 };
 
                 const workers = Array.from({ length: Math.max(1, concurrency) }, () => runWorker());
                 await Promise.all(workers);
+                reportPreserved();
 
                 if (downloadFailureCount > 0) {
                     const fileList = downloadFailedOids.slice(0, 5).join(", ");
@@ -1905,7 +1906,7 @@ export class GitService {
                     vscode.window.showWarningMessage(msg);
                     progress.report({ message: `📎 Download complete with ${downloadFailureCount} failure(s)` });
                 } else {
-                    progress.report({ message: "📎 File download complete" });
+                    progress.report({ message: preservedFiles.size > 0 ? "📎 Download complete; local media preserved in skipped files" : "📎 File download complete" });
                 }
                 this.debugLog("[GitService] Completed reconcilePointersFilesystem");
             }
@@ -3531,15 +3532,7 @@ export class GitService {
                     // Ensure files/ dir has the raw bytes
                     if (this.isPointerPath(filepath)) {
                         const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                        await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                        try {
-                            await fs.promises.access(filesAbs, fs.constants.F_OK);
-                            this.debugLog(
-                                `[GitService] Files dir already has ${filepath}, not overwriting`
-                            );
-                        } catch {
-                            await fs.promises.writeFile(filesAbs, bytes);
-                        }
+                        await writeLfsCacheIfMissing(filesAbs, bytes);
                     }
 
                     uploadedLfsFiles.push(filepath);
@@ -3669,23 +3662,17 @@ export class GitService {
                         relativePath
                     );
 
-                    // If files/ already has real bytes, skip
-                    let needsDownload = true;
-                    try {
-                        const fileBuf = await fs.promises.readFile(filesAbs);
-                        const maybePointer = this.parseLfsPointer(fileBuf.toString("utf8"));
-                        if (!maybePointer) {
-                            needsDownload = false;
-                        }
-                    } catch {
-                        // missing file -> download
-                    }
-
-                    if (!needsDownload) continue;
-
                     const pointerText = await fs.promises.readFile(pointerFilePath, "utf8");
                     const pointer = this.parseLfsPointer(pointerText);
                     if (!pointer) {
+                        continue;
+                    }
+
+                    const cacheState = await inspectLfsCache(filesAbs, pointer);
+                    if (!canHydrateLfsCache(cacheState)) {
+                        if (cacheState === "protected") {
+                            console.warn(`[GitService] Preserving local media during publish: ${filesAbs}`);
+                        }
                         continue;
                     }
 
@@ -3694,9 +3681,22 @@ export class GitService {
                         { oid: pointer.oid, size: pointer.size }
                     );
 
-                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                    await fs.promises.writeFile(filesAbs, bytes);
-                    downloadedCount++;
+                    const downloaded = buildPointerInfo(bytes);
+                    if (downloaded.oid !== pointer.oid || downloaded.size !== pointer.size) {
+                        throw new Error(`Downloaded LFS object ${pointer.oid} failed integrity verification`);
+                    }
+                    const result = await writeLfsCacheSafely(filesAbs, bytes, pointer, async () => {
+                        try {
+                            const current = this.parseLfsPointer(await fs.promises.readFile(pointerFilePath, "utf8"));
+                            return current?.oid === pointer.oid && current.size === pointer.size;
+                        } catch { return false; }
+                    });
+                    if (result.status === "written") {
+                        downloadedCount++;
+                    } else if (result.status !== "matching") {
+                        console.warn(`[GitService] Skipped media replacement during publish: ${filesAbs}` +
+                            (result.recoveryPath ? `; recovery copy: ${result.recoveryPath}` : ""));
+                    }
                 } catch (e) {
                     console.warn("[GitService] Failed to download LFS bytes for publish:", e);
                 }
@@ -3840,9 +3840,12 @@ export class GitService {
                         await fs.promises.mkdir(targetDir, { recursive: true });
                     }
 
-                    // Copy pointer file
-                    await fs.promises.copyFile(pointerFilePath, targetPath);
-                    copiedCount++;
+                    // Existing media may be an unsynced recording whose pointer
+                    // write failed. Mode changes must never replace it with a stub.
+                    const pointerBytes = await fs.promises.readFile(pointerFilePath);
+                    if (await writeLfsCacheIfMissing(targetPath, pointerBytes)) {
+                        copiedCount++;
+                    }
                 } catch (error) {
                     const rel = path.relative(pointersDir, pointerFilePath);
                     console.error(`[populateFilesWithPointers] Failed to copy ${rel}:`, error);
@@ -4483,13 +4486,7 @@ export class GitService {
         // If the pointer lives under pointers directory, ensure materialized bytes exist in files directory
         if (this.isPointerPath(filepath)) {
             const filesAbs = this.getFilesPathForPointer(dir, filepath);
-            await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-            try {
-                await fs.promises.access(filesAbs, fs.constants.F_OK);
-                this.debugLog(`[GitService] Files dir already has ${filepath}, not overwriting`);
-            } catch {
-                await fs.promises.writeFile(filesAbs, buf);
-            }
+            await writeLfsCacheIfMissing(filesAbs, buf);
         } else {
             // Non-pointer path: do nothing (no smudging)
         }

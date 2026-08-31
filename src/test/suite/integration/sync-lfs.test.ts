@@ -8,12 +8,18 @@ import { registerMockAuthProvider } from "../../helpers/mockAuthProvider";
 import { GitLabService } from "../../../gitlab/GitLabService";
 import { SCMManager } from "../../../scm/SCMManager";
 import { StateManager } from "../../../state";
+import { buildPointerInfo, formatPointerInfo } from "../../../git/lfsPointerUtils";
 
 suite("Integration: sync uses Git LFS for pointer downloads", () => {
     let mockProvider: vscode.Disposable | undefined;
     let originalFetch: any;
     let workspaceDir: string;
     let originalGetExtension: any;
+    const originalGit = {
+        fetchOrigin: dugiteGit.fetchOrigin,
+        fastForward: dugiteGit.fastForward,
+        push: dugiteGit.push,
+    };
 
     suiteSetup(async () => {
         dugiteGit.useEmbeddedGitBinary();
@@ -78,16 +84,12 @@ suite("Integration: sync uses Git LFS for pointer downloads", () => {
         );
 
         // Place a valid pointer in pointers dir and ensure files dir missing
-        const fakeOid = "b".repeat(64);
+        const media = Buffer.from("hello-sync");
+        const pointerInfo = buildPointerInfo(media);
         const pointerRel = ".project/attachments/pointers/audio/sync.wav";
         const pointerAbs = path.join(workspaceDir, pointerRel);
         await fs.promises.mkdir(path.dirname(pointerAbs), { recursive: true });
-        const pointerText = [
-            "version https://git-lfs.github.com/spec/v1",
-            `oid sha256:${fakeOid}`,
-            "size 11",
-        ].join("\n");
-        await fs.promises.writeFile(pointerAbs, pointerText, "utf8");
+        await fs.promises.writeFile(pointerAbs, formatPointerInfo(pointerInfo));
 
         // Stage and commit the pointer so local HEAD includes it
         await dugiteGit.add(workspaceDir, pointerRel);
@@ -135,8 +137,7 @@ suite("Integration: sync uses Git LFS for pointer downloads", () => {
                 const resp = {
                     objects: [
                         {
-                            oid: fakeOid,
-                            size: 11,
+                            ...pointerInfo,
                             actions: {
                                 download: {
                                     href: "https://lfs-download.example.com/sync-obj",
@@ -153,7 +154,7 @@ suite("Integration: sync uses Git LFS for pointer downloads", () => {
             }
 
             if (url.startsWith("https://lfs-download.example.com/") && method === "GET") {
-                return new Response(Buffer.from("hello-sync"), { status: 200 });
+                return new Response(media, { status: 200 });
             }
 
             // Allow unrelated calls
@@ -162,7 +163,9 @@ suite("Integration: sync uses Git LFS for pointer downloads", () => {
     });
 
     teardown(async () => {
-        // Restore fetch and cleanup
+        // Restore every git stub: leaking fastForward makes later divergent-history
+        // tests appear to merge successfully without changing their actual history.
+        Object.assign(dugiteGit, originalGit);
         (globalThis as any).fetch = originalFetch;
         try {
             fs.rmSync(workspaceDir, { recursive: true, force: true });

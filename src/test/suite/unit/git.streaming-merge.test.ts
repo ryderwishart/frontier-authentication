@@ -233,7 +233,7 @@ suite("GitService: streaming merge regression", function () {
         assert.strictEqual(networkRequests, 0);
     });
 
-    test("auto-download checks cached content before issuing requests and replaces stale bytes", async () => {
+    test("auto-download preserves mismatched media and hydrates only pointer placeholders", async () => {
         mode = "auto-download";
         write(audioPath, pointer);
         commit("pointer for cache test");
@@ -250,17 +250,18 @@ suite("GitService: streaming merge regression", function () {
             }
             return new Response(media.toString());
         };
-        write(cachePath, Buffer.alloc(media.length, 88)); // same size, wrong OID
+        const localRecording = Buffer.alloc(media.length, 88); // same size, different recording
+        write(cachePath, localRecording);
+        await internal.reconcilePointersFilesystem(dir, auth);
+        assert.strictEqual(networkRequests, 0, "unknown local bytes must not trigger a replacement download");
+        assert.deepStrictEqual(fs.readFileSync(path.join(dir, cachePath)), localRecording);
+
+        write(cachePath, pointer); // an existing placeholder is not downloaded audio
         await internal.reconcilePointersFilesystem(dir, auth);
         assert.strictEqual(networkRequests, 2);
         assert.deepStrictEqual(fs.readFileSync(path.join(dir, cachePath)), media);
         await internal.reconcilePointersFilesystem(dir, auth);
         assert.strictEqual(networkRequests, 2, "the next reconciliation must use the valid cache");
-
-        write(cachePath, pointer); // an existing placeholder is not downloaded audio
-        await internal.reconcilePointersFilesystem(dir, auth);
-        assert.strictEqual(networkRequests, 4);
-        assert.deepStrictEqual(fs.readFileSync(path.join(dir, cachePath)), media);
     });
 
     test("an invalid download cannot overwrite the existing cache", async () => {
@@ -268,16 +269,18 @@ suite("GitService: streaming merge regression", function () {
         write(audioPath, pointer);
         commit("pointer for corrupt download test");
         const cachePath = audioPath.replace("/pointers/", "/files/");
-        const existing = Buffer.from("keep these bytes until a verified replacement is available");
+        const existing = pointer; // eligible for hydration, so verification is actually exercised
         write(cachePath, existing);
         const info = buildPointerInfo(media);
         globalThis.fetch = async (input) => {
+            networkRequests++;
             if (String(input).endsWith("/objects/batch")) {
                 return new Response(JSON.stringify({ objects: [{ ...info, actions: { download: { href: "https://example.invalid/audio" } } }] }));
             }
             return new Response("corrupt response");
         };
         await internal.reconcilePointersFilesystem(dir, auth);
+        assert.strictEqual(networkRequests, 2, "must validate a downloaded response, not skip the test");
         assert.deepStrictEqual(fs.readFileSync(path.join(dir, cachePath)), existing);
     });
 
