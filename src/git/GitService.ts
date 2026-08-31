@@ -1,4 +1,8 @@
 import * as dugiteGit from "./dugiteGit";
+import { assertMergeSnapshot } from "./mergeSnapshot";
+import type { MergeSnapshot } from "./mergeSnapshot";
+import { hasMatchingLfsCache } from "./lfsCacheValidation";
+import { isAtomicSaveTemp } from "./transientFiles";
 import { formatPointerInfo, buildPointerInfo } from "./lfsPointerUtils";
 import * as fs from "fs";
 import * as vscode from "vscode";
@@ -309,6 +313,7 @@ export interface ConflictedFile {
 
 export interface SyncResult {
     hadConflicts: boolean;
+    mergeSnapshot?: MergeSnapshot;
     conflicts?: ConflictedFile[];
     offline?: boolean;
     skippedDueToLock?: boolean;
@@ -1553,19 +1558,10 @@ export class GitService {
                         continue;
                     }
 
-                    // Pointer text present → ensure files dir has bytes (collect missing for batch download)
+                    // Streaming modes do not hydrate pointers during sync.
+                    if (!enableDownloads) { continue; }
                     const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                    let present = true;
-                    try {
-                        await fs.promises.access(filesAbs, fs.constants.F_OK);
-                        this.debugLog("[GitService] Files dir already has bytes", { filesAbs });
-                    } catch {
-                        present = false;
-                        this.debugLog("[GitService] Files dir missing bytes, scheduling download", {
-                            filesAbs,
-                        });
-                    }
+                    const present = await hasMatchingLfsCache(filesAbs, pointer);
                     if (!present) {
                         const targets = oidToTargets.get(pointer.oid) ?? [];
                         targets.push({ filesAbs, filepath, size: pointer.size });
@@ -1673,16 +1669,22 @@ export class GitService {
                         const { oid, target } = item;
                         try {
                             this.stateManager.incrementMetric("lfsHealAttempted");
-                            const exists = await fs.promises
-                                .access(target.filesAbs, fs.constants.F_OK)
-                                .then(() => true)
-                                .catch(() => false);
-                            if (!exists) {
-                                continue;
+                            let localBytes: Buffer | undefined;
+                            try {
+                                localBytes = await fs.promises.readFile(target.filesAbs);
+                            } catch { /* The cache may not exist yet. */ }
+                            if (!localBytes || buildPointerInfo(localBytes).oid !== oid) {
+                                const sourceUrl = await this.readLocalLfsSourceUrl(dir);
+                                if (!sourceUrl) { continue; }
+                                const sourceLfsUrl = sourceUrl.endsWith(".git") ? sourceUrl : `${sourceUrl}.git`;
+                                localBytes = Buffer.from(await downloadLFSObject(
+                                    { url: sourceLfsUrl, headers: {}, auth: effectiveAuth },
+                                    { oid, size: target.size }
+                                ));
                             }
-                            const localBytes = await fs.promises.readFile(target.filesAbs);
-                            if (localBytes.length === 0) {
-                                continue;
+                            const recovered = buildPointerInfo(localBytes);
+                            if (recovered.oid !== oid || recovered.size !== target.size) {
+                                throw new Error(`Recovered LFS object ${oid} failed integrity verification`);
                             }
                             this.debugLog(
                                 `[GitService] Healing missing LFS object ${oid} by re-uploading from files dir`
@@ -1803,14 +1805,7 @@ export class GitService {
                         const targetsForOid = oidToTargets.get(oid) ?? [];
                         if (targetsForOid.length > 0) {
                             const presence = await Promise.all(
-                                targetsForOid.map(async (t) => {
-                                    try {
-                                        await fs.promises.access(t.filesAbs, fs.constants.F_OK);
-                                        return true;
-                                    } catch {
-                                        return false;
-                                    }
-                                })
+                                targetsForOid.map((t) => hasMatchingLfsCache(t.filesAbs, { oid, size: t.size }))
                             );
                             if (presence.every(Boolean)) {
                                 this.debugLog(
@@ -1858,6 +1853,10 @@ export class GitService {
                             }
                             const bytes = new Uint8Array(await fileResp.arrayBuffer());
                             const targets = oidToTargets.get(oid) ?? [];
+                            const downloaded = buildPointerInfo(bytes);
+                            if (downloaded.oid !== oid || targets.some((t) => t.size !== downloaded.size)) {
+                                throw new Error(`Downloaded LFS object ${oid} failed integrity verification`);
+                            }
                             await Promise.all(
                                 targets.map(async (t) => {
                                     await fs.promises.mkdir(path.dirname(t.filesAbs), {
@@ -2311,41 +2310,23 @@ export class GitService {
             const { isDirty, status: workingCopyStatusBeforeCommit } =
                 await this.getWorkingCopyState(dir);
             if (isDirty) {
-                // Count changed files for progress reporting
-                const changedFiles = workingCopyStatusBeforeCommit.filter(
+                const pendingFiles = workingCopyStatusBeforeCommit.filter(
                     (entry) => entry[1] !== entry[2] || entry[2] !== entry[3]
                 ).length;
-
-                console.log(
-                    `[GitService] 💾 Committing ${changedFiles} file${changedFiles !== 1 ? "s" : ""} to local repository`
-                );
-                this.debugLog(
-                    `Working copy is dirty, committing ${changedFiles} file(s) (LFS-aware)`
-                );
-                if (this.progressCallback) {
-                    const commitMsg =
-                        changedFiles > 0
-                            ? `Committing ${changedFiles} file${changedFiles !== 1 ? "s" : ""}`
-                            : "Committing local changes";
-                    this.progressCallback("committing", 0, changedFiles, commitMsg);
-                }
+                this.progressCallback?.("committing", 0, pendingFiles, `Preparing ${pendingFiles} changed file(s)`);
                 uploadedLfsFiles = await this.addAllWithLFS(dir, auth);
-                if (uploadedLfsFiles.length > 0) {
-                    this.debugLog(
-                        `[GitService] Uploaded ${uploadedLfsFiles.length} LFS file(s) during commit:`,
-                        uploadedLfsFiles
-                    );
-                }
-                await this.commit(dir, options?.commitMessage || "Local changes", author);
-                console.log(
-                    `[GitService] ✓ Committed ${changedFiles} file${changedFiles !== 1 ? "s" : ""} successfully`
-                );
-                if (this.progressCallback) {
-                    const committedMsg =
-                        changedFiles > 0
-                            ? `Committed ${changedFiles} file${changedFiles !== 1 ? "s" : ""}`
-                            : "Local changes committed";
-                    this.progressCallback("committing", changedFiles, changedFiles, committedMsg);
+
+                // LFS worktree bytes can differ from their committed pointer
+                // while representing exactly the same object. Staging skips
+                // those files; do not create an empty commit on every sync.
+                const staged = (await dugiteGit.statusMatrix(dir)).filter((entry) => entry[1] !== entry[3]);
+                if (staged.length > 0) {
+                    console.log(`[GitService] Committing ${staged.length} staged file(s) to local repository`);
+                    await this.commit(dir, options?.commitMessage || "Local changes", author);
+                    this.progressCallback?.("committing", staged.length, staged.length, `Committed ${staged.length} file(s)`);
+                } else {
+                    console.log("[GitService] No staged content changes; skipping local commit");
+                    this.progressCallback?.("committing", 0, 0, "No local content changes to commit");
                 }
             } else {
                 console.log("[GitService] ✓ Working directory clean, no files to commit");
@@ -2766,8 +2747,9 @@ export class GitService {
             ];
 
             // 9. Get all files changed in either branch with enhanced conflict detection
-            const conflictResults = await Promise.allSettled(
-                allChangedFilePaths.map(async (filepath) => {
+            const conflictResults: Array<ConflictedFile | null> = new Array(allChangedFilePaths.length);
+            await runWithConcurrency(
+                allChangedFilePaths.map((filepath, index) => async () => {
                     let localContent = "";
                     let remoteContent = "";
                     let baseContent = "";
@@ -2797,52 +2779,30 @@ export class GitService {
                         (isDeletedLocally && !isAddedRemotely) ||
                         (isDeletedRemotely && !isAddedLocally);
 
-                    // Try to read local content if it exists in local HEAD
-                    try {
-                        if (!isDeletedLocally && !isAddedLocally) {
-                            const lBlob = await dugiteGit.readBlobAtRef(dir, localHead, filepath);
-                            localContent = new TextDecoder().decode(lBlob);
-                        } else if (isAddedLocally) {
-                            // For locally added files, read from working directory
-                            try {
-                                const fileContent = await fs.promises.readFile(
-                                    path.join(dir, filepath),
-                                    "utf8"
-                                );
-                                localContent = fileContent;
-                            } catch (e) {
-                                this.debugLog(`Error reading locally added file ${filepath}:`, e);
-                            }
+                    // Existence is known from the trees. A failed read of an
+                    // existing blob is not empty content and must stop the merge.
+                    const readExisting = async (ref: string, exists: boolean): Promise<Buffer> => {
+                        if (!exists) { return Buffer.alloc(0); }
+                        try {
+                            return await dugiteGit.readBlobAtRef(dir, ref, filepath);
+                        } catch (error) {
+                            throw new Error(`BLOB_READ_FAILED: ${filepath} at ${ref}: ${String(error)}`);
                         }
-                    } catch (err) {
-                        this.debugLog(`File ${filepath} doesn't exist in local HEAD`);
+                    };
+                    const localBytes = await readExisting(localHead, localExists);
+                    const remoteBytes = await readExisting(remoteHead, remoteExists);
+                    localContent = localBytes.toString("utf8");
+                    remoteContent = remoteBytes.toString("utf8");
+
+                    if (localExists && remoteExists && localBytes.equals(remoteBytes)) {
+                        conflictResults[index] = null;
+                        return;
                     }
 
-                    // Try to read remote content if it exists in remote HEAD
-                    try {
-                        if (!isDeletedRemotely && !isAddedRemotely) {
-                            const rBlob = await dugiteGit.readBlobAtRef(dir, remoteHead, filepath);
-                            remoteContent = new TextDecoder().decode(rBlob);
-                        } else if (isAddedRemotely) {
-                            try {
-                                const rBlob = await dugiteGit.readBlobAtRef(dir, remoteHead, filepath);
-                                remoteContent = new TextDecoder().decode(rBlob);
-                            } catch (e) {
-                                this.debugLog(`Error reading remotely added file ${filepath}:`, e);
-                            }
-                        }
-                    } catch (err) {
-                        this.debugLog(`File ${filepath} doesn't exist in remote HEAD`);
-                    }
-
-                    // Try to read base content if available
-                    try {
-                        if (updatedMergeBaseCommits.length > 0) {
-                            const bBlob = await dugiteGit.readBlobAtRef(dir, updatedMergeBaseCommits[0], filepath);
-                            baseContent = new TextDecoder().decode(bBlob);
-                        }
-                    } catch (err) {
-                        this.debugLog(`File ${filepath} doesn't exist in merge base`);
+                    const baseBytes = await readExisting(updatedMergeBaseCommits[0], baseExists);
+                    baseContent = baseBytes.toString("utf8");
+                    if ([localBytes, remoteBytes, baseBytes].some((bytes) => !Buffer.from(bytes.toString("utf8")).equals(bytes))) {
+                        throw new Error(`Cannot safely merge binary file ${filepath}; no content was changed.`);
                     }
 
                     // Special conflict cases handling
@@ -2880,8 +2840,8 @@ export class GitService {
                         isConflict = true;
                     }
 
-                    if (isConflict) {
-                        return {
+                    if (isConflict || localExists !== remoteExists) {
+                        conflictResults[index] = {
                             filepath,
                             ours: localContent,
                             theirs: remoteContent,
@@ -2889,45 +2849,18 @@ export class GitService {
                             isNew,
                             isDeleted,
                         };
+                    } else {
+                        conflictResults[index] = null;
                     }
-                    return null;
-                })
+                }),
+                8
             );
-            const conflictSettledFailures = conflictResults.filter(
-                (r): r is PromiseRejectedResult => r.status === "rejected"
-            );
-            if (conflictSettledFailures.length > 0) {
-                console.warn(
-                    `[GitService] ${conflictSettledFailures.length} file(s) could not be analysed for conflicts:`,
-                    conflictSettledFailures.map((f) => f.reason instanceof Error ? f.reason.message : String(f.reason))
-                );
-            }
-            const conflicts = conflictResults
-                .filter(
-                    (r): r is PromiseFulfilledResult<{
-                        filepath: string;
-                        ours: string;
-                        theirs: string;
-                        base: string;
-                        isNew: boolean;
-                        isDeleted: boolean;
-                    } | null> => r.status === "fulfilled"
-                )
-                .map((r) => r.value)
-                .filter(
-                    (v): v is {
-                        filepath: string;
-                        ours: string;
-                        theirs: string;
-                        base: string;
-                        isNew: boolean;
-                        isDeleted: boolean;
-                    } => v !== null
-                );
+            const conflicts = conflictResults.filter((file): file is ConflictedFile => file !== null);
 
             this.debugLog(`Found ${conflicts.length} conflicts that need resolution`);
             return {
                 hadConflicts: true,
+                mergeSnapshot: { localHead, remoteHead, baseHead: updatedMergeBaseCommits[0] },
                 conflicts,
                 uploadedLfsFiles,
                 allChangedFilePaths,
@@ -3035,7 +2968,8 @@ export class GitService {
         resolvedFiles: Array<{
             filepath: string;
             resolution: "deleted" | "created" | "modified";
-        }>
+        }>,
+        snapshot?: MergeSnapshot
     ): Promise<void> {
         // Check if sync is already in progress
         if (this.stateManager.isSyncLocked()) {
@@ -3050,6 +2984,13 @@ export class GitService {
             throw new Error("Failed to acquire sync lock. Please try again later.");
         }
 
+        let lastProgress = Date.now();
+        const heartbeat = setInterval(() => {
+            void this.stateManager.updateLockHeartbeat({
+                timestamp: Date.now(), lastProgress, phase: "merging",
+            }).catch((error) => this.debugLog("Merge heartbeat failed", error));
+        }, HEARTBEAT_INTERVAL);
+
         try {
             this.debugLog(
                 "=== Starting completeMerge because client called and passed resolved files ==="
@@ -3060,6 +3001,53 @@ export class GitService {
             if (!currentBranch) {
                 throw new Error("Not on any branch");
             }
+
+            // Old clients do not pass a snapshot. At least pin their refs at
+            // entry; current clients pin the commits analysed by syncChanges.
+            const expected = snapshot ?? {
+                localHead: await dugiteGit.resolveRef(dir, "HEAD"),
+                remoteHead: await dugiteGit.resolveRef(dir, this.getRemoteRef(currentBranch)),
+            };
+
+            // Fetch latest changes to ensure we have the most recent remote state
+            // BEFORE we read local/remote heads to build the merge commit. This avoids
+            // creating a merge commit against a stale remote head, which would cause
+            // the subsequent push to be rejected as a non-fast-forward update.
+            this.debugLog("[GitService] Fetching latest changes before merge completion");
+            const mergeRemoteUrl = await this.getRemoteUrl(dir);
+            const mergeFetchController = new AbortController();
+            await this.withTimeout(
+                dugiteGit.fetchOrigin(dir, auth, undefined, mergeFetchController.signal),
+                2 * 60 * 1000,
+                "Pre-merge fetch operation",
+                mergeRemoteUrl,
+                mergeFetchController,
+            );
+
+            // New remote commits must be analysed, never attached as parents
+            // of a tree that was resolved against an older remote.
+            let localHead: string;
+            let remoteHead: string;
+            try {
+                localHead = await dugiteGit.resolveRef(dir, currentBranch);
+            } catch (refErr) {
+                throw new Error(
+                    `Cannot resolve local branch '${currentBranch}': ${refErr instanceof Error ? refErr.message : String(refErr)}. ` +
+                    `The merge was not completed — no changes have been pushed.`
+                );
+            }
+            const remoteRef = this.getRemoteRef(currentBranch);
+            try {
+                remoteHead = await dugiteGit.resolveRef(dir, remoteRef);
+            } catch (refErr) {
+                throw new Error(
+                    `Cannot resolve remote ref '${remoteRef}': the remote branch may have been deleted. ` +
+                    `${refErr instanceof Error ? refErr.message : String(refErr)}. ` +
+                    `The merge was not completed — no changes have been pushed.`
+                );
+            }
+            assertMergeSnapshot(expected, { localHead, remoteHead });
+            lastProgress = Date.now();
 
             // Stage the resolved files based on their resolution type (LFS-aware).
             // Every resolved file MUST be staged successfully — if any fail, the
@@ -3090,6 +3078,7 @@ export class GitService {
                         this.debugLog(`Adding file to git (LFS-aware): ${filepath}`);
                         await this.stageResolvedFileWithLFS(dir, filepath, auth);
                     }
+                    lastProgress = Date.now();
                 } catch (stageErr) {
                     const detail = stageErr instanceof Error ? stageErr.message : String(stageErr);
                     console.error(
@@ -3111,45 +3100,10 @@ export class GitService {
                 );
             }
 
-            // Fetch latest changes to ensure we have the most recent remote state
-            // BEFORE we read local/remote heads to build the merge commit. This avoids
-            // creating a merge commit against a stale remote head, which would cause
-            // the subsequent push to be rejected as a non-fast-forward update.
-            this.debugLog("[GitService] Fetching latest changes before merge completion");
-            const mergeRemoteUrl = await this.getRemoteUrl(dir);
-            const mergeFetchController = new AbortController();
-            await this.withTimeout(
-                dugiteGit.fetchOrigin(dir, auth, undefined, mergeFetchController.signal),
-                2 * 60 * 1000,
-                "Pre-merge fetch operation",
-                mergeRemoteUrl,
-                mergeFetchController,
-            );
-
-            // Get the current state AFTER fetch so our merge commit reflects the latest
-            // remote tip. This guarantees that the resulting merge commit will be a
-            // fast-forward of the remote (barring a race where someone pushes again
-            // between this fetch and our push).
-            let localHead: string;
-            let remoteHead: string;
-            try {
-                localHead = await dugiteGit.resolveRef(dir, currentBranch);
-            } catch (refErr) {
-                throw new Error(
-                    `Cannot resolve local branch '${currentBranch}': ${refErr instanceof Error ? refErr.message : String(refErr)}. ` +
-                    `The merge was not completed — no changes have been pushed.`
-                );
-            }
-            const remoteRef = this.getRemoteRef(currentBranch);
-            try {
-                remoteHead = await dugiteGit.resolveRef(dir, remoteRef);
-            } catch (refErr) {
-                throw new Error(
-                    `Cannot resolve remote ref '${remoteRef}': the remote branch may have been deleted. ` +
-                    `${refErr instanceof Error ? refErr.message : String(refErr)}. ` +
-                    `The merge was not completed — no changes have been pushed.`
-                );
-            }
+            assertMergeSnapshot(expected, {
+                localHead: await dugiteGit.resolveRef(dir, "HEAD"),
+                remoteHead: await dugiteGit.resolveRef(dir, this.getRemoteRef(currentBranch)),
+            });
             const commitMessage = `Merge branch 'origin/${currentBranch}'`;
             this.debugLog(`Creating merge commit with message: ${commitMessage}`);
 
@@ -3173,6 +3127,7 @@ export class GitService {
             }
 
             // Push the merge commit with a more robust approach
+            lastProgress = Date.now();
             this.debugLog("Pushing merge commit");
             try {
                 // Try normal push first
@@ -3196,6 +3151,7 @@ export class GitService {
                 `Complete merge operation failed: ${error instanceof Error ? error.message : String(error)}`
             );
         } finally {
+            clearInterval(heartbeat);
             // Always release the lock when done, regardless of success or failure
             await this.stateManager.releaseSyncLock();
         }
@@ -3234,7 +3190,9 @@ export class GitService {
         dir: string,
         auth: { username: string; password: string; }
     ): Promise<string[]> {
-        const status = await dugiteGit.statusMatrix(dir);
+        const status = (await dugiteGit.statusMatrix(dir)).filter(
+            ([filepath, head]) => head !== 0 || !isAtomicSaveTemp(filepath)
+        );
         const uploadedLfsFiles: string[] = [];
 
         // Handle deletions
@@ -3359,31 +3317,6 @@ export class GitService {
                             }
                         }
 
-                        // Ensure files/ dir has bytes — download if missing
-                        await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                        let hasFile = true;
-                        try {
-                            await fs.promises.access(filesAbs, fs.constants.F_OK);
-                        } catch {
-                            hasFile = false;
-                        }
-                        if (!hasFile) {
-                            try {
-                                const bytes = await downloadLFSObject(
-                                    { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                                    { oid: existingPointer.oid, size: existingPointer.size }
-                                );
-                                await fs.promises.writeFile(filesAbs, bytes);
-                                this.debugLog(
-                                    `[GitService] Downloaded missing LFS bytes for ${filepath} into files dir`
-                                );
-                            } catch (e) {
-                                console.warn(
-                                    `[GitService] Failed to download bytes for existing pointer ${filepath}:`,
-                                    e
-                                );
-                            }
-                        }
                     }
                 continue; // pointer already staged — nothing more to do
             }
@@ -4055,139 +3988,6 @@ export class GitService {
         await this.safePush(dir, auth, options);
     }
 
-    private async ensureSingleLfsPointerHasMatchingFile(
-        dir: string,
-        filepath: string,
-        auth: { username: string; password: string; }
-    ): Promise<void> {
-        const remoteUrl = await this.getRemoteUrl(dir);
-        if (!remoteUrl) {
-            return;
-        }
-        const { cleanUrl, auth: embedded } = GitService.parseGitUrl(remoteUrl);
-        const effectiveAuth = auth ?? embedded;
-        const lfsBaseUrl = cleanUrl.endsWith(".git") ? cleanUrl : `${cleanUrl}.git`;
-
-        const headPointer = await this.readHeadPointerInfo(dir, filepath);
-        if (!headPointer) {
-            return;
-        }
-
-        try {
-            if (this.isPointerPath(filepath)) {
-                // Write to parallel files directory only
-                const filesAbs = this.getFilesPathForPointer(dir, filepath);
-                const attemptDownload = async () => {
-                    const bytes = await downloadLFSObject(
-                        { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                        { oid: headPointer.oid, size: headPointer.size }
-                    );
-                    await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                    // Only write if the file doesn't already exist in files directory
-                    try {
-                        await fs.promises.access(filesAbs, fs.constants.F_OK);
-                        this.debugLog(
-                            `[GitService] Files dir already has ${filepath}, not overwriting`
-                        );
-                    } catch {
-                        await fs.promises.writeFile(filesAbs, bytes);
-                    }
-                };
-
-                try {
-                    await attemptDownload();
-                    return;
-                } catch (err) {
-                    console.warn(
-                        `[GitService] Failed to download LFS object for ${filepath}:`,
-                        err
-                    );
-                    const message = err instanceof Error ? err.message : String(err);
-                    // If batch response omitted download action (missing on server), try to heal from local files dir
-                    if (/LFS download action missing/i.test(message)) {
-                        try {
-                            this.stateManager.incrementMetric("lfsHealAttempted");
-                            const localFilesAbs = this.getFilesPathForPointer(dir, filepath);
-                            const exists = await fs.promises
-                                .access(localFilesAbs, fs.constants.F_OK)
-                                .then(() => true)
-                                .catch(() => false);
-                            if (exists) {
-                                const localBytes = await fs.promises.readFile(localFilesAbs);
-                                if (localBytes.length > 0) {
-                                    this.debugLog(
-                                        `[GitService] Healing LFS object by re-uploading from files dir for ${filepath}`
-                                    );
-                                    await uploadBlobsToLFSBucket(
-                                        {
-                                            url: lfsBaseUrl,
-                                            headers: {},
-                                            auth: effectiveAuth,
-                                            recovery: { dir, filepaths: [filepath] },
-                                        },
-                                        [localBytes]
-                                    );
-                                    // Retry once after healing
-                                    await attemptDownload();
-                                    this.debugLog(
-                                        `[GitService] Healed and re-downloaded LFS object for ${filepath}`
-                                    );
-                                    this.stateManager.incrementMetric("lfsHealSucceeded");
-                                    return;
-                                }
-                            }
-                            // If not in files/, try to download from source repo (swap/migration scenario)
-                            const sourceUrl = await this.readLocalLfsSourceUrl(dir);
-                            if (sourceUrl) {
-                                const sourceLfsBaseUrl = sourceUrl.endsWith(".git")
-                                    ? sourceUrl
-                                    : `${sourceUrl}.git`;
-                                const sourceBytes = await downloadLFSObject(
-                                    { url: sourceLfsBaseUrl, headers: {}, auth: effectiveAuth },
-                                    { oid: headPointer.oid, size: headPointer.size }
-                                );
-                                await fs.promises.mkdir(path.dirname(filesAbs), { recursive: true });
-                                await fs.promises.writeFile(filesAbs, sourceBytes);
-                                await uploadBlobsToLFSBucket(
-                                    {
-                                        url: lfsBaseUrl,
-                                        headers: {},
-                                        auth: effectiveAuth,
-                                        recovery: { dir, filepaths: [filepath] },
-                                    },
-                                    [sourceBytes]
-                                );
-                                await attemptDownload();
-                                this.stateManager.incrementMetric("lfsHealSucceeded");
-                                return;
-                            }
-                            vscode.window.showWarningMessage(
-                                `Media file "${path.basename(filepath)}" is missing. The original author may need to re-upload it.`
-                            );
-                            this.stateManager.incrementMetric("lfsHealFailed");
-                        } catch (healErr) {
-                            console.warn(
-                                `[GitService] Healing attempt failed for ${filepath}:`,
-                                healErr
-                            );
-                            vscode.window.showWarningMessage(
-                                `Couldn't recover media file "${path.basename(filepath)}". Please re-upload the original file.`
-                            );
-                            this.stateManager.incrementMetric("lfsHealFailed");
-                        }
-                    }
-                }
-            } else {
-                // Non-pointer path: do nothing (no smudging)
-            }
-        } catch (err) {
-            console.warn(`[GitService] Failed to ensure LFS content for ${filepath}:`, err);
-            vscode.window.showWarningMessage(
-                `Media file "${path.basename(filepath)}" could not be loaded. It may become available after the next sync.`
-            );
-        }
-    }
-
     private async readLocalLfsSourceUrl(dir: string): Promise<string | undefined> {
         try {
             const settingsPath = path.join(dir, ".project", "localProjectSettings.json");
@@ -4205,12 +4005,14 @@ export class GitService {
         filepath: string,
         auth: { username: string; password: string; }
     ): Promise<void> {
-        // If HEAD blob is a pointer and this is a pointers path, ensure files dir has bytes; no smudging into pointer path
-        const headPointer = await this.readHeadPointerInfo(dir, filepath);
-        if (headPointer && this.isPointerPath(filepath)) {
-            // Ensure pointer has bytes in files dir
-            await this.ensureSingleLfsPointerHasMatchingFile(dir, filepath, auth);
-            return;
+        if (this.isPointerPath(filepath)) {
+            const bytes = await fs.promises.readFile(path.join(dir, filepath));
+            if (this.parseLfsPointer(bytes.toString("utf8"))) {
+                await dugiteGit.add(dir, filepath);
+                // Media hydration is handled by reconciliation AFTER commit,
+                // where stream-only / stream-and-save settings are respected.
+                return;
+            }
         }
 
         // Otherwise, if file should be tracked by LFS, add via LFS to stage pointer and ensure real bytes are in files dir when applicable
@@ -4653,36 +4455,6 @@ export class GitService {
                         }
                     }
 
-                    // Ensure parallel files directory has the real bytes; download if missing
-                    await fs.promises.mkdir(path.dirname(absolutePathToBlobFill), {
-                        recursive: true,
-                    });
-                    let hasFile = true;
-                    try {
-                        await fs.promises.access(absolutePathToBlobFill, fs.constants.F_OK);
-                        this.debugLog(
-                            `[GitService] Files dir already has ${filepath}, not overwriting`
-                        );
-                    } catch {
-                        hasFile = false;
-                    }
-                    if (!hasFile) {
-                        try {
-                            const bytes = await downloadLFSObject(
-                                { url: lfsBaseUrl, headers: {}, auth: effectiveAuth },
-                                { oid: existingPointer.oid, size: existingPointer.size }
-                            );
-                            await fs.promises.writeFile(absolutePathToBlobFill, bytes);
-                            this.debugLog(
-                                `[GitService] Downloaded missing LFS bytes for ${filepath} into files dir`
-                            );
-                        } catch (e) {
-                            console.warn(
-                                `[GitService] Failed to download bytes for existing pointer ${filepath}:`,
-                                e
-                            );
-                        }
-                    }
                 }
             return false; // exit early if the file is already an LFS pointer (no upload needed)
         }

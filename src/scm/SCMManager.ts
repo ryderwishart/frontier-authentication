@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import { ConflictedFile, GitService } from "../git/GitService";
+import type { MergeSnapshot } from "../git/mergeSnapshot";
+import { isAtomicSaveTemp } from "../git/transientFiles";
 import { GitLabService } from "../gitlab/GitLabService";
 import * as dugiteGit from "../git/dugiteGit";
 import { PublishWorkspaceOptions } from "../commands/scmCommands";
@@ -140,8 +142,8 @@ export class SCMManager {
         this.context.subscriptions.push(
             vscode.commands.registerCommand(
                 "frontier.completeMerge",
-                (resolvedFiles: ResolvedFile[], workspacePath: string | undefined) =>
-                    this.completeMerge(resolvedFiles, workspacePath)
+                (resolvedFiles: ResolvedFile[], workspacePath: string | undefined, snapshot?: MergeSnapshot) =>
+                    this.completeMerge(resolvedFiles, workspacePath, snapshot)
             )
         );
     }
@@ -387,6 +389,7 @@ export class SCMManager {
     }
 
     private shouldIgnoreFile(filePath: string): boolean {
+        if (isAtomicSaveTemp(filePath)) { return true; }
         const relativePath = vscode.workspace.asRelativePath(filePath);
         return this.gitIgnorePatterns.some((pattern) => {
             if (pattern.endsWith("/")) {
@@ -471,12 +474,15 @@ export class SCMManager {
          */
         allChangedFilePaths?: string[];
         remoteChangedFilePaths?: string[];
+        mergeSnapshot?: MergeSnapshot;
+        offline?: boolean;
+        uploadedLfsFiles?: string[];
     }> {
         // In-memory guard: prevents a second call from slipping through
         // between the isSyncLocked() check and the actual filesystem lock acquisition
         if (this.isSyncInProgress) {
             this.syncEventEmitter.fire({ status: "skipped", message: "Sync already in progress" });
-            return { hasConflicts: false };
+            return { hasConflicts: false, blocked: true };
         }
         this.isSyncInProgress = true;
 
@@ -496,6 +502,9 @@ export class SCMManager {
         blocked?: boolean;
         allChangedFilePaths?: string[];
         remoteChangedFilePaths?: string[];
+        mergeSnapshot?: MergeSnapshot;
+        offline?: boolean;
+        uploadedLfsFiles?: string[];
     }> {
         // Check extension version compatibility with project metadata before syncing
         const canSync = await checkMetadataVersionsForSync(this.context, isManualSync);
@@ -509,7 +518,7 @@ export class SCMManager {
             vscode.window.showInformationMessage(
                 "Sync already in progress. Please wait for it to finish."
             );
-            return { hasConflicts: false };
+            return { hasConflicts: false, blocked: true };
         }
 
         // Fire sync started event (only if lock is free)
@@ -689,7 +698,7 @@ export class SCMManager {
                     status: "skipped",
                     message: "Sync skipped: another sync in progress",
                 });
-                return { hasConflicts: false };
+                return { hasConflicts: false, blocked: true };
             }
 
             // If device was offline, report it instead of showing success
@@ -706,7 +715,7 @@ export class SCMManager {
                     status: "skipped",
                     message: "Sync skipped: device is offline",
                 });
-                return { hasConflicts: false };
+                return { hasConflicts: false, offline: true, uploadedLfsFiles: syncResult.uploadedLfsFiles };
             }
 
             // If we have conflicts, return them to client
@@ -716,12 +725,14 @@ export class SCMManager {
                     conflicts: syncResult.conflicts,
                     allChangedFilePaths: syncResult.allChangedFilePaths,
                     remoteChangedFilePaths: syncResult.remoteChangedFilePaths,
+                    mergeSnapshot: syncResult.mergeSnapshot,
+                    uploadedLfsFiles: syncResult.uploadedLfsFiles,
                 };
             }
 
             // Everything synced successfully
             syncSucceeded = true;
-            return { hasConflicts: false };
+            return { hasConflicts: false, uploadedLfsFiles: syncResult.uploadedLfsFiles };
         } catch (error) {
             console.error("Sync error:", error);
             // Fire sync error event
@@ -1060,7 +1071,8 @@ export class SCMManager {
     // Add new method to complete merge
     async completeMerge(
         resolvedFiles: ResolvedFile[],
-        workspacePath: string | undefined
+        workspacePath: string | undefined,
+        snapshot?: MergeSnapshot
     ): Promise<void> {
         const token = await this.gitLabService.getToken();
         if (!token) {
@@ -1085,6 +1097,6 @@ export class SCMManager {
         if (!workspacePath) {
             workspacePath = this.getWorkspacePath();
         }
-        await this.gitService.completeMerge(workspacePath, auth, author, resolvedFiles);
+        await this.gitService.completeMerge(workspacePath, auth, author, resolvedFiles, snapshot);
     }
 }

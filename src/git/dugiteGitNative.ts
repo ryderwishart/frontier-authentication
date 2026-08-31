@@ -739,7 +739,7 @@ export async function mergeCommit(
     // 3. Update HEAD to point to the new commit
     const branch = await currentBranch(dir);
     const ref = branch ? `refs/heads/${branch}` : "HEAD";
-    const updateResult = await gitExec(["update-ref", ref, commitOid], dir);
+    const updateResult = await gitExec(["update-ref", ref, commitOid, parents[0]], dir);
     assertSuccess("update-ref", updateResult);
 
     return commitOid;

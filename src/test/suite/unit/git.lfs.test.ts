@@ -4,6 +4,7 @@ import * as path from "path";
 import * as os from "os";
 import * as dugiteGit from "../../../git/dugiteGit";
 import { GitService } from "../../../git/GitService";
+import { buildPointerInfo } from "../../../git/lfsPointerUtils";
 
 suite("Git LFS - Empty Pointer Handling", () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "frontier-auth-lfs-"));
@@ -14,6 +15,7 @@ suite("Git LFS - Empty Pointer Handling", () => {
         isSyncLocked: () => false,
         acquireSyncLock: async () => true,
         releaseSyncLock: async () => {},
+        getRepoStrategy: () => "auto-download",
     };
 
     const git = new GitService(stateStub);
@@ -88,6 +90,7 @@ suite("Git LFS - High Priority Scenarios", () => {
         isSyncLocked: () => false,
         acquireSyncLock: async () => true,
         releaseSyncLock: async () => {},
+        getRepoStrategy: () => "auto-download",
     };
 
     const git = new GitService(stateStub);
@@ -247,16 +250,17 @@ suite("Git LFS - High Priority Scenarios", () => {
         );
     });
 
-    test("Existing pointer triggers download into files dir when missing", async () => {
+    test("Existing pointer defers download until download-enabled reconciliation", async () => {
         // Create a valid-looking pointer content (small stub matching spec)
         const rel = ".project/attachments/pointers/audio/need-download.wav";
         const abs = path.join(repoDir, rel);
         await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-        const fakeOid = "a".repeat(64);
+        const payload = Buffer.from("hello-bytes");
+        const { oid: fakeOid, size } = buildPointerInfo(payload);
         const pointerText = [
             "version https://git-lfs.github.com/spec/v1",
             `oid sha256:${fakeOid}`,
-            "size 12",
+            `size ${size}`,
         ].join("\n");
         await fs.promises.writeFile(abs, pointerText, "utf8");
 
@@ -266,7 +270,9 @@ suite("Git LFS - High Priority Scenarios", () => {
             await fs.promises.unlink(filesAbs);
         } catch {}
 
+        let requests = 0;
         (globalThis as any).fetch = async (input: any, init?: any) => {
+            requests++;
             const url = typeof input === "string" ? input : String(input);
             const method = init?.method || "GET";
             if (url.endsWith("/info/lfs/objects/batch") && method === "POST") {
@@ -274,7 +280,7 @@ suite("Git LFS - High Priority Scenarios", () => {
                     objects: [
                         {
                             oid: fakeOid,
-                            size: 12,
+                            size,
                             actions: {
                                 download: {
                                     href: "https://lfs-download.example.com/obj3",
@@ -297,7 +303,16 @@ suite("Git LFS - High Priority Scenarios", () => {
 
         await git.addAllWithLFS(repoDir, { username: "u", password: "p" });
 
-        // After staging, ensure files dir now has bytes
+        assert.strictEqual(requests, 0, "staging must not download media");
+        assert.strictEqual(fs.existsSync(filesAbs), false);
+        await git.commit(repoDir, "stage pointer", { name: "Test", email: "test@example.invalid" });
+        const reconciler = git as unknown as {
+            reconcilePointersFilesystem: (dir: string, auth: { username: string; password: string }) => Promise<void>;
+        };
+        await reconciler.reconcilePointersFilesystem(repoDir, { username: "u", password: "p" });
+        assert.strictEqual(requests, 2, "reconciliation fetches the batch and verified audio");
+
+        // After reconciliation, the files directory has verified bytes.
         const bytes = await fs.promises.readFile(filesAbs);
         assert.strictEqual(bytes.toString(), "hello-bytes");
     });
