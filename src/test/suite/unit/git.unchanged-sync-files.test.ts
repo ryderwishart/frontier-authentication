@@ -5,11 +5,12 @@ import * as path from "path";
 import { execFileSync } from "child_process";
 import * as vscode from "vscode";
 import * as dugiteGit from "../../../git/dugiteGit";
+import * as nativeGit from "../../../git/dugiteGitNative";
 import { GitService } from "../../../git/GitService";
 import { findRemoteEquivalentAdditions, findUnchangedSyncFiles } from "../../../git/unchangedSyncFiles";
 
 suite("GitService: unchanged sync file verification", function () {
-    this.timeout(30000);
+    this.timeout(120000);
     let dir: string;
     function git(...args: string[]): string {
         return execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
@@ -193,7 +194,8 @@ suite("GitService: unchanged sync file verification", function () {
                 dir,
                 { username: "oauth2", password: "token" },
                 { name: "Sync test", email: "test@example.invalid" },
-                []
+                [],
+                result.mergeSnapshot
             );
             const [, firstParent, secondParent] = git("rev-list", "--parents", "-n", "1", "HEAD").split(" ");
             assert.strictEqual(firstParent, localHead);
@@ -203,6 +205,72 @@ suite("GitService: unchanged sync file verification", function () {
             assert.ok(pointerPaths.every((filepath) =>
                 mergedEntries.get(filepath)?.oid === remoteEntries.get(filepath)?.oid
             ));
+        } finally {
+            (dugiteGit as any).fetchOrigin = originalFetch;
+            (dugiteGit as any).fastForward = originalFastForward;
+            (dugiteGit as any).push = originalPush;
+        }
+    });
+
+    test("fast-forwards 1,500 remote-equivalent files without a recovery commit", async () => {
+        dugiteGit.setForceBuiltin(false);
+        write("base.txt", "base");
+        git("add", "base.txt");
+        git("commit", "-qm", "base");
+        const baseHead = git("rev-parse", "HEAD");
+        const pointerDir = ".project/attachments/pointers/BOOK";
+        const pointerPaths = Array.from({ length: 1500 }, (_, index) =>
+            `${pointerDir}/fast-forward-${index}.wav`
+        );
+        const writePointers = () => {
+            fs.mkdirSync(path.join(dir, pointerDir), { recursive: true });
+            for (const [index, filepath] of pointerPaths.entries()) {
+                write(
+                    filepath,
+                    `version https://git-lfs.github.com/spec/v1\n` +
+                    `oid sha256:${index.toString(16).padStart(64, "b")}\nsize ${index}\n`
+                );
+            }
+        };
+
+        git("checkout", "-qb", "remote", baseHead);
+        writePointers();
+        git("add", ".");
+        git("commit", "-qm", "remote pointers");
+        const remoteHead = git("rev-parse", "HEAD");
+
+        git("checkout", "-q", "main");
+        git("remote", "add", "origin", "https://example.invalid/project.git");
+        git("update-ref", "refs/remotes/origin/main", remoteHead);
+        writePointers();
+        git("add", "--", ...pointerPaths.slice(0, 10));
+
+        const stateStub: any = {
+            isSyncLocked: () => false,
+            acquireSyncLock: async () => true,
+            updateLockHeartbeat: async () => {},
+            releaseSyncLock: async () => {},
+        };
+        const service = new GitService(stateStub);
+        (service as any).isOnline = async () => true;
+        (service as any).reconcilePointersFilesystem = async () => {};
+        const originalFetch = dugiteGit.fetchOrigin;
+        const originalFastForward = dugiteGit.fastForward;
+        const originalPush = dugiteGit.push;
+        (dugiteGit as any).fetchOrigin = async () => {};
+        (dugiteGit as any).fastForward = nativeGit.fastForward;
+        (dugiteGit as any).push = async () => {};
+
+        try {
+            const result = await service.syncChanges(
+                dir,
+                { username: "oauth2", password: "token" },
+                { name: "Sync test", email: "test@example.invalid" }
+            );
+            assert.strictEqual(result.hadConflicts, false);
+            assert.strictEqual(git("rev-parse", "HEAD"), remoteHead);
+            assert.strictEqual(git("rev-list", "--count", `${baseHead}..HEAD`), "1");
+            assert.strictEqual(git("status", "--porcelain"), "");
         } finally {
             (dugiteGit as any).fetchOrigin = originalFetch;
             (dugiteGit as any).fastForward = originalFastForward;
@@ -279,7 +347,8 @@ suite("GitService: unchanged sync file verification", function () {
                 dir,
                 { username: "oauth2", password: "token" },
                 { name: "Sync test", email: "test@example.invalid" },
-                []
+                [],
+                result.mergeSnapshot
             );
             const [, firstParent, secondParent] = git("rev-list", "--parents", "-n", "1", "HEAD").split(" ");
             assert.strictEqual(firstParent, localHead);
@@ -294,6 +363,100 @@ suite("GitService: unchanged sync file verification", function () {
             (dugiteGit as any).fetchOrigin = originalFetch;
             (dugiteGit as any).fastForward = originalFastForward;
             (dugiteGit as any).push = originalPush;
+        }
+    });
+
+    test("stages the resolved pointer without hydrating media", async () => {
+        dugiteGit.setForceBuiltin(false);
+        const pointerDir = ".project/attachments/pointers/BOOK";
+        const pointerPath = `${pointerDir}/resolved.wav`;
+        fs.mkdirSync(path.join(dir, pointerDir), { recursive: true });
+        const oldPointer =
+            `version https://git-lfs.github.com/spec/v1\n` +
+            `oid sha256:${"1".repeat(64)}\nsize 10\n`;
+        const newPointer =
+            `version https://git-lfs.github.com/spec/v1\n` +
+            `oid sha256:${"2".repeat(64)}\nsize 20\n`;
+        write(pointerPath, oldPointer);
+        git("add", ".");
+        git("commit", "-qm", "old pointer");
+        write(pointerPath, newPointer);
+
+        const stateStub: any = {
+            isSyncLocked: () => false,
+            acquireSyncLock: async () => true,
+            updateLockHeartbeat: async () => {},
+            releaseSyncLock: async () => {},
+        };
+        const service = new GitService(stateStub);
+        await (service as any).stageResolvedFileWithLFS(
+            dir,
+            pointerPath,
+            { username: "oauth2", password: "token" }
+        );
+
+        assert.strictEqual(git("show", `:${pointerPath}`), newPointer.trim());
+        assert.strictEqual(
+            fs.existsSync(path.join(dir, ".project/attachments/files/BOOK/resolved.wav")),
+            false,
+            "merge staging must not materialize media in the files directory"
+        );
+    });
+
+    test("rejects a merge when the remote advances after conflict analysis", async () => {
+        dugiteGit.setForceBuiltin(false);
+        write("base.txt", "base");
+        git("add", "base.txt");
+        git("commit", "-qm", "base");
+        const baseHead = git("rev-parse", "HEAD");
+
+        write("local.txt", "local");
+        git("add", ".");
+        git("commit", "-qm", "local");
+        const localHead = git("rev-parse", "HEAD");
+
+        git("checkout", "-qb", "remote", baseHead);
+        write("remote.txt", "remote");
+        git("add", ".");
+        git("commit", "-qm", "remote");
+        const remoteHead = git("rev-parse", "HEAD");
+        write("advanced.txt", "new remote work");
+        git("add", ".");
+        git("commit", "-qm", "remote advanced");
+        const advancedRemoteHead = git("rev-parse", "HEAD");
+
+        git("checkout", "-q", "main");
+        git("remote", "add", "origin", "https://example.invalid/project.git");
+        git("update-ref", "refs/remotes/origin/main", remoteHead);
+        const indexTree = git("write-tree");
+
+        const stateStub: any = {
+            isSyncLocked: () => false,
+            acquireSyncLock: async () => true,
+            updateLockHeartbeat: async () => {},
+            releaseSyncLock: async () => {},
+        };
+        const service = new GitService(stateStub);
+        const originalFetch = dugiteGit.fetchOrigin;
+        (dugiteGit as any).fetchOrigin = async () => {
+            await dugiteGit.updateRef(dir, "refs/remotes/origin/main", advancedRemoteHead);
+        };
+
+        try {
+            await assert.rejects(
+                service.completeMerge(
+                    dir,
+                    { username: "oauth2", password: "token" },
+                    { name: "Sync test", email: "test@example.invalid" },
+                    [],
+                    { localHead, remoteHead, baseHead }
+                ),
+                /MERGE_STATE_CHANGED:/
+            );
+            assert.strictEqual(git("rev-parse", "HEAD"), localHead);
+            assert.strictEqual(git("write-tree"), indexTree);
+        } finally {
+            (dugiteGit as any).fetchOrigin = originalFetch;
         }
     });
 });

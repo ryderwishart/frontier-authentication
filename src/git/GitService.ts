@@ -3,6 +3,8 @@ import {
     findRemoteEquivalentAdditions,
     findUnchangedSyncFiles,
 } from "./unchangedSyncFiles";
+import { assertMergeSnapshot } from "./mergeSnapshot";
+import type { MergeSnapshot } from "./mergeSnapshot";
 import { formatPointerInfo, buildPointerInfo } from "./lfsPointerUtils";
 import * as fs from "fs";
 import * as vscode from "vscode";
@@ -329,6 +331,7 @@ export interface ConflictedFile {
 
 export interface SyncResult {
     hadConflicts: boolean;
+    mergeSnapshot?: MergeSnapshot;
     conflicts?: ConflictedFile[];
     offline?: boolean;
     skippedDueToLock?: boolean;
@@ -2498,6 +2501,49 @@ export class GitService {
                 return { hadConflicts: false, uploadedLfsFiles };
             }
 
+            // The recovery scan removed remote-equivalent residue from the
+            // index so it could not become a bogus local commit. Put the exact
+            // immutable remote blobs back into the index before fast-forwarding.
+            // Git can then update HEAD without treating the existing worktree
+            // files as untracked files that would be overwritten.
+            if (remoteEquivalentFiles.size > 0) {
+                const adoptionSnapshot = { localHead, remoteHead };
+                const adoptionCandidates = await findRemoteEquivalentAdditions(
+                    dir,
+                    adoptionSnapshot,
+                    await dugiteGit.statusMatrix(dir),
+                );
+                try {
+                    await assertSyncHeads(dir, remoteRef, adoptionSnapshot);
+                    const remoteEntries = await dugiteGit.blobEntriesAtRef(dir, remoteHead);
+                    await dugiteGit.setIndexEntries(
+                        dir,
+                        [...adoptionCandidates].map((filepath) => {
+                            const entry = remoteEntries.get(filepath);
+                            if (!entry) {
+                                throw new Error(`Remote recovery blob disappeared: ${filepath}`);
+                            }
+                            return { filepath, ...entry };
+                        })
+                    );
+                    await assertSyncHeads(dir, remoteRef, adoptionSnapshot);
+                    const verified = await findRemoteEquivalentAdditions(
+                        dir,
+                        adoptionSnapshot,
+                        await dugiteGit.statusMatrix(dir),
+                    );
+                    if (verified.size !== adoptionCandidates.size) {
+                        throw new Error("Remote recovery index verification failed before fast-forward");
+                    }
+                    remoteEquivalentFiles = verified;
+                } catch (error) {
+                    // Keep disk content intact, but never leave a partially
+                    // adopted index after a verification or history race.
+                    await dugiteGit.removeMany(dir, [...adoptionCandidates]);
+                    throw error;
+                }
+            }
+
             // Get files changed in local HEAD (this doesn't need updating after refetch)
             const localStatusMatrix = await dugiteGit.statusMatrix(dir);
 
@@ -3036,6 +3082,11 @@ export class GitService {
             this.debugLog(`Found ${conflicts.length} conflicts that need resolution`);
             return {
                 hadConflicts: true,
+                mergeSnapshot: {
+                    localHead,
+                    remoteHead,
+                    baseHead: updatedMergeBaseCommits[0],
+                },
                 conflicts,
                 uploadedLfsFiles,
                 allChangedFilePaths,
@@ -3143,7 +3194,8 @@ export class GitService {
         resolvedFiles: Array<{
             filepath: string;
             resolution: "deleted" | "created" | "modified";
-        }>
+        }>,
+        snapshot?: MergeSnapshot
     ): Promise<void> {
         // Check if sync is already in progress
         if (this.stateManager.isSyncLocked()) {
@@ -3168,6 +3220,47 @@ export class GitService {
             if (!currentBranch) {
                 throw new Error("Not on any branch");
             }
+
+            // Current clients pass the exact commits used for conflict analysis.
+            // For older clients, pin the refs at entry so a fetch that advances
+            // the remote still aborts instead of committing a stale resolution.
+            const remoteRef = this.getRemoteRef(currentBranch);
+            const expectedSnapshot = snapshot ?? {
+                localHead: await dugiteGit.resolveRef(dir, "HEAD"),
+                remoteHead: await dugiteGit.resolveRef(dir, remoteRef),
+            };
+
+            this.debugLog("[GitService] Fetching latest changes before merge completion");
+            const mergeRemoteUrl = await this.getRemoteUrl(dir);
+            const mergeFetchController = new AbortController();
+            await this.withTimeout(
+                dugiteGit.fetchOrigin(dir, auth, undefined, mergeFetchController.signal),
+                2 * 60 * 1000,
+                "Pre-merge fetch operation",
+                mergeRemoteUrl,
+                mergeFetchController,
+            );
+
+            let localHead: string;
+            let remoteHead: string;
+            try {
+                localHead = await dugiteGit.resolveRef(dir, currentBranch);
+            } catch (refErr) {
+                throw new Error(
+                    `Cannot resolve local branch '${currentBranch}': ${refErr instanceof Error ? refErr.message : String(refErr)}. ` +
+                    `The merge was not completed — no changes have been pushed.`
+                );
+            }
+            try {
+                remoteHead = await dugiteGit.resolveRef(dir, remoteRef);
+            } catch (refErr) {
+                throw new Error(
+                    `Cannot resolve remote ref '${remoteRef}': the remote branch may have been deleted. ` +
+                    `${refErr instanceof Error ? refErr.message : String(refErr)}. ` +
+                    `The merge was not completed — no changes have been pushed.`
+                );
+            }
+            assertMergeSnapshot(expectedSnapshot, { localHead, remoteHead });
 
             // Stage the resolved files based on their resolution type (LFS-aware).
             // Every resolved file MUST be staged successfully — if any fail, the
@@ -3219,45 +3312,10 @@ export class GitService {
                 );
             }
 
-            // Fetch latest changes to ensure we have the most recent remote state
-            // BEFORE we read local/remote heads to build the merge commit. This avoids
-            // creating a merge commit against a stale remote head, which would cause
-            // the subsequent push to be rejected as a non-fast-forward update.
-            this.debugLog("[GitService] Fetching latest changes before merge completion");
-            const mergeRemoteUrl = await this.getRemoteUrl(dir);
-            const mergeFetchController = new AbortController();
-            await this.withTimeout(
-                dugiteGit.fetchOrigin(dir, auth, undefined, mergeFetchController.signal),
-                2 * 60 * 1000,
-                "Pre-merge fetch operation",
-                mergeRemoteUrl,
-                mergeFetchController,
-            );
-
-            // Get the current state AFTER fetch so our merge commit reflects the latest
-            // remote tip. This guarantees that the resulting merge commit will be a
-            // fast-forward of the remote (barring a race where someone pushes again
-            // between this fetch and our push).
-            let localHead: string;
-            let remoteHead: string;
-            try {
-                localHead = await dugiteGit.resolveRef(dir, currentBranch);
-            } catch (refErr) {
-                throw new Error(
-                    `Cannot resolve local branch '${currentBranch}': ${refErr instanceof Error ? refErr.message : String(refErr)}. ` +
-                    `The merge was not completed — no changes have been pushed.`
-                );
-            }
-            const remoteRef = this.getRemoteRef(currentBranch);
-            try {
-                remoteHead = await dugiteGit.resolveRef(dir, remoteRef);
-            } catch (refErr) {
-                throw new Error(
-                    `Cannot resolve remote ref '${remoteRef}': the remote branch may have been deleted. ` +
-                    `${refErr instanceof Error ? refErr.message : String(refErr)}. ` +
-                    `The merge was not completed — no changes have been pushed.`
-                );
-            }
+            assertMergeSnapshot(expectedSnapshot, {
+                localHead: await dugiteGit.resolveRef(dir, "HEAD"),
+                remoteHead: await dugiteGit.resolveRef(dir, remoteRef),
+            });
             const commitMessage = `Merge branch 'origin/${currentBranch}'`;
             this.debugLog(`Creating merge commit with message: ${commitMessage}`);
 
@@ -4316,12 +4374,14 @@ export class GitService {
         filepath: string,
         auth: { username: string; password: string; }
     ): Promise<void> {
-        // If HEAD blob is a pointer and this is a pointers path, ensure files dir has bytes; no smudging into pointer path
-        const headPointer = await this.readHeadPointerInfo(dir, filepath);
-        if (headPointer && this.isPointerPath(filepath)) {
-            // Ensure pointer has bytes in files dir
-            await this.ensureSingleLfsPointerHasMatchingFile(dir, filepath, auth);
-            return;
+        if (this.isPointerPath(filepath)) {
+            const bytes = await fs.promises.readFile(path.join(dir, filepath));
+            if (this.parseLfsPointer(bytes.toString("utf8"))) {
+                await dugiteGit.add(dir, filepath);
+                // Reconciliation after the merge owns hydration and respects
+                // stream-only, stream-and-save, and auto-download settings.
+                return;
+            }
         }
 
         // Otherwise, if file should be tracked by LFS, add via LFS to stage pointer and ensure real bytes are in files dir when applicable

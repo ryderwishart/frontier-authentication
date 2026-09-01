@@ -8,6 +8,7 @@ import { PublishWorkspaceOptions } from "../commands/scmCommands";
 import { StateManager } from "../state";
 import { ResolvedFile } from "../extension";
 import { MediaFilesStrategy } from "../types/state";
+import type { MergeSnapshot } from "../git/mergeSnapshot";
 import { checkMetadataVersionsForSync } from "../utils/extensionVersionChecker";
 import {
     checkRequiredVersion,
@@ -140,8 +141,11 @@ export class SCMManager {
         this.context.subscriptions.push(
             vscode.commands.registerCommand(
                 "frontier.completeMerge",
-                (resolvedFiles: ResolvedFile[], workspacePath: string | undefined) =>
-                    this.completeMerge(resolvedFiles, workspacePath)
+                (
+                    resolvedFiles: ResolvedFile[],
+                    workspacePath: string | undefined,
+                    snapshot?: MergeSnapshot
+                ) => this.completeMerge(resolvedFiles, workspacePath, snapshot)
             )
         );
     }
@@ -1060,7 +1064,8 @@ export class SCMManager {
     // Add new method to complete merge
     async completeMerge(
         resolvedFiles: ResolvedFile[],
-        workspacePath: string | undefined
+        workspacePath: string | undefined,
+        snapshot?: MergeSnapshot
     ): Promise<void> {
         const token = await this.gitLabService.getToken();
         if (!token) {
@@ -1085,6 +1090,6 @@ export class SCMManager {
         if (!workspacePath) {
             workspacePath = this.getWorkspacePath();
         }
-        await this.gitService.completeMerge(workspacePath, auth, author, resolvedFiles);
+        await this.gitService.completeMerge(workspacePath, auth, author, resolvedFiles, snapshot);
     }
 }
