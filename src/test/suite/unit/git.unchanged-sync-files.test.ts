@@ -1,0 +1,299 @@
+import * as assert from "assert";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import { execFileSync } from "child_process";
+import * as vscode from "vscode";
+import * as dugiteGit from "../../../git/dugiteGit";
+import { GitService } from "../../../git/GitService";
+import { findRemoteEquivalentAdditions, findUnchangedSyncFiles } from "../../../git/unchangedSyncFiles";
+
+suite("GitService: unchanged sync file verification", function () {
+    this.timeout(30000);
+    let dir: string;
+    function git(...args: string[]): string {
+        return execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
+            cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
+    }
+    function write(file: string, bytes: string | Buffer): void {
+        fs.writeFileSync(path.join(dir, file), bytes);
+    }
+    suiteSetup(async () => {
+        await vscode.extensions.getExtension("frontier-rnd.frontier-authentication")?.activate();
+    });
+    setup(() => {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), "frontier-unchanged-sync-"));
+        git("init", "-q", "-b", "main");
+        git("config", "user.name", "Sync verification");
+        git("config", "user.email", "test@example.invalid");
+        git("config", "core.autocrlf", "false");
+        const locator = process.platform === "win32" ? "where.exe" : "which";
+        const executable = execFileSync(locator, ["git"], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
+        dugiteGit.setGitBinaryPath(path.dirname(path.dirname(executable)), execFileSync(executable, ["--exec-path"], { encoding: "utf8" }).trim());
+    });
+    teardown(() => {
+        dugiteGit.setForceBuiltin(false);
+        dugiteGit.useEmbeddedGitBinary();
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    for (const builtin of [false, true]) {
+        test(`requires both commits, index and actual disk bytes to match (${builtin ? "builtin" : "native"})`, async () => {
+            dugiteGit.setForceBuiltin(builtin);
+            const unusual = process.platform === "win32" ? "unicode-دری.txt" : "unicode-دری\twith\nnewline.txt";
+            const files = ["same.bin", "edited.bin", "missing.txt", "staged.txt", "different.bin", "mode.txt", unusual];
+            for (const file of files) { write(file, Buffer.from([0xff])); }
+            git("add", ".");
+            git("commit", "-qm", "base");
+            const localHead = git("rev-parse", "HEAD");
+            git("checkout", "-qb", "remote");
+            write("incoming.txt", "remote-only file left on disk");
+            write("different.bin", Buffer.from([0xfe]));
+            git("add", ".");
+            git("update-index", "--chmod=+x", "mode.txt");
+            git("commit", "-qm", "remote content and mode changes");
+            git("checkout-index", "--force", "--", "mode.txt");
+            const remoteHead = git("rev-parse", "HEAD");
+            git("checkout", "-q", "main");
+            write("incoming.txt", "remote-only file left on disk");
+            write("edited.bin", Buffer.from([0xfe]));
+            fs.unlinkSync(path.join(dir, "missing.txt"));
+            write("staged.txt", "new staged work");
+            git("add", "staged.txt");
+            write("staged.txt", Buffer.from([0xff]));
+
+            // Deliberately stale clean statuses for edited/missing files prove
+            // actual disk bytes are checked independently of Git's stat cache.
+            const status: dugiteGit.StatusMatrixEntry[] = files.map(file => [file, 1, 1, file === "staged.txt" ? 2 : 1]);
+            status.push(["incoming.txt", 0, 1, 2]);
+            const unchanged = await findUnchangedSyncFiles(dir, { localHead, remoteHead }, status);
+            assert.deepStrictEqual([...unchanged].sort(), ["same.bin", unusual].sort());
+            const entries = await dugiteGit.blobEntriesAtRef(dir, localHead);
+            assert.ok(entries.has(unusual), "Tree parsing must preserve tabs, newlines and Unicode");
+            assert.strictEqual(entries.get("mode.txt")?.mode, 0o100644);
+            await assert.rejects(dugiteGit.blobEntriesAtRef(dir, "refs/heads/nonexistent"),
+                "Unreadable trees must not look like empty trees");
+        });
+
+        test(`recognizes only byte-, mode- and index-identical remote additions (${builtin ? "builtin" : "native"})`, async () => {
+            dugiteGit.setForceBuiltin(builtin);
+            write("base.txt", "base");
+            git("add", "base.txt");
+            git("commit", "-qm", "base");
+            const localHead = git("rev-parse", "HEAD");
+            git("checkout", "-qb", "remote");
+            write("exact.bin", Buffer.from([0x00, 0xff, 0x7f]));
+            write("staged-exact.bin", "remote staged bytes");
+            write("different-index.bin", "remote worktree bytes");
+            write("missing.bin", "remote but missing locally");
+            write("mode.sh", "#!/bin/sh\nexit 0\n");
+            fs.chmodSync(path.join(dir, "mode.sh"), 0o755);
+            git("add", ".");
+            git("update-index", "--chmod=+x", "mode.sh");
+            git("commit", "-qm", "remote additions");
+            const remoteHead = git("rev-parse", "HEAD");
+            git("checkout", "-q", "main");
+
+            write("exact.bin", Buffer.from([0x00, 0xff, 0x7f]));
+            write("staged-exact.bin", "remote staged bytes");
+            git("add", "staged-exact.bin");
+            write("different-index.bin", "valuable staged bytes");
+            git("add", "different-index.bin");
+            write("different-index.bin", "remote worktree bytes");
+            write("mode.sh", "#!/bin/sh\nexit 0\n");
+            fs.chmodSync(path.join(dir, "mode.sh"), 0o644);
+
+            const equivalent = await findRemoteEquivalentAdditions(
+                dir,
+                { localHead, remoteHead },
+                await dugiteGit.statusMatrix(dir),
+            );
+            const expected = ["exact.bin", "staged-exact.bin"];
+            if (process.platform === "win32") { expected.push("mode.sh"); }
+            assert.deepStrictEqual([...equivalent].sort(), expected.sort());
+        });
+    }
+
+    test("recovers 1,500 interrupted remote additions without committing or reporting them", async () => {
+        dugiteGit.setForceBuiltin(false);
+        write("base.txt", "base");
+        git("add", "base.txt");
+        git("commit", "-qm", "base");
+        const baseHead = git("rev-parse", "HEAD");
+
+        git("checkout", "-qb", "remote");
+        const pointerDir = ".project/attachments/pointers/BOOK";
+        fs.mkdirSync(path.join(dir, pointerDir), { recursive: true });
+        const pointerPaths = Array.from({ length: 1500 }, (_, index) =>
+            `${pointerDir}/audio-${index}.wav`
+        );
+        for (const [index, filepath] of pointerPaths.entries()) {
+            write(filepath, `version https://git-lfs.github.com/spec/v1\noid sha256:${index.toString(16).padStart(64, "0")}\nsize ${index}\n`);
+        }
+        git("add", ".");
+        git("commit", "-qm", "remote pointers");
+        const remoteHead = git("rev-parse", "HEAD");
+
+        git("checkout", "-q", "main");
+        write("local.txt", "genuine local history");
+        git("add", "local.txt");
+        git("commit", "-qm", "local work");
+        const localHead = git("rev-parse", "HEAD");
+        assert.notStrictEqual(localHead, baseHead);
+        git("remote", "add", "origin", "https://example.invalid/project.git");
+        git("update-ref", "refs/remotes/origin/main", remoteHead);
+
+        fs.mkdirSync(path.join(dir, pointerDir), { recursive: true });
+        for (const [index, filepath] of pointerPaths.entries()) {
+            write(filepath, `version https://git-lfs.github.com/spec/v1\noid sha256:${index.toString(16).padStart(64, "0")}\nsize ${index}\n`);
+        }
+        git("add", ".");
+
+        const stateStub: any = {
+            isSyncLocked: () => false,
+            acquireSyncLock: async () => true,
+            updateLockHeartbeat: async () => {},
+            releaseSyncLock: async () => {},
+        };
+        const service = new GitService(stateStub);
+        (service as any).isOnline = async () => true;
+        (service as any).reconcilePointersFilesystem = async () => {};
+        const originalFetch = dugiteGit.fetchOrigin;
+        const originalFastForward = dugiteGit.fastForward;
+        const originalPush = dugiteGit.push;
+        (dugiteGit as any).fetchOrigin = async () => {};
+        (dugiteGit as any).fastForward = async () => {
+            throw new Error("divergent histories");
+        };
+        (dugiteGit as any).push = async () => {};
+
+        try {
+            const result = await service.syncChanges(
+                dir,
+                { username: "oauth2", password: "token" },
+                { name: "Sync test", email: "test@example.invalid" }
+            );
+
+            assert.strictEqual(result.hadConflicts, true);
+            assert.strictEqual(git("rev-parse", "HEAD"), localHead, "recovery must not make a local commit");
+            assert.ok(pointerPaths.every((filepath) =>
+                !result.allChangedFilePaths?.includes(filepath) &&
+                !result.remoteChangedFilePaths?.includes(filepath) &&
+                !result.conflicts?.some((conflict) => conflict.filepath === filepath)
+            ));
+
+            const remoteEntries = await dugiteGit.blobEntriesAtRef(dir, remoteHead);
+            const indexEntries = await dugiteGit.blobEntriesAtIndex(dir);
+            for (const filepath of pointerPaths) {
+                assert.deepStrictEqual(indexEntries.get(filepath), remoteEntries.get(filepath));
+            }
+
+            await service.completeMerge(
+                dir,
+                { username: "oauth2", password: "token" },
+                { name: "Sync test", email: "test@example.invalid" },
+                []
+            );
+            const [, firstParent, secondParent] = git("rev-list", "--parents", "-n", "1", "HEAD").split(" ");
+            assert.strictEqual(firstParent, localHead);
+            assert.strictEqual(secondParent, remoteHead);
+            const mergedEntries = await dugiteGit.blobEntriesAtRef(dir, "HEAD");
+            assert.ok(mergedEntries.has("local.txt"));
+            assert.ok(pointerPaths.every((filepath) =>
+                mergedEntries.get(filepath)?.oid === remoteEntries.get(filepath)?.oid
+            ));
+        } finally {
+            (dugiteGit as any).fetchOrigin = originalFetch;
+            (dugiteGit as any).fastForward = originalFastForward;
+            (dugiteGit as any).push = originalPush;
+        }
+    });
+
+    test("converges a prior local commit containing 1,500 byte-identical remote pointers", async () => {
+        dugiteGit.setForceBuiltin(false);
+        write("base.txt", "base");
+        git("add", "base.txt");
+        git("commit", "-qm", "base");
+        const baseHead = git("rev-parse", "HEAD");
+        const pointerDir = ".project/attachments/pointers/BOOK";
+        const pointerPaths = Array.from({ length: 1500 }, (_, index) =>
+            `${pointerDir}/committed-${index}.wav`
+        );
+        const writePointers = () => {
+            fs.mkdirSync(path.join(dir, pointerDir), { recursive: true });
+            for (const [index, filepath] of pointerPaths.entries()) {
+                write(filepath, `version https://git-lfs.github.com/spec/v1\noid sha256:${index.toString(16).padStart(64, "a")}\nsize ${index}\n`);
+            }
+        };
+
+        git("checkout", "-qb", "remote");
+        writePointers();
+        git("add", ".");
+        git("commit", "-qm", "remote pointers");
+        const remoteHead = git("rev-parse", "HEAD");
+
+        git("checkout", "-q", "main");
+        assert.strictEqual(git("rev-parse", "HEAD"), baseHead);
+        writePointers();
+        write("local.txt", "genuine local history");
+        git("add", ".");
+        git("commit", "-qm", "interrupted sync residue and local work");
+        const localHead = git("rev-parse", "HEAD");
+        git("remote", "add", "origin", "https://example.invalid/project.git");
+        git("update-ref", "refs/remotes/origin/main", remoteHead);
+
+        const stateStub: any = {
+            isSyncLocked: () => false,
+            acquireSyncLock: async () => true,
+            updateLockHeartbeat: async () => {},
+            releaseSyncLock: async () => {},
+        };
+        const service = new GitService(stateStub);
+        (service as any).isOnline = async () => true;
+        (service as any).reconcilePointersFilesystem = async () => {};
+        const originalFetch = dugiteGit.fetchOrigin;
+        const originalFastForward = dugiteGit.fastForward;
+        const originalPush = dugiteGit.push;
+        (dugiteGit as any).fetchOrigin = async () => {};
+        (dugiteGit as any).fastForward = async () => {
+            throw new Error("divergent histories");
+        };
+        (dugiteGit as any).push = async () => {};
+
+        try {
+            const result = await service.syncChanges(
+                dir,
+                { username: "oauth2", password: "token" },
+                { name: "Sync test", email: "test@example.invalid" }
+            );
+            assert.strictEqual(result.hadConflicts, true);
+            assert.strictEqual(git("rev-parse", "HEAD"), localHead);
+            assert.ok(pointerPaths.every((filepath) =>
+                !result.allChangedFilePaths?.includes(filepath) &&
+                !result.remoteChangedFilePaths?.includes(filepath) &&
+                !result.conflicts?.some((conflict) => conflict.filepath === filepath)
+            ));
+
+            await service.completeMerge(
+                dir,
+                { username: "oauth2", password: "token" },
+                { name: "Sync test", email: "test@example.invalid" },
+                []
+            );
+            const [, firstParent, secondParent] = git("rev-list", "--parents", "-n", "1", "HEAD").split(" ");
+            assert.strictEqual(firstParent, localHead);
+            assert.strictEqual(secondParent, remoteHead);
+            const mergedEntries = await dugiteGit.blobEntriesAtRef(dir, "HEAD");
+            const remoteEntries = await dugiteGit.blobEntriesAtRef(dir, remoteHead);
+            assert.ok(mergedEntries.has("local.txt"));
+            assert.ok(pointerPaths.every((filepath) =>
+                mergedEntries.get(filepath)?.oid === remoteEntries.get(filepath)?.oid
+            ));
+        } finally {
+            (dugiteGit as any).fetchOrigin = originalFetch;
+            (dugiteGit as any).fastForward = originalFastForward;
+            (dugiteGit as any).push = originalPush;
+        }
+    });
+});
