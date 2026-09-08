@@ -3,11 +3,53 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { execFileSync } from "child_process";
+import { resolveEmbeddedGitDir, resolveGitBinary } from "dugite";
 import * as vscode from "vscode";
 import * as dugiteGit from "../../../git/dugiteGit";
 import * as nativeGit from "../../../git/dugiteGitNative";
 import { GitService } from "../../../git/GitService";
 import { findRemoteEquivalentAdditions, findUnchangedSyncFiles } from "../../../git/unchangedSyncFiles";
+
+/**
+ * Locate a Git installation laid out the way dugite expects (`cmd/git.exe` on
+ * Windows, `bin/git` elsewhere). The `git` on PATH can live deeper inside the
+ * installation — Git Bash on Windows resolves to `mingw64/bin/git.exe` — so
+ * walk up from it until dugite's binary path exists. Fall back to dugite's
+ * embedded git when the system installation has an unfamiliar layout.
+ */
+function locateNativeGit(): { localGitDir: string; execPath: string } {
+    const locator = process.platform === "win32" ? "where.exe" : "which";
+    const onPath = execFileSync(locator, ["git"], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
+    const candidates: string[] = [];
+    for (let dir = path.dirname(onPath); ; dir = path.dirname(dir)) {
+        candidates.push(dir);
+        if (path.dirname(dir) === dir) { break; }
+    }
+    candidates.push(resolveEmbeddedGitDir());
+    const localGitDir = candidates.find((dir) => fs.existsSync(resolveGitBinary(dir)));
+    if (!localGitDir) {
+        throw new Error(`No dugite-compatible Git installation found from ${onPath}`);
+    }
+    const execPath = execFileSync(resolveGitBinary(localGitDir), ["--exec-path"], { encoding: "utf8" }).trim();
+    return { localGitDir, execPath };
+}
+
+/**
+ * Native git writes loose objects read-only, and Windows refuses to delete a
+ * read-only file until the attribute is cleared. Make the tree writable first.
+ */
+function removeRepository(dir: string): void {
+    const makeWritable = (entry: string): void => {
+        const stat = fs.lstatSync(entry);
+        if (stat.isSymbolicLink()) { return; }
+        fs.chmodSync(entry, stat.isDirectory() ? 0o777 : 0o666);
+        if (stat.isDirectory()) {
+            for (const child of fs.readdirSync(entry)) { makeWritable(path.join(entry, child)); }
+        }
+    };
+    makeWritable(dir);
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+}
 
 suite("GitService: unchanged sync file verification", function () {
     this.timeout(120000);
@@ -29,14 +71,13 @@ suite("GitService: unchanged sync file verification", function () {
         git("config", "user.name", "Sync verification");
         git("config", "user.email", "test@example.invalid");
         git("config", "core.autocrlf", "false");
-        const locator = process.platform === "win32" ? "where.exe" : "which";
-        const executable = execFileSync(locator, ["git"], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
-        dugiteGit.setGitBinaryPath(path.dirname(path.dirname(executable)), execFileSync(executable, ["--exec-path"], { encoding: "utf8" }).trim());
+        const { localGitDir, execPath } = locateNativeGit();
+        dugiteGit.setGitBinaryPath(localGitDir, execPath);
     });
     teardown(() => {
         dugiteGit.setForceBuiltin(false);
         dugiteGit.useEmbeddedGitBinary();
-        fs.rmSync(dir, { recursive: true, force: true });
+        removeRepository(dir);
     });
 
     for (const builtin of [false, true]) {
